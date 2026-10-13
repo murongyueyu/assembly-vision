@@ -75,6 +75,13 @@ def main() -> int:
     ap.add_argument("--frames", type=int, default=20)
     ap.add_argument("--no-depth", action="store_true")
     ap.add_argument("--out", default="")
+    # ★ 单帧诊断：跳过采集，直接把装配位的**中间量**打出来后退出。
+    #   为什么要它：c5 第二步的产出（ring/hub/cap 覆盖率、辐条峰数）
+    #   全是"黑盒数字" —— 一旦是 0 或 nan，完全看不出是
+    #   ①装配体没被检出 ②ROI 位置偏了 ③辐条环带不对 ④光照不行。
+    #   实测踩过：辐条峰数众数 0、轮毂覆盖率 nan，只能靠猜。
+    ap.add_argument("--diag", action="store_true",
+                    help="单帧诊断装配位：打印检出情况/半径/各半径带峰值后退出")
     args = ap.parse_args()
 
     cam, wp, calib = load_all(args.camera, args.workpiece)
@@ -87,6 +94,120 @@ def main() -> int:
     q = Qualifier(wp, tray, calib)
 
     src = open_source(cam, args)
+
+    if args.diag:
+        # ── 装配位单帧诊断 ────────────────────────────────────────
+        frame = None
+        for _ in range(40):
+            fr, ff = grab_small(src)
+            if fr is not None and float(fr.mean()) > 20:
+                frame, f = fr, ff
+                break
+        if frame is None:
+            print("★ 抓不到有效帧"); return 1
+        scale = f.scale
+        mmpp = tray.mm_per_px(scale)
+        res, pose, psrc, _ident = q.segment_with_roi(seg, frame, scale=scale)
+        poly = tray.assembly_polygon_px(scale)
+        c_nom = poly.mean(axis=0)
+        print()
+        print("=" * 78)
+        print(" 装配位单帧诊断   图 %s   mm/px=%.4f   位姿 src=%s"
+              % (frame.shape[:2], mmpp, psrc))
+        if pose is not None and getattr(pose, "ok", False):
+            ac = pose.apply(np.array([wp.get("assembly.center", [-65.0, 80.0])], float))[0]
+            c_cor = tray.mm_to_px(ac.reshape(1, 2), scale)[0]
+            print("   θ=%+.1f° Δ=(%+.1f,%+.1f)mm  用件数=%d"
+                  % (pose.theta_deg, pose.tx, pose.ty, pose.n_used))
+            print("   装配位中心：标称 px(%.0f,%.0f)  位姿修正后 px(%.0f,%.0f)  差 %.1f px"
+                  % (c_nom[0], c_nom[1], c_cor[0], c_cor[1],
+                     float(np.hypot(c_cor[0] - c_nom[0], c_cor[1] - c_nom[1]))))
+        print("=" * 78)
+        # ① 装配位 ROI 内检出了什么
+        blob = q._blob_in(res, poly)
+        print(" ① 装配位 ROI 内的黄铜块：%s" % ("无" if blob is None else ""))
+        if blob is not None:
+            bb = blob.bbox
+            print("      面积 %d px² = %.0f mm²   质心 px(%.1f,%.1f)  bbox %dx%d"
+                  % (blob.area_px, blob.area_px * mmpp * mmpp,
+                     blob.centroid[0], blob.centroid[1], bb[2], bb[3]))
+            print("      等效直径 %.1f mm（轮盘外径应约 74mm）"
+                  % (2.0 * np.sqrt(blob.area_px * mmpp * mmpp / np.pi)))
+        # ② check_assembly 的产出
+        a = q.check_assembly(res, scale)
+        print()
+        print(" ② check_assembly 产出：")
+        print("      center_px=%s  ring=%.3f  hub=%.3f  cap=%.3f  spoke=%s"
+              % (None if a.center_px is None else
+                 "(%.0f,%.0f)" % (a.center_px[0], a.center_px[1]),
+                 a.ring_coverage, a.hub_coverage, a.cap_coverage,
+                 None if a.spoke is None else "count=%d ok=%s" % (a.spoke.count, a.spoke.ok)))
+        # ③ 各半径带的峰值（看辐条到底在哪个半径上）
+        if blob is not None:
+            print()
+            print(" ③ 以装配体质心为中心的**各半径带**峰数（找辐条在哪）：")
+            print("      %-16s %-8s %-9s %s" % ("半径带 mm", "峰数", "对比度", "峰角度"))
+            for lo in (8, 12, 16, 20, 24, 28, 32):
+                hi = lo + 8.0
+                prof = polar_profile(res.brass_mask, blob.centroid,
+                                     lo / mmpp, hi / mmpp, n_angles=720, n_radii=9)
+                pk = count_peaks(prof, k_mad=3.0, min_width_deg=6.0)
+                med = float(np.median(prof)); peakv = float(np.percentile(prof, 95.0))
+                angs = [round(p[0], 1) for p in pk][:10]
+                mark = "  ← 8 峰" if len(pk) == 8 else ""
+                print("      %-16s %-8d %-9.2f %s%s"
+                      % ("%d~%d" % (lo, hi), len(pk), peakv - med, angs, mark))
+        # ④ 画面内所有黄铜块
+        print()
+        print(" ④ 画面内所有黄铜连通域（含 ROI 外的）：")
+        for b in (res.brass_blobs or []):
+            mm = tray.px_to_mm(np.array([[b.centroid[0], b.centroid[1]]], float), scale)[0]
+            inside = "装配位内" if q._blob_in(res, poly) is b else ""
+            print("      %6.0fpx²=%6.0fmm²  质心tray-mm(%6.1f,%6.1f)  %s"
+                  % (b.area_px, b.area_px * mmpp * mmpp, mm[0], mm[1], inside))
+
+        # ⑤ 存一张标注图：ROI + 分割前景 + 检出块 + 各半径圈
+        #   ★ 这些数字一旦自相矛盾（比如 hub 实心但 spoke=1），
+        #     看一张图比继续推演快得多。实测踩过这个。
+        try:
+            import cv2
+            from assemvision.imgio import imwrite_safe
+            vis = frame.copy()
+            ov = frame.copy()
+            ov[res.brass_mask > 0] = (0, 255, 255)
+            vis = cv2.addWeighted(vis, 0.6, ov, 0.4, 0)
+            cv2.polylines(vis, [np.round(poly).astype(np.int32).reshape(-1, 1, 2)],
+                          True, (0, 0, 255), 2)
+            if blob is not None:
+                c = blob.centroid
+                # 画各关键半径圈，直接看出"辐条/球头/外圈"各自在哪
+                for r_mm, col in ((12.5, (255, 0, 0)),      # r_cap 顶盖
+                                  (13.0, (255, 128, 0)),    # r_hub 轮毂
+                                  (26.0, (0, 255, 0)),      # ring_band 内
+                                  (30.0, (0, 255, 0)),      # ring_band 外
+                                  (33.0, (255, 0, 255)),    # spoke_band_outer 内
+                                  (37.5, (255, 0, 255)),    # spoke_band_outer 外
+                                  (45.0, (0, 165, 255))):   # assembly.radius
+                    rr = r_mm / mmpp
+                    cv2.circle(vis, (int(round(c[0])), int(round(c[1]))),
+                               int(round(rr)), col, 1)
+                cv2.drawMarker(vis, (int(round(c[0])), int(round(c[1]))),
+                               (255, 255, 255), cv2.MARKER_CROSS, 14, 2)
+            pc = np.round(c_nom).astype(int)
+            cv2.drawMarker(vis, (int(pc[0]), int(pc[1])), (255, 0, 255),
+                           cv2.MARKER_TILTED_CROSS, 18, 2)
+            cv2.putText(vis, "red=ROI  magenta+=nominal_center  circles=12.5/26/30/33/37.5/45mm",
+                        (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3)
+            cv2.putText(vis, "red=ROI  magenta+=nominal_center  circles=12.5/26/30/33/37.5/45mm",
+                        (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+            outp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "data", "refs", "c5_assembly_diag.png")
+            print()
+            print(" ⑤ 已存标注图:", imwrite_safe(outp, vis), outp)
+        except Exception as e:                                   # noqa: BLE001
+            print(" ⑤ 存图失败:", e)
+        src.close()
+        return 0
 
     print("=== 第一步：料盘里的轮盘 —— 扫优「数辐条」用的环带 ===")
     print("请把【一个完整的轮盘组件】放在它的料位里，保持不动。")
