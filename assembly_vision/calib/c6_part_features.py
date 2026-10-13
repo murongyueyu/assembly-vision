@@ -297,7 +297,11 @@ def main() -> int:
 
     if out_tpl:
         cal.set("part_templates", out_tpl)
-        cal.set("part_templates.feature_weights", FEATURE_WEIGHTS)
+        # ★ 权重快照写到**顶层** part_id 段，不要塞进 part_templates。
+        #   塞进去它就成了 part_templates 的一个"键"，_classifier() 遍历时
+        #   要靠"没有 ranges 就跳过"才不出错 —— 能跑，但语义很脏，
+        #   排查时还会误以为多了一个模板。实测踩过。
+        cal.set("part_id.feature_weights", FEATURE_WEIGHTS)
         print()
         print("已写入:", save_calib(cal, args.out))
     return 0
