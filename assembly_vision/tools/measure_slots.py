@@ -225,30 +225,58 @@ def main() -> int:
     print("=" * 74)
     print(" 各零件在【当前 tray-mm 坐标系】里的质心（%d 帧中值）" % got_frames)
     print("=" * 74)
-    print("  %-11s %-8s %-20s %-20s %s"
-          % ("零件", "样本", "实测质心 tray-mm", "配置里的标称值", "偏差"))
+    print("  %-11s %-7s %-19s %-19s %-9s %s"
+          % ("零件", "样本", "实测质心", "配置里的标称值", "原始偏差", "去掉位姿后"))
     suggests = {}
     for s in wp.get("slots"):
         part = str(s.get("part", ""))
         rows = found.get(part, [])
         old = s.get("center", [0.0, 0.0])
         if not rows:
-            print("  %-11s %-8s ★ 没识别到 ---- 该槽是不是没放件？" % (part, 0))
+            print("  %-11s %-7s ★ 没识别到 ---- 该槽是不是没放件？" % (part, 0))
             continue
         mx = float(np.median([r[0] for r in rows]))
         my = float(np.median([r[1] for r in rows]))
-        d = float(np.hypot(mx - old[0], my - old[1]))
-        flag = "" if d < 5.0 else ("  ← 偏 %.0fmm，建议更新" % d)
-        print("  %-11s %-8d (%7.1f,%7.1f)     (%7.1f,%7.1f)   %.1fmm%s"
-              % (part, len(rows), mx, my, old[0], old[1], d, flag))
-        suggests[part] = (round(mx, 1), round(my, 1), d)
+        d_raw = float(np.hypot(mx - old[0], my - old[1]))
+        # ★★ 关键：位姿已经把"料盘整体位移"吃掉了。
+        #    所以"实测 vs 标称"里含着那个位移，**不能直接当"标称值错了多少"**。
+        #    要先把实测值逆变换回标称系，剩下的才是真正的标称偏差。
+        #    实测踩过：这里只报原始偏差（9~17mm），看着像标称值全错，
+        #    实际去掉位姿后平均只有 4mm —— 标称值本来就是对的。
+        if pose is not None and getattr(pose, "ok", False):
+            back = pose.inverse_apply(np.array([[mx, my]], dtype=np.float64))[0]
+            d_true = float(np.hypot(back[0] - old[0], back[1] - old[1]))
+            tip = "%.1fmm %s" % (d_true, "" if d_true < 5.0 else "← 建议更新")
+        else:
+            d_true = d_raw
+            tip = "（无位姿，等同原始）"
+        flag = "" if d_true < 5.0 else "  ← 建议更新"
+        print("  %-11s %-7d (%6.1f,%6.1f)   (%6.1f,%6.1f)   %5.1fmm   %s"
+              % (part, len(rows), mx, my, old[0], old[1], d_raw, tip))
+        # 只有"去掉位姿后仍偏得大"才真的需要改标称值
+        if d_true >= 5.0:
+            suggests[part] = (round(float(back[0]), 1), round(float(back[1]), 1), d_true)
 
-    if not suggests:
+    if pose is not None and getattr(pose, "ok", False):
+        print()
+        print("  ★ 位姿 θ=%+.1f° Δ=(%+.1f,%+.1f)mm 已从上面的判定里扣除；"
+              % (pose.theta_deg, pose.tx, pose.ty))
+        print("    『去掉位姿后』< 5mm 就说明**标称值本来就是对的**，")
+        print("    原始偏差大只是料盘整体挪了（位姿补偿已在工作）。")
+
+    # ★ 注意区分两种情况：
+    #   suggests 空 **不等于** 没识别到 —— 也可能是"标称值本来就对"（都不需要更新）。
+    #   实测踩过：把两者混在一起会打出"一个零件都没识别到"的误导信息。
+    if not found:
         print("\n★ 一个零件都没识别到，检查：放了件吗？光照/曝光正常吗？")
         return 1
 
     print()
     print("=" * 74)
+    if not suggests:
+        print(" ✓ 所有零件的『去掉位姿后偏差』都 < 5mm —— **标称值不需要更新**。")
+        print("   （原始偏差大是料盘整体挪动，位姿补偿已经处理了）")
+        return 0
     if args.apply:
         for slot in wp.get("slots"):
             part = str(slot.get("part", ""))
