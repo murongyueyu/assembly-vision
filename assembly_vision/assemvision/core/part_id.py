@@ -396,8 +396,27 @@ def max_coverage_for(slot_id: str, templates: Sequence[PartTemplate],
         立柱 1311mm² / 槽 91x28   -> 最大只有 **0.51**（细杆 vs 宽胶囊槽）
       用一个统一的 cov_present=0.45 去卡，立柱永远只能得 0.40 —— **必然误判**。
 
-    做法：取该槽模板里 area_mm2 区间的**上界**（"零件完整"时的面积），
+    做法：取该槽模板里 area_mm2 区间的**下界**（"零件完整但分割最不利"时的面积），
           除以槽的物理面积，再夹到 (0, 1]。
+
+    ★★ 为什么必须用**下界**而不是上界（实测踩过，是我自己改坏的）：
+      曾用上界 —— 逻辑是"零件完整在位时的最大面积"。但那算出来的阈值
+      **比实际能测到的覆盖率还高**，必然误判：
+
+      ```
+      立柱：模板区间 [751.8, 1396.2]，槽 3280mm²
+        用上界 1396 -> max_cov 0.426 -> 阈值 thr_present 0.192
+        用下界  752 -> max_cov 0.229 -> 阈值 thr_present 0.103
+        而**实测覆盖率只有 0.131**（分割只切得到高光带，面积 667~903mm²）
+      -> 用上界时 0.131 < 0.192 **差 32%**，立柱 20 帧全被拒、c4 采不到样本
+      ```
+
+      阈值的作用是"判断零件在不在"，必须按**最坏情况**定：
+      模板区间的下界本身就是"已标定过的、仍算合格的最小面积"。
+      用上界等于要求"每次都测到最大面积"，与实测散布直接矛盾。
+
+      ★ 区间下界仍比最坏实测低不少，所以有足够余量：
+        立柱下界 752 vs 实测最小 667 —— 但仍过了（0.131 > 0.103）。
     """
     tpl = next((t for t in templates if t.part
                 and slot_id and _part_of_slot(t, slot_id)), None)
@@ -410,7 +429,7 @@ def max_coverage_for(slot_id: str, templates: Sequence[PartTemplate],
     slot_mm2 = slot_area_px(tray_map, slot_id, scale) * mmpp * mmpp
     if slot_mm2 <= 1e-9:
         return 1.0
-    return float(min(1.0, max(0.05, float(rng[1]) / slot_mm2)))
+    return float(min(1.0, max(0.05, float(rng[0]) / slot_mm2)))
 
 
 def _part_of_slot(tpl: PartTemplate, slot_id: str) -> bool:
