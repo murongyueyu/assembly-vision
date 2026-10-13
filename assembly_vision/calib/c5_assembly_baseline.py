@@ -98,7 +98,11 @@ def main() -> int:
         frame, f = grab_small(src)
         if frame is None:
             break
-        res = seg.segment(frame, scale=f.scale)
+        # ★ 用工位 ROI 分割（黄铜只在"料盘 + 装配位"外扩范围内检测）。
+        #   实测踩过：木桌的 HSV 与黄铜重叠，不限制范围时整块木桌被判成黄铜，
+        #   产生 13269mm² 的假连通域（真零件最大 3281mm²），
+        #   会把"轮盘槽里有没有前景"这条判断带偏。见 AGENTS.md 2.12。
+        res, _p, _s, _i = q.segment_with_roi(seg, frame, scale=f.scale)
         blob = q._blob_in(res, tray.slot_polygon_px("slot_wheel", f.scale))
         if blob is not None:
             mask, center = res.brass_mask, blob.centroid
@@ -129,7 +133,9 @@ def main() -> int:
         frame, f = grab_small(src)
         if frame is None:
             break
-        res = seg.segment(frame, scale=f.scale)
+        # ★ 同样带工位 ROI：装配位在料盘左侧，木桌的假黄铜会污染
+        #   ring_coverage / hub_coverage / cap_coverage 三个基线值。
+        res, _p, _s, _i = q.segment_with_roi(seg, frame, scale=f.scale)
         a = q.check_assembly(res, f.scale)
         if a.center_px is None:
             continue
@@ -153,7 +159,7 @@ def main() -> int:
     # 装配体上的辐条环带（球头端）
     frame, f = grab_small(src)
     if frame is not None:
-        res = seg.segment(frame, scale=f.scale)
+        res, _p, _s, _i = q.segment_with_roi(seg, frame, scale=f.scale)
         blob = q._blob_in(res, tray.assembly_polygon_px(f.scale))
         if blob is not None:
             b2 = sweep_band(res.brass_mask, blob.centroid, mmpp, required=8,
