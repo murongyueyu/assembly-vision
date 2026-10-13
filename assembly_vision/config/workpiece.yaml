@@ -109,6 +109,17 @@ segment:
 check:
   coverage_present: 0.45
   coverage_absent: 0.15
+  # ★ 覆盖率阈值按槽缩放（coverage_scale_by_max）。
+  #   依据：覆盖率 = 零件面积 / 槽面积，**每种零件天生不同** ——
+  #     轮盘/底座/顶盖 ~0.95+（圆件填满圆槽）
+  #     立柱只有 ~0.19~0.43（细杆 vs 91x28 的宽胶囊槽）
+  #   实测算出的缩放系数（max_coverage_for）：
+  #     slot_wheel 0.846 -> 阈值 0.380    slot_column 0.426 -> 0.192
+  #     slot_cap   0.974 -> 阈值 0.438    slot_base   1.000 -> 0.450
+  #   ★ 立柱的余量很薄（实测覆盖率 0.198 vs 阈值 0.192，只差 0.006）——
+  #     因为 max_coverage_for 用的是**模板面积**（1074mm²），
+  #     而真实分割只切得到高光带（实测 667mm², -38%）。
+  #     若立柱再被判"存疑"，优先查这里。
   coverage_scale_by_max: true
   drone_consistency: 2
   spokes:
@@ -119,6 +130,10 @@ check:
     peak_k_mad: 3.0
     min_peak_width_deg: 6.0
   column:
+    # ★ 立柱形状检查（_check_column_shape）。立柱是**弯曲+锥形+台阶**的机加工件
+    #   （不是圆柱），所以这两个阈值要留足余量：
+    #   aspect_min=3.0：实测细长比 4.74~5.04（远高于 3.0，安全）
+    #   min_length_mm=40：实测最长边约 51mm（安全）
     aspect_min: 3.0
     min_length_mm: 40.0
     wheel_height_tol_mm: 15.0
@@ -126,6 +141,15 @@ check:
   - 顶盖是否拧紧（行程 1-2 mm，与深度噪声同量级）
   - 螺纹牙、小于 1 mm 的划痕与毛刺（受 GSD 限制）
   - 底座与工件内部结构（俯视不可见）
+
+# ── 零件识别（旋转不变特征向量，见 assemvision/core/part_id.py）──
+# ★ 这个键以前**不在配置里**，代码靠 get(..., 0.55) 的默认值兜着 ——
+#   能跑但"配置里没有"会让排查时误以为配置写错了。补上并写清依据。
+part_id:
+  # 识别得分门槛。低于它就判"认不出"（**宁可认不出，也不瞎猜**）。
+  #   实测得分：轮盘 0.74~1.00、立柱 0.70~1.00、顶盖 0.73~1.00、底座 0.80~1.00
+  #   取 0.55 留足余量；调高会漏认，调低会误认。
+  min_score: 0.55
 operations:
 - id: op1
   name: 放置底座圆盘

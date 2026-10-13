@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Dict
 
 import numpy as np
 
@@ -40,6 +41,13 @@ def main() -> int:
     ap.add_argument("--workpiece", default="")
     ap.add_argument("--frames", type=int, default=20)
     ap.add_argument("--out", default="")
+    # ★ 单帧诊断：抓一帧，把每个槽的**中间量**全打出来
+    #   （覆盖率、阈值、识别结果、得分、被拒理由）后退出。
+    #   为什么要它：c4 采不到样本时，光看"被拒 20 帧"完全不知道该改哪里，
+    #   而且 verdict=NG 有三条路径（覆盖率 / 识别 / 形状检查），
+    #   静态推理到不了底。一帧诊断直接把答案摆出来，不用反复猜。
+    ap.add_argument("--diag", action="store_true",
+                    help="单帧诊断：打印各槽中间量后退出（不采集、不写文件）")
     args = ap.parse_args()
 
     cam, wp, calib = load_all(args.camera, args.workpiece)
@@ -56,10 +64,72 @@ def main() -> int:
     src = open_source(cam, args)
     acc = {s["id"]: [] for s in tray.slots}
 
+    if args.diag:
+        # ── 单帧诊断 ──────────────────────────────────────────────
+        # 预热（相机刚改完曝光头几帧是全黑）
+        frame = None
+        for _ in range(40):
+            fr, _f = grab_small(src)
+            if fr is not None and float(fr.mean()) > 20:
+                frame = fr
+                break
+        if frame is None:
+            print("★ 抓不到有效帧")
+            return 1
+        res, pose, psrc, ident = q.segment_with_roi(seg, frame, scale=1.0)
+        slots = q.check_slots(res, 1.0, bgr=frame)
+        print()
+        print("=" * 78)
+        print(" 单帧诊断：图 %s   位姿 src=%s" % (frame.shape[:2], psrc))
+        if pose is not None and getattr(pose, "ok", False):
+            print("   θ=%+.1f°  Δ=(%+.1f,%+.1f)mm  用件数=%d  残差=%.1fmm"
+                  % (pose.theta_deg, pose.tx, pose.ty, pose.n_used, pose.residual_mm))
+        print("=" * 78)
+        print("  %-13s %-8s %-22s %-11s %-7s %s"
+              % ("槽位", "覆盖率", "阈值(absent/present)", "识别为", "得分", "判定"))
+        for sr in slots:
+            f = sr.features
+            ta = f.get("cov_thr_present", float("nan"))
+            tb = ta * (q.cov_absent / q.cov_present) if q.cov_present else float("nan")
+            print("  %-13s %-8.3f [%.3f, %.3f]%s%-11s %-7.2f %s"
+                  % (sr.slot_id, sr.coverage, tb, ta, " " * 5,
+                     f.get("id_part") or "(认不出)", f.get("id_score", 0.0), sr.verdict))
+            if sr.reasons:
+                for r in sr.reasons:
+                    print("                  ↳ %s" % r)
+            # 立柱多打几个关键量，便于判断是哪条判据卡的
+            if sr.slot_id == "slot_column":
+                mmpp = tray.mm_per_px(1.0)
+                print("                  ↳ 细长比=%.2f (需>=%.1f)   长度=%.1fmm (需>=%.1fmm)"
+                      % (f.get("elongation", 0.0), q.col.get("aspect_min", 3.0),
+                         f.get("length_mm", f.get("rect_w", 0.0) * mmpp),
+                         q.col.get("min_length_mm", 40.0)))
+                print("                  ↳ 面积=%.0fmm²  length_mm=%.1f  short_side=%.1f"
+                      % (f.get("area_mm2", 0.0), f.get("length_mm", 0.0),
+                         f.get("short_side_mm", 0.0)))
+        # 顺便把画面里所有检出的黄铜块列一遍（看立柱到底有没有被切出来）
+        print()
+        print("  画面内所有黄铜连通域：")
+        mmpp = tray.mm_per_px(1.0)
+        for b in (res.brass_blobs or []):
+            mm = tray.px_to_mm(np.array([[b.centroid[0], b.centroid[1]]], float), 1.0)[0]
+            ft = getattr(b, "features", {}) or {}
+            print("    面积 %5.0fpx²=%6.0fmm²  质心(%6.1f,%6.1f)  elong %5.2f  solid %.2f"
+                  % (b.area_px, b.area_px * mmpp * mmpp, mm[0], mm[1],
+                     ft.get("elongation", 0.0), ft.get("solidity", 0.0)))
+        src.close()
+        return 0
+
     print("请把【一整套已知合格的标准件】按料位放好，保持不动。")
     ask("准备好了按回车开始采集…")
     n = 0
     reject = {s["id"]: 0 for s in tray.slots}
+    # ★★ 记录"为什么被拒"。
+    #   原来只数被拒帧数，排查时完全看不出原因 ——
+    #   实测踩过：立柱 20 帧全被拒，打印出来的只有"可能原因①②③"，
+    #   而真正的原因是 verdict=NG 的具体理由（覆盖率/识别/形状），
+    #   逼得人只能猜。这里把 reasons 也收下来，直接给出答案。
+    why: Dict[str, Dict[str, int]] = {s["id"]: {} for s in tray.slots}
     while n < args.frames:
         frame, f = grab_small(src)
         if frame is None:
@@ -82,6 +152,10 @@ def main() -> int:
                 acc[sr.slot_id].append((sr.coverage, sr.features))
             else:
                 reject[sr.slot_id] = reject.get(sr.slot_id, 0) + 1
+                # 归并原因（去掉具体数值，便于计数）
+                key = "；".join(sr.reasons) if sr.reasons else "(无理由)"
+                key = key.split("（")[0].strip() or key
+                why[sr.slot_id][key] = why[sr.slot_id].get(key, 0) + 1
         n += 1
         if n % 5 == 0:
             print("  已采 %d/%d 帧，各槽有效样本 %s"
@@ -95,8 +169,11 @@ def main() -> int:
         if len(samples) < max(3, args.frames // 4):
             nr = reject.get(sid, 0)
             print(" !! %s 有效样本太少（%d），被拒 %d 帧" % (sid, len(samples), nr))
-            print("    可能原因：① 该槽没放件  ② ROI 位置不对")
-            print("              ③ 零件特征与 part_templates 不符（放错零件？）")
+            # ★ 直接给出真实原因，别再让人猜
+            if why.get(sid):
+                print("    ★ 实际被拒原因（按出现次数）：")
+                for k, cnt in sorted(why[sid].items(), key=lambda kv: -kv[1]):
+                    print("       %3d 次  %s" % (cnt, k))
             print("    排查：跑 tools/tune_slots.py 看该槽的覆盖率与识别结果")
             ok_all = False
             continue
