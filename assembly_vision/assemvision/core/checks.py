@@ -60,9 +60,15 @@ class Qualifier:
                 for part, v in stored.items():
                     if not isinstance(v, dict) or "ranges" not in v:
                         continue
+                    # ★ 逐零件权重：立柱这种细长弯曲件要对 area/solidity 降权，
+                    #   而轮盘/底座仍靠 solidity 区分 —— 必须能按零件覆盖。
+                    #   实测踩过：这里漏传 weights，配置里写死了也不生效。
+                    w = v.get("weights")
                     tpls.append(PartTemplate(
                         part=part, name=str(v.get("name", "")),
-                        ranges={k: tuple(x) for k, x in v["ranges"].items()}))
+                        ranges={k: tuple(x) for k, x in v["ranges"].items()},
+                        weights=({k: float(x) for k, x in w.items()}
+                                 if isinstance(w, dict) else {})))
         except Exception:                                    # noqa: BLE001
             tpls = None
         if not tpls:

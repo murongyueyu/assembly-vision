@@ -44,18 +44,22 @@ import numpy as np
 #   · area_frac 依赖 ROI 准确，权重压低一点
 FEATURE_WEIGHTS: Dict[str, float] = {
     "holes": 2.0,
-    # ★★ solidity（凸包实度）是**区分轮盘与底座的最强特征**，权重必须高：
-    #     轮盘 0.79（辐条之间的缺口把实度拉低）
-    #     底座 0.96（实心圆盘）
-    #     差 0.17，非常清晰。
-    #   而两者的 **area_mm2 只差 1.04 倍**（3281 vs 3149），几乎分不开 ——
-    #   实测踩过：分类器把底座误判成轮盘，位姿估计随后算出荒谬的 48° 旋转。
-    #   所以这里把 solidity 提到比 area_mm2 更高。
-    "solidity": 3.0,
-    "elongation": 2.0,
-    "circularity": 1.5,
-    # ★ 物理面积（mm²）：只用来区分**量级差很多**的件（立柱 1078 vs 顶盖 555）。
-    #   轮盘与底座只差 4%，指望它区分是错的，所以权重压低。
+    # ★★ length_mm（最长边物理长度）：**对细长/弯曲/锥形件唯一可信的特征**。
+    #   它由轮廓上相隔最远的两个点决定 —— 反光只影响中间段的宽度，
+    #   **两端点永远在**。合成实验：只改"被照亮宽度"时它只变 4%。
+    #   而 area 变 51%、circularity 变 39%、solidity 变 21%（见 features_from_blob 注释）。
+    "length_mm": 2.5,
+    # ★★ short_side_mm（短边物理长度）：圆件上很稳，区分"同形状不同大小"。
+    "short_side_mm": 1.5,
+    # solidity（凸包实度）：**圆件上稳（2.2%）、细长弯曲件上不稳（21%）**。
+    #   实测教训：一开始误以为它全局最稳并给了 3.0 权重 ——
+    #   那个 2.2% 是拿圆件平均出来的，对立柱恰恰是错的。
+    #   所以默认权重降到 2.0，并在 part_templates 里给立柱单独设 0（见 per-part weights）。
+    "solidity": 2.0,
+    "elongation": 1.5,
+    "circularity": 1.0,
+    # ★ 物理面积（mm²）：含宽度因子，对细长/弯曲件最不稳（51%）。
+    #   只用来区分**量级差很多**的件（立柱 735 vs 顶盖 555 这种就分不开）。
     "area_mm2": 0.8,
     # ── 色域特征（见 color_features）──────────────────────────
     # ★ 颜色**天然旋转不变**（转多少度，像素的 H/S/V 都不变），
@@ -324,6 +328,27 @@ def features_from_blob(blob, roi_area_px: Optional[float] = None,
     area = float(getattr(blob, "area_px", f.get("area_px", 0.0)) or 0.0)
     if mm_per_px and mm_per_px > 0:
         f["area_mm2"] = area * float(mm_per_px) ** 2
+        # ★★ length_mm：**最长边（两端点距离）的物理长度**。
+        #
+        # 为什么专门加这个（实测教训）：立柱是**弯曲 + 锥形 + 两端带台阶**的
+        # 机加工件（手机照片确认）。它的中段是锥形回转体 + 抛光纵向亮纹，
+        # 分割**只切得到顶面那条高光带**，所以：
+        #
+        #     长边变化  -1.7%   ✓ 稳（由两端最远点决定，端点永远在）
+        #     宽边变化 -30.3%   ✗ 漂（取决于哪条亮纹被切中）
+        #     面积变化 ±30~50%  ✗ 漂（含宽度因子）
+        #
+        # 合成实验量化（改变"被照亮的宽度比例"）：
+        #     feret/rect_long 3.9~4.0% ✓ | elong 18% | solidity 21%
+        #     rect_short 22% | circularity 39% | area 51.5% ✗
+        #
+        # **结论：对细长/弯曲/锥形件，只有"长度"类特征可信。**
+        # `_band_score` 对长方形也是拿最长边当长，所以直接用 max(rect_w, rect_h)。
+        rw_mm = float(f.get("rect_w", 0.0)); rh_mm = float(f.get("rect_h", 0.0))
+        f["length_mm"] = max(rw_mm, rh_mm) * float(mm_per_px)
+        # short_side_mm：短边物理长度。含宽度因子，对立柱不稳，但
+        # **圆件上很稳**，用来区分顶盖(Ø25) 与底座(Ø65) 一类"同形状不同大小"。
+        f["short_side_mm"] = min(rw_mm, rh_mm) * float(mm_per_px)
     if roi_area_px and roi_area_px > 0:
         f["area_frac"] = area / float(roi_area_px)
     else:
