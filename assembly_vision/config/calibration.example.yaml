@@ -1,0 +1,74 @@
+# 标定产物的结构示例。
+# 正式文件由 calib/ 下的脚本自动生成：config/calibration.yaml
+# （本文件只是模板 + 说明，程序不会读它）
+
+
+meta:
+  created_at: "2026-01-01T00:00:00"
+  camera: HBV-1714-2 S2.0
+  note: 相机被移动过就必须重跑 c2/c3/c5
+
+# ── c1_measure_fov.py 产出 ─────────────────────────────────
+fov:
+  work_distance_mm: 400.0
+  gsd_mm_per_px: 0.402        # 地面采样距离（实测）
+  focal_mm_derived: 3.70      # 由 GSD 反推的真实焦距（★ 用它核对规格书）
+  frame_width_mm: 514.6       # 1280 × GSD
+  frame_height_mm: 386.0
+
+# ── c2_stereo.py 产出 ──────────────────────────────────────
+stereo:
+  baseline_mm: 120.0          # ★ 实测/标定得到的基线
+  image_size: [1280, 960]     # 单眼分辨率
+  K_left:  [[0,0,0],[0,0,0],[0,0,0]]      # 3x3 内参
+  D_left:  [0,0,0,0,0]                    # 畸变系数
+  K_right: [[0,0,0],[0,0,0],[0,0,0]]
+  D_right: [0,0,0,0,0]
+  R: [[0,0,0],[0,0,0],[0,0,0]]            # 右相对左的旋转
+  T: [120.0, 0.0, 0.0]                    # 右相对左的平移（模 = 基线）
+  reprojection_rms_px: 0.0
+  rectify:
+    map1_l: ""                # 矫正映射表 .npz 路径
+    map2_l: ""
+    map1_r: ""
+    map2_r: ""
+
+# ── c3_tray_homography.py 产出 ─────────────────────────────
+tray_map:
+  homography: [[0,0,0],[0,0,0],[0,0,0]]   # tray mm -> 左眼像素（3x3）
+  scale: 1.0                  # 该 H 建立在哪个缩放比例上（1.0 = 全分辨率）
+  reprojection_rms_px: 0.0
+  # ★ 是否把单应建立在"已矫正"的图上。本项目 2D 主线用未矫正的原图，
+  #   因为相机固定、畸变被 H 一并吸收，反而省掉每帧 remap。
+  on_rectified: false
+
+# ── c3_pose_markers（位姿自检参考）────────────────────────
+fiducials:
+  # 标记在图像中的参考像素位置（标定时记录），用于开机自检比对
+  ref_px: [[0,0],[0,0],[0,0],[0,0]]
+  ref_diag_px: 0.0            # 四角对角线像素长度，用于检测高度变化
+  ref_edge_ratio: 1.0         # 对边长度比，用于检测倾斜变化
+
+# ── c4_slot_baseline.py 产出 ───────────────────────────────
+slots:
+  slot_base:
+    part: P1_base
+    coverage: 0.98            # 标准件放入时的覆盖率
+    features:                 # 旋转不变特征的均值 ± 3σ
+      area_px:     {mean: 0.0, std: 0.0}
+      circularity: {mean: 0.0, std: 0.0}
+      solidity:    {mean: 0.0, std: 0.0}
+      aspect:      {mean: 0.0, std: 0.0}
+      holes:       {mean: 1.0, std: 0.0}
+    template_path: ""         # 对齐用模板图（可选）
+  slot_column: {}
+  slot_wheel: {}
+  slot_cap: {}
+
+# ── c5_assembly_baseline.py 产出 ───────────────────────────
+assembly:
+  wheel_height_mm: 0.0        # 立柱装好时的轮盘高度基线
+  spoke_peak_count: 8
+  ring_coverage: 0.0
+  hub_coverage: 0.0
+  spoke_angles_deg: []        # 8 个峰的角度位置（用于指出缺哪一根）

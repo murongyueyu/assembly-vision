@@ -1,0 +1,53 @@
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# ── 可再生的测试数据（跑 tools/make_synthetic.py 就能重建）──────
+assembly_vision/data/synthetic/*
+assembly_vision/data/synthetic_seq/*
+assembly_vision/data/ui_preview/*
+assembly_vision/data/probe/*
+assembly_vision/data/refs/*
+
+# ── 真实素材与标定产物（体积大 / 与具体硬件绑定，不入库）────────
+assembly_vision/config/calibration.yaml
+assembly_vision/data/videos/
+*.mp4
+*.avi
+*.mov
+
+# ── 运行时产物 ───────────────────────────────────────────────
+_tmp_*
+stereo_spliced.jpg
+out.mp4
+
+# ── 编辑器 / 系统 ────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ── 文档临时件（Word 打开 docx 时产生）──────────────────────
+~$*.docx
+~$*.xlsx
+
+# ══════════════════════════════════════════════════════════════
+# ★ 取反规则必须放在最后：.gitignore 是"后匹配者胜"，
+#   放前面会被上面的通配规则覆盖（曾经踩过这个坑）。
+#   作用：data 各子目录只保留占位文件，让目录结构进版本库。
+# ══════════════════════════════════════════════════════════════
+!assembly_vision/data/synthetic/.gitkeep
+!assembly_vision/data/synthetic_seq/.gitkeep
+!assembly_vision/data/ui_preview/.gitkeep
+!assembly_vision/data/probe/.gitkeep
+!assembly_vision/data/refs/.gitkeep
+!assembly_vision/data/videos/.gitkeep

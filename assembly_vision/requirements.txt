@@ -1,0 +1,9 @@
+# 运行依赖（树莓派 / PC 通用，全部 pip 可装）
+# 注意：需要 aruco 模块，所以必须用 opencv-contrib-python，不是 opencv-python
+numpy>=1.21
+opencv-contrib-python>=4.5
+PyYAML>=5.4
+Pillow>=8.0
+
+# 树莓派上的替代装法（省编译时间，但没有 aruco，位姿自检功能会降级）：
+#   sudo apt install python3-opencv python3-numpy python3-yaml python3-pil
