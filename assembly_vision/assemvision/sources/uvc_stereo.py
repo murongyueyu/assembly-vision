@@ -176,7 +176,30 @@ class UvcStereoSource(CameraSource):
         if self.cap is None or not self.cap.isOpened():
             print("[camera] 相机未打开，跳过控件锁定")
             return
+
+        # ★★ 曝光单独处理，而且必须"先关自动、再给值"：
+        #   实测这台相机**只设 auto_exposure 画面毫无变化**（仍被自动曝光拉满），
+        #   必须同时把 EXPOSURE 设成一个手动值才生效。
+        #   实测有效范围 -11 ~ -1：-5 最佳（mean≈153）、-8 偏暗、-11 全黑、
+        #   -2 及以上严重过曝。
+        #   ★ 曝光正确是后续一切的前提：过曝会让各通道削顶、画面颜色失真发青，
+        #     还会因为高熵画面把 MJPG 编码器压垮，帧率从 ~50fps 掉到 ~4.5fps。
+        wexp = self.cfg.get("exposure_windows", {}) or {}
+        try:
+            exp_val = float(wexp.get("exposure", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            exp_val = 0.0
+        if exp_val != 0.0 and hasattr(cv2, "CAP_PROP_EXPOSURE"):
+            auto_off = wexp.get("auto_exposure_off", 0.25)
+            if hasattr(cv2, "CAP_PROP_AUTO_EXPOSURE"):
+                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, float(auto_off))
+            ok = self.cap.set(cv2.CAP_PROP_EXPOSURE, exp_val)
+            print("[camera] 曝光设为 %.1f（手动，先关自动）set=%s 回读=%s"
+                  % (exp_val, ok, self.cap.get(cv2.CAP_PROP_EXPOSURE)))
+
         for key, val in ctrls.items():
+            if str(key) in ("auto_exposure", "exposure_absolute"):
+                continue                      # 上面已按正确顺序处理过
             spec = self._CTRL_TO_PROP.get(str(key))
             if spec is None:
                 print("[camera] 未知控件 %s（Windows 下请手工在相机工具里设置）" % key)

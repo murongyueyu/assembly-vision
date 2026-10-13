@@ -94,6 +94,16 @@ class Pipeline:
         self.deb = self._make_debouncer(cam_cfg, wp_cfg)
         self.detector = EventDetector()
         self.tracker = BlobTracker()
+        # ★ 料盘位姿缓存：零件被全部拿走时（装配完成后）没有基准点了，
+        #   沿用最后一次成功的位姿，避免槽位忽然跳回标称位置。
+        self._last_pose = None
+        # ★ 工位全局 ROI 的缓存（见 core/checks.work_roi_mask）
+        #   T3 每轮用**上轮位姿**算一次，T2 下一帧用它来分割。
+        #   为什么要缓存、不每帧重算：ROI 需要位姿，位姿又需要分割结果 ——
+        #   是个先有鸡还是先有蛋的问题。料盘位置逐帧变化很慢，
+        #   用"上一轮的位姿"算 ROI 完全够（顶多差一帧的挪动量）。
+        #   初值 None 表示"还没算过"——第一帧不限制，之后立刻收敛。
+        self._work_roi = None
         self.source = make_source(cam_cfg, source_override, path_override)
 
         self.depth: Optional[DepthEstimator] = None
@@ -135,6 +145,10 @@ class Pipeline:
         self.source.open()
         if hasattr(self.source, "apply_locked_controls"):
             self.source.apply_locked_controls()          # type: ignore[attr-defined]
+            # ★ 预热：改完曝光后相机要若干帧才生效，前几帧可能是黑的/过曝的。
+            #   不丢这几帧，开头的分割与深度都会基于垃圾帧。
+            for _ in range(int(self.cam.get("capture.warmup_frames", 12))):
+                self.source.read(want_full=False)
         if self.depth is not None:
             self.depth.setup()
 
@@ -192,7 +206,16 @@ class Pipeline:
             if f is None or f.left is None:
                 time.sleep(0.005)
                 continue
-            seg = self.segmenter.segment(f.left, ts=f.ts, scale=f.scale)
+            # ★ 传 work_roi 把黄铜检测**限制在工位范围内**。
+            #   实测踩过：木桌的 HSV 与黄铜重叠，画面顶部的木桌整块被判成黄铜，
+            #   产生 13269mm² 的假连通域（真零件最大才 3281mm²），
+            #   把零件识别和面积测量全带偏。ROI 是"位置即身份"，比调阈值稳。
+            #   首次运行 _work_roi 还是 None（不限制），T3 一轮后就填上。
+            roi = None
+            with self.sh.lock:
+                if self._work_roi is not None and self._work_roi.shape[:2] == f.left.shape[:2]:
+                    roi = self._work_roi
+            seg = self.segmenter.segment(f.left, ts=f.ts, scale=f.scale, work_roi=roi)
             seg.hand_on = glove_hits(seg.glove_mask,
                                      self.tray.slot_polygons_px(f.scale))
             with self.sh.lock:
@@ -216,7 +239,42 @@ class Pipeline:
                 continue
             scale = f.scale
 
-            slots = self.qualifier.check_slots(seg, scale)
+            # ★ 传 bgr=left 让 check_slots 能算**色域特征**（颜色天然旋转不变，
+            #   用来补形状特征区分不了的场景）。不传的话只做形状识别。
+            # ★ 传入缓存的上次位姿：零件被全部拿走时（装配完成）就没有基准点了，
+            #   这时沿用上一次成功的位姿，避免槽位忽然跳回标称位置。
+            slots = self.qualifier.check_slots(seg, scale, bgr=f.left,
+                                               pose=self._last_pose)
+            # 位姿可用且零件够多时更新缓存（只认到 1 个零件时置信度低，不覆盖）
+            try:
+                fe0 = slots[0].features if slots else {}
+                n_used = int(fe0.get("pose_n_parts", 0))
+                if n_used >= 2:
+                    from .core.tray_pose import TrayPose
+                    self._last_pose = TrayPose(
+                        theta_deg=float(fe0.get("pose_theta_deg", 0.0)),
+                        tx=float(fe0.get("pose_dx_mm", 0.0)),
+                        ty=float(fe0.get("pose_dy_mm", 0.0)),
+                        n_used=n_used,
+                        residual_mm=float(fe0.get("pose_resid_mm", 0.0)),
+                        ok=True)
+            except Exception:                                # noqa: BLE001
+                pass
+            # ★ 刷新工位 ROI（给下一帧的分割用）。
+            #   带 margin 外扩，料盘小范围挪动/抖动不会切到零件。
+            #   pose 用刚更新的缓存（优先），没有就用本轮结果 —— 都不行时置 None
+            #   （宁可"不限制"也不要"限制错"，限制错会把真零件挡在外面）。
+            try:
+                roi_margin = float(self.wp.get("segment.work_roi_margin_mm", 25.0))
+                if roi_margin > 0:
+                    m = self.qualifier.work_roi_mask(
+                        (f.left.shape[0], f.left.shape[1]), scale,
+                        pose=self._last_pose, margin_mm=roi_margin)
+                    with self.sh.lock:
+                        self._work_roi = m
+            except Exception:                                # noqa: BLE001
+                with self.sh.lock:
+                    self._work_roi = None
             spokes = self.qualifier.check_spokes(seg, scale=scale)   # 主检位置：料盘槽
             self.tracker.update(seg.brass_blobs, ts=f.ts)
 

@@ -43,27 +43,346 @@ class Qualifier:
     # ══════════════════════════════════════════════════════════
     # 要求① 单画面料盘逐位核验
     # ══════════════════════════════════════════════════════════
-    def check_slots(self, seg: SegResult, scale: float = 1.0) -> List[SlotResult]:
+    def _classifier(self):
+        """按需构造零件特征分类器（模板优先取标定文件，没有就用内置初值）。"""
+        if getattr(self, "_clf", None) is not None:
+            return self._clf
+        try:
+            from .part_id import PartClassifier, PartTemplate, default_templates
+        except Exception:                                    # noqa: BLE001
+            self._clf = False
+            return False
+        tpls = None
+        try:
+            stored = self.calib.get("part_templates") if self.calib else None
+            if isinstance(stored, dict):
+                tpls = []
+                for part, v in stored.items():
+                    if not isinstance(v, dict) or "ranges" not in v:
+                        continue
+                    tpls.append(PartTemplate(
+                        part=part, name=str(v.get("name", "")),
+                        ranges={k: tuple(x) for k, x in v["ranges"].items()}))
+        except Exception:                                    # noqa: BLE001
+            tpls = None
+        if not tpls:
+            tpls = default_templates()
+        self._clf = PartClassifier(tpls, min_score=float(
+            self.cfg.get("part_id.min_score", 0.55)))
+        return self._clf
+
+    def _tray_area_px(self, scale: float) -> float:
+        try:
+            from .part_id import tray_area_px
+            return tray_area_px(self.tray, scale)
+        except Exception:                                    # noqa: BLE001
+            return 0.0
+
+    def _nominal_centers(self) -> Dict[str, Tuple[float, float]]:
+        """每个槽的**标称**中心（tray mm），按零件名索引。
+
+        标称 = "零件正确放在槽里时"的位置。它是料盘位姿估计的基准。
+        运行时实测到的质心与它的差，就是料盘被挪动/旋转的量。
+        """
+        out: Dict[str, Tuple[float, float]] = {}
+        for s in self.tray.slots:
+            c = s.get("center")
+            if c is None:
+                continue
+            out[str(s.get("part", s.get("id", "")))] = (float(c[0]), float(c[1]))
+        return out
+
+    def _slot_with_center(self, slot_id: str, center_mm, scale: float,
+                          angle_offset_deg: float = 0.0):
+        """返回某个槽在**指定中心/朝向**处的多边形（用于料盘位姿补偿）。"""
+        return self.tray.slot_polygon_px(
+            slot_id, scale, center_override=center_mm,
+            angle_offset_deg=angle_offset_deg)
+
+    def _nominal_tray_px(self, scale: float = 1.0):
+        """标定时料盘的中心与边长（像素），给"料盘轮廓定位"当参考点。
+
+        ★ 直接用 c3 单应把料盘四角投出来算 —— 不需要额外标定。
+        """
+        quad = self.tray.mm_to_px(
+            np.array([[0.0, 0.0], [160.0, 0.0], [160.0, 160.0], [0.0, 160.0]]),
+            scale)
+        cx = float(quad[:, 0].mean())
+        cy = float(quad[:, 1].mean())
+        side = float((np.linalg.norm(quad[1] - quad[0])
+                      + np.linalg.norm(quad[2] - quad[1])) / 2.0)
+        return (cx, cy), side
+
+    def _pose_from_outline(self, bgr, scale: float):
+        """用料盘**自身轮廓**估位姿（零件不够时的兜底）。
+
+        ★ 为什么需要：零件星座法要求画面里认得出零件。装配过程中零件被逐个拿走，
+          最后料盘会空 —— 那时位姿估计 ok=False，ROI 全错位（实测踩过）。
+          料盘本身总在画面里，所以再加这条依据。
+        """
+        try:
+            from .tray_detect import detect_tray, pose_from_tray_detect
+        except Exception:                                    # noqa: BLE001
+            return None
+        cfg = self.cfg.get("tray_detect", {}) or {}
+        det = detect_tray(bgr,
+                          v_max=int(cfg.get("v_max", 140)),
+                          s_max=int(cfg.get("s_max", 170)),
+                          min_area_ratio=float(cfg.get("min_area_ratio", 0.01)))
+        if not det.ok:
+            return det, None
+        (ncx, ncy), nside = self._nominal_tray_px(scale)
+        pose = pose_from_tray_detect(
+            det, (ncx, ncy), nside, self.tray.mm_per_px(scale),
+            nominal_angle_deg=float(cfg.get("nominal_angle_deg", det.angle_deg)),
+            use_scale=bool(cfg.get("use_scale", False)))
+        return det, pose
+
+    def segment_with_roi(self, segmenter, bgr, scale: float = 1.0,
+                         prev_pose=None, margin_mm: Optional[float] = None):
+        """两遍分割：先用几何 ROI 粗分 -> 定位姿 -> 用更准的 ROI 细分。
+
+        ★ 为什么是"两遍"：ROI 需要位姿（料盘可能被挪动），
+          而位姿又需要分割结果 —— 先有鸡还是先有蛋。
+          解法：第一遍用**几何 ROI**（料盘/装配位外扩，不依赖位姿）粗分，
+          够用来估位姿；第二遍用估出的位姿修正 ROI 再细分，把木桌彻底挡住。
+
+        返回 (seg, pose, pose_src, identified)。
+        """
+        if margin_mm is None:
+            margin_mm = float(self.cfg.get("segment.work_roi_margin_mm", 25.0))
+        # ① 几何 ROI（不依赖位姿）粗分
+        roi0 = None
+        if margin_mm > 0:
+            roi0 = self.work_roi_mask(bgr.shape, scale, pose=None, margin_mm=margin_mm)
+        seg = segmenter.segment(bgr, scale=scale, work_roi=roi0)
+        pose, src, ident = self.pose_estimate(seg, scale, bgr=bgr, prev_pose=prev_pose)
+        # ② 用位姿再算一次 ROI，重新分割（ROI 更贴合实际料盘位置）
+        if margin_mm > 0 and pose is not None and getattr(pose, "ok", False):
+            roi1 = self.work_roi_mask(bgr.shape, scale, pose=pose, margin_mm=margin_mm)
+            if roi1 is not None:
+                seg2 = segmenter.segment(bgr, scale=scale, work_roi=roi1)
+                # 只有"分割结果没变差"才采用第二遍（防止 ROI 反而把零件切掉）
+                s1 = int((seg.brass_mask > 0).sum())
+                s2 = int((seg2.brass_mask > 0).sum())
+                if s2 >= 0.8 * max(1, s1):
+                    seg = seg2
+                    pose, src, ident = self.pose_estimate(seg, scale, bgr=bgr,
+                                                          prev_pose=pose)
+        return seg, pose, src, ident
+
+    def work_roi_mask(self, shape, scale: float = 1.0, pose=None,
+                      margin_mm: float = 25.0):
+        """工位全局 ROI：**只在"料盘 + 装配位"范围内检测黄铜**。
+
+        ★ 为什么必须有（AGENTS.md 2.2 的老问题，一直没做，实测终于踩到）：
+          木桌的 H/S 与黄铜重叠。实测某帧里**画面顶部的木桌整块被判成黄铜**，
+          产生一个 **13269mm²** 的假连通域（真零件最大才 3281mm²），
+          把识别和面积测量全带偏了。
+
+        ★ 为什么不用调阈值：
+          单独收紧 h_max/s_max 会削掉零件自己的高光（实测零件 S 上限 109、
+          H 上限 45，与桌面区间本就重叠），改阈值按下葫芦起瓢。
+          而 ROI 是**位置即身份** —— 与颜色、光照都无关。
+
+        传入 pose 时按位姿修正后的槽位/装配位算，否则用标称坐标。
+        """
+        h, w = shape[:2]
+        m = np.zeros((h, w), np.uint8)
+        try:
+            quad = self.tray.mm_to_px(
+                np.array([[-margin_mm, -margin_mm], [160.0 + margin_mm, -margin_mm],
+                          [160.0 + margin_mm, 160.0 + margin_mm],
+                          [-margin_mm, 160.0 + margin_mm]]), scale)
+            if pose is not None and getattr(pose, "ok", False):
+                quad = self.tray.mm_to_px(
+                    pose.apply(np.array([[-margin_mm, -margin_mm],
+                                         [160.0 + margin_mm, -margin_mm],
+                                         [160.0 + margin_mm, 160.0 + margin_mm],
+                                         [-margin_mm, 160.0 + margin_mm]])), scale)
+            cv2.fillPoly(m, [np.round(quad).astype(np.int32)], 255)
+            # 装配位：一个圆，外扩 margin
+            asm = self.cfg.get("assembly", {}) or {}
+            if asm and asm.get("enabled", False):
+                ac = np.asarray(asm.get("center", [0.0, 0.0]), dtype=np.float64).reshape(1, 2)
+                if pose is not None and getattr(pose, "ok", False):
+                    ac = pose.apply(ac)
+                r = float(asm.get("radius", 45.0)) + margin_mm
+                pts = np.array([[ac[0, 0] + r * np.cos(t), ac[0, 1] + r * np.sin(t)]
+                                for t in np.linspace(0.0, 2.0 * np.pi, 64)], dtype=np.float64)
+                cv2.fillPoly(m, [np.round(self.tray.mm_to_px(pts, scale)).astype(np.int32)], 255)
+        except Exception:                                        # noqa: BLE001
+            return None
+        return m
+
+    def pose_estimate(self, seg: SegResult, scale: float = 1.0,
+                      bgr: Optional[np.ndarray] = None, prev_pose=None):
+        """估料盘位姿。优先级：零件星座(>=2) > 料盘轮廓 > prev_pose > 标称。
+
+        返回 (pose, pose_src, identified)。`identified` 是"零件名 -> 记录"，
+        调用方可以复用它，避免把识别算两遍。
+
+        ★ 把这段从 check_slots 里拆出来，是为了能"**先定位姿、再带工位 ROI 分割**"：
+          ROI 需要位姿（料盘可能被挪动），而分割又必须在判定之前 —— 所以分两步。
+        """
+        clf = self._classifier()
+        identified = {}
+        if clf:
+            from .part_id import features_from_blob
+            mmpp = self.tray.mm_per_px(scale)
+            a_tray = self._tray_area_px(scale)
+            for b in (seg.brass_blobs or []):
+                if getattr(b, "area_px", 0.0) < 60:
+                    continue
+                feats = features_from_blob(b, roi_area_px=a_tray, mm_per_px=mmpp,
+                                           bgr=bgr, mask=seg.brass_mask)
+                got, score, _ = clf.classify(feats)
+                if not got:
+                    continue
+                mm = self.tray.px_to_mm(
+                    np.array([[b.centroid[0], b.centroid[1]]], dtype=np.float64), scale)[0]
+                prev = identified.get(got)
+                if prev is None or b.area_px > prev["blob"].area_px:
+                    identified[got] = {"centroid_mm": (float(mm[0]), float(mm[1])),
+                                       "blob": b, "score": float(score), "feats": feats}
+
+        from .tray_pose import estimate_pose
+        nominal = self._nominal_centers()
+        observed = {p: v["centroid_mm"] for p, v in identified.items()}
+        pose = estimate_pose(observed, nominal)
+        if getattr(pose, "ok", False) and pose.n_used >= 2:
+            return pose, "parts", identified
+        # 零件不够（被拿走/没放）-> 退回料盘轮廓
+        det = None
+        if bgr is not None:
+            got = self._pose_from_outline(bgr, scale)
+            if got is not None:
+                det, pose2 = got
+                if pose2 is not None and getattr(pose2, "ok", False):
+                    self._last_outline = det
+                    return pose2, "outline", identified
+        self._last_outline = det
+        if prev_pose is not None and getattr(prev_pose, "ok", False):
+            return prev_pose, "cached", identified
+        if getattr(pose, "ok", False):
+            return pose, "parts(1)", identified
+        return pose, "", identified
+
+    def check_slots(self, seg: SegResult, scale: float = 1.0,
+                    bgr: Optional[np.ndarray] = None,
+                    pose=None) -> List[SlotResult]:
+        """逐槽核验。
+
+        ★★ 两遍流程（2026-10 加入料盘位姿自动补偿）
+          第一遍：**不依赖槽位坐标**，按形状/面积/色域特征识别每个黄铜块是什么零件；
+                  把「实测质心」与「标称质心」配对，解出料盘的刚体变换（旋转+平移）。
+          第二遍：用变换修正所有槽位 ROI，再算覆盖率与最终判定。
+
+        为什么必须这样：只靠固定槽位坐标有个硬前提 —— 料盘位置和朝向不变。
+        实测踩过：料盘在 c3 标定后被挪了约 18mm（相机没动），
+        四个槽的 ROI 全偏 18~20mm，覆盖率和判定全错。
+        """
         out: List[SlotResult] = []
+        clf = self._classifier()
+
+        # ── 位姿与零件识别（都交给 pose_estimate，避免两处各算一遍识别）──
+        if pose is None:
+            pose, pose_src, identified = self.pose_estimate(seg, scale, bgr=bgr)
+        else:
+            # 调用方给了位姿（pipeline 的缓存），仍要做识别来取特征
+            _p, _s, identified = self.pose_estimate(seg, scale, bgr=bgr, prev_pose=pose)
+            pose_src = "given"
+        det = getattr(self, "_last_outline", None)
+
+        # ── 第二遍：逐槽（用位姿修正后的 ROI）──
         for slot in self.tray.slots:
             sid = slot["id"]
             part = str(slot.get("part", ""))
-            poly = self.tray.slot_polygon_px(sid, scale)
+            if getattr(pose, "ok", False):
+                c_now = pose.apply(np.asarray(slot.get("center", [0.0, 0.0]),
+                                              dtype=np.float64).reshape(1, 2))[0]
+                poly = self._slot_with_center(sid, c_now, scale,
+                                              angle_offset_deg=pose.theta_deg)
+            else:
+                poly = self.tray.slot_polygon_px(sid, scale)
             cov = coverage_ratio(seg.brass_mask, poly)
 
+            # ★★ 覆盖率阈值按"该槽的理论最大覆盖率"缩放，不能全局一刀切。
+            #   原因：覆盖率 = 零件面积 / 槽面积，这个比值**每种零件天生不同**：
+            #     轮盘/底座/顶盖 ~0.95+（圆件填满圆槽）
+            #     立柱只有 ~0.51（85x15 的细杆 vs 91x28 的宽胶囊槽）
+            #   用统一的 0.45 卡，立柱完整在位也只有 0.40 -> **必然误判存疑**（实测踩过）。
+            cov_scale = 1.0
+            if self.cfg.get("check.coverage_scale_by_max", True) and clf:
+                try:
+                    from .part_id import max_coverage_for
+                    m = max_coverage_for(sid, clf.templates, self.tray, scale)
+                    cov_scale = float(min(1.0, max(0.05, m)))
+                except Exception:                            # noqa: BLE001
+                    cov_scale = 1.0
+            thr_present = self.cov_present * cov_scale
+            thr_absent = self.cov_absent * cov_scale
+
             sr = SlotResult(slot_id=sid, part=part, coverage=cov, roi_px=poly)
-            sr.present = cov >= self.cov_present
+            sr.present = cov >= thr_present
             blob = self._blob_in(seg, poly)
+            # ★ 优先用"第一遍已识别到该零件"的块：
+            #   即使 ROI 因位姿估计有残余误差没框住它，也能拿到正确特征。
+            idrec = identified.get(part)
+            if idrec is not None:
+                blob = idrec["blob"]
             if blob is not None:
                 sr.features = dict(blob.features)
+            sr.features["cov_thr_present"] = float(thr_present)
+            sr.features["cov_scale"] = float(cov_scale)
+            if getattr(pose, "ok", False):
+                sr.features["pose_theta_deg"] = float(pose.theta_deg)
+                sr.features["pose_dx_mm"] = float(pose.tx)
+                sr.features["pose_dy_mm"] = float(pose.ty)
+                sr.features["pose_n_parts"] = int(pose.n_used)
+                sr.features["pose_resid_mm"] = float(pose.residual_mm)
+                sr.features["pose_src"] = pose_src or ("parts" if pose.n_used else "?")
+            if det is not None and det.ok:
+                sr.features["tray_det_fill"] = float(det.fill)
+                sr.features["tray_det_side_px"] = float((det.size_px[0] + det.size_px[1]) / 2)
 
-            if cov <= self.cov_absent:
+            # ── 零件特征识别：这里直接用第一遍的结果 ──
+            if blob is not None and clf:
+                from .part_id import features_from_blob, slot_area_px
+                a_slot = slot_area_px(self.tray, sid, scale)
+                feats = features_from_blob(
+                    blob, roi_area_px=a_slot,
+                    mm_per_px=self.tray.mm_per_px(scale),
+                    bgr=bgr, mask=seg.brass_mask)
+                got, score = None, 0.0
+                if idrec is not None and idrec["blob"] is blob:
+                    # 这个块在第一遍已经认出身份了，直接沿用（避免重复算两遍）
+                    got, score = part, float(idrec["score"])
+                else:
+                    got, score, _ = clf.classify(feats)
+                sr.features["id_part"] = got or ""
+                sr.features["id_score"] = float(score or 0.0)
+                for k in ("area_mm2", "area_frac", "c_hue_mean", "c_sat_mean",
+                          "c_val_mean", "c_hue_std"):
+                    if k in feats:
+                        sr.features[k] = float(feats[k])
+                if got is not None and part and got != part:
+                    if cov > thr_absent:
+                        sr.verdict = SLOT_NG
+                        sr.reasons.append(
+                            "零件不符：该槽应为 %s，但特征识别为 %s（得分 %.2f）"
+                            % (part, got, score))
+                        out.append(sr)
+                        continue
+
+            if cov <= thr_absent:
                 sr.verdict = SLOT_NG
-                sr.reasons.append("缺件：%s 槽内黄铜覆盖率仅 %.0f%%"
-                                  % (sid, cov * 100))
-            elif cov < self.cov_present:
+                sr.reasons.append("缺件：%s 槽内黄铜覆盖率仅 %.0f%%（阈值 %.0f%%）"
+                                  % (sid, cov * 100, thr_absent * 100))
+            elif cov < thr_present:
                 sr.verdict = SLOT_SUSPECT
-                sr.reasons.append("覆盖率 %.0f%% 落在阈值带内，请人工复核" % (cov * 100))
+                sr.reasons.append("覆盖率 %.0f%% 落在阈值带内（%.0f%%~%.0f%%），请人工复核"
+                                  % (cov * 100, thr_absent * 100, thr_present * 100))
             else:
                 sr.verdict = SLOT_OK
 

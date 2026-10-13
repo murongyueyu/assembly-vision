@@ -18,6 +18,34 @@ import numpy as np
 from ..config import Config
 
 
+def _as_dist(d) -> np.ndarray:
+    """把畸变系数整理成 OpenCV 5.0 要求的 (1,N) 二维数组。
+
+    ★ 为什么需要：stereoRectify 在 OpenCV 5.0 里对 1-D 的畸变系数会报
+        cv2.error: (-215:Assertion failed) a_size.width == len in cv::gemm
+      而 YAML/JSON 只能存成一维列表，读回来必然是 1-D，所以必须在这里 reshape。
+    """
+    a = np.asarray(d, dtype=np.float64).ravel()
+    if a.size == 0:
+        a = np.zeros(5, dtype=np.float64)
+    return a.reshape(1, -1)
+
+
+def _as_vec31(t) -> np.ndarray:
+    """把平移向量整理成 OpenCV 5.0 要求的 (3,1) 列向量。
+
+    ★★ 这是最容易踩的坑（实测三种形状的表现）：
+        T shape=(3,)    -> stereoRectify ✗  断言失败 a_size.width == len in cv::gemm
+        T shape=(3,1)   -> stereoRectify ✓
+      1-D 的 T 在 OpenCV 4.x 能过，5.0 不行。而 YAML 读回来必然是 1-D，
+      所以**必须在代码里 reshape**。
+    """
+    a = np.asarray(t, dtype=np.float64).ravel()
+    if a.size == 0:
+        a = np.zeros(3, dtype=np.float64)
+    return a.reshape(3, 1)
+
+
 class DepthEstimator:
     def __init__(self, cam_cfg: Config, calib: Optional[Config] = None) -> None:
         self.cam = cam_cfg
@@ -45,12 +73,21 @@ class DepthEstimator:
         st = self.calib.get("stereo")
         try:
             K1 = np.asarray(st["K_left"], dtype=np.float64).reshape(3, 3)
-            D1 = np.asarray(st["D_left"], dtype=np.float64).ravel()
             K2 = np.asarray(st["K_right"], dtype=np.float64).reshape(3, 3)
-            D2 = np.asarray(st["D_right"], dtype=np.float64).ravel()
             R = np.asarray(st["R"], dtype=np.float64).reshape(3, 3)
-            T = np.asarray(st["T"], dtype=np.float64).ravel()
+            T = _as_vec31(st["T"])          # ★ 必须 (3,1)，1-D 在 5.0 下会崩
             W, H = [int(v) for v in st["image_size"]]
+            # ★★ 畸变系数必须是 (1,N) 二维，不能是 1-D！
+            #   OpenCV 5.0 的 stereoRectify 对 1-D 的 D 会触发
+            #     cv2.error: (-215:Assertion failed) a_size.width == len in cv::gemm
+            #   实测对比（同一组参数）：
+            #     D shape=(1,5) -> ✓ 成功
+            #     D shape=(5,)  -> ✗ 断言失败
+            #   而 YAML/JSON 存不了 (1,5)，读回来必然是 1-D 列表，
+            #   所以**必须在代码里 reshape**，不能指望文件里存对。
+            #   （早期把 D 存成 .ravel() 的结果，标定文件看着没问题但一跑就崩）
+            D1 = _as_dist(st["D_left"])
+            D2 = _as_dist(st["D_right"])
         except Exception as e:  # noqa: BLE001
             print("[depth] 标定文件字段不全:", e)
             return False
@@ -81,7 +118,7 @@ class DepthEstimator:
         #   视差散布高达 75 px（纯噪声），过不了 min_valid_ratio 闸门 → 深度整帧被丢。
         #   根因是料盘表面几乎无纹理（Lap 方差 156，只有整幅的 6%），
         #   局部块匹配器无料可比；SGBM 靠半全局平滑把料盘区有效像素提到 46%、散布降到 6.6 px。
-        kind = str(cam_cfg.get("depth.matcher", "sgbm")).lower()
+        kind = str(self.cam.get("depth.matcher", "sgbm")).lower()
         if kind in ("bm", "stereobm"):
             self.matcher = cv2.StereoBM_create(numDisparities=self.num_disp,
                                                blockSize=self.block)

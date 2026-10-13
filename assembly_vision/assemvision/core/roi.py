@@ -139,18 +139,32 @@ class TrayMap:
         return 1.0 / px_per_mm if px_per_mm > 1e-9 else 0.0
 
     # ---------- ROI 生成 ----------
-    def slot_polygon_mm(self, slot_id: str) -> np.ndarray:
+    def slot_polygon_mm(self, slot_id: str,
+                        center_override: Optional[Sequence[float]] = None,
+                        angle_offset_deg: float = 0.0) -> np.ndarray:
+        """槽位多边形（tray mm）。
+
+        ★ center_override / angle_offset_deg 是给**料盘位姿补偿**用的：
+          料盘被挪动或旋转后，用 tray_pose.estimate_pose() 解出刚体变换，
+          再把每个槽的中心/朝向改到"当前料盘坐标系"下的实际位置。
+          ★ 必须在 **mm 空间**里改中心再映射到像素 ——
+            透视投影下"先平移 mm 再投影"与"投影后平移像素"并不等价。
+        """
         s = self._slot_by_id[slot_id]
         m = float(s.get("roi_margin_mm", 0.0))
+        center = s["center"] if center_override is None else center_override
         if s.get("type") == "circle":
-            return circle_polygon(s["center"], s["diameter"], m)
+            return circle_polygon(center, s["diameter"], m)
         if s.get("type") == "capsule":
-            return capsule_polygon(s["center"], s["length"], s["width"],
-                                   s.get("angle_deg", 0.0), m)
+            return capsule_polygon(center, s["length"], s["width"],
+                                   float(s.get("angle_deg", 0.0)) + float(angle_offset_deg), m)
         raise ValueError("未知槽型 %r（应为 circle / capsule）" % s.get("type"))
 
-    def slot_polygon_px(self, slot_id: str, scale: float = 1.0) -> np.ndarray:
-        return self.mm_to_px(self.slot_polygon_mm(slot_id), scale)
+    def slot_polygon_px(self, slot_id: str, scale: float = 1.0,
+                        center_override: Optional[Sequence[float]] = None,
+                        angle_offset_deg: float = 0.0) -> np.ndarray:
+        return self.mm_to_px(
+            self.slot_polygon_mm(slot_id, center_override, angle_offset_deg), scale)
 
     def slot_polygons_px(self, scale: float = 1.0) -> Dict[str, np.ndarray]:
         return {s["id"]: self.slot_polygon_px(s["id"], scale) for s in self.slots}

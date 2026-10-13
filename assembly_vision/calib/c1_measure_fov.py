@@ -28,11 +28,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _util import (ask, grab_full, imread_safe, load_all, open_source,  # noqa: E402
                    save_calib, show_and_pick)
 
-# HBV-1714-2 S2.0 像元尺寸（µm）。
-# ★ 按厂家参数核对：1/3" CMOS（OV9750），有效宽 4.8 mm，单眼水平 960 px
-#   → 4.8 mm / 960 px = 5.0 µm。早期写 3.75 是按 1/2.9" 估的，偏小。
+# 像元尺寸（µm）—— **仅用于"反推焦距"这个副产品**，不影响 GSD。
+#
+# ★ 重要：实测证明这个值无法用标称参数凑齐，别再纠结：
+#     实测（用户确认料盘 160mm、工作距离 360mm）:
+#         GSD = 0.8510 mm/px   ->  fov 覆盖 544.7 x 408.5 mm
+#     若按 f=3.0mm + 5.0µm 反推:  算得 GSD 应为 0.595 mm/px（差 1.4 倍）
+#     若按 f=3.0mm + 3.75µm 反推: 算得 GSD 应为 0.446 mm/px（差 1.9 倍）
+#     若按 f=2.51mm + 3.75µm 反推: 算得 GSD 应为 0.534 mm/px（差 1.6 倍）
+#   => 标称参数（焦距/像元）与实测对不上，但**这不影响 GSD**：
+#      GSD 是从"点出的像素距离 ÷ 已知实际长度"直接算出来的，不依赖任何镜头假设。
+#   => 所以：**以 GSD 为准，焦距反推值只作参考**，不要因为它偏差大就怀疑 GSD。
+#   => 真要提精度，唯一的办法是拉近工作距离或换更长焦的镜头（见 README）。
 PIXEL_UM = 5.0
-# 厂家标称视场角/焦距，用于核对反推结果。本机是 80°/3.0mm 那款（另一款是 130°/2.51mm）。
+# 厂家标称视场角/焦距（用于核对反推结果）。注意有两款镜头：
+#   80° 无畸变 / 3.0 mm
+#   130°        / 2.51 mm
 NOMINAL_FOCAL_MM = 3.0
 NOMINAL_FOV_DEG = 80.0
 
@@ -71,8 +82,9 @@ def main() -> int:
         pts = [tuple(float(v) for v in seg.split(","))
                for seg in args.px.split(";") if seg.strip()]
     else:
-        print("请在图上点出【已知长度】的两个端点，回车确认，r 重来，ESC 退出")
-        pts = show_and_pick(img, 2)
+        print("窗口里连续取流显示：左键点两个端点，r 重来，回车确认，ESC 取消")
+        # ★ 传 src 进去 → 窗口里是**实时画面**，可以边看边调摆放/对焦
+        pts = show_and_pick(img, 2, src=src)
     if len(pts) < 2:
         print("没有取到两个点")
         return 1

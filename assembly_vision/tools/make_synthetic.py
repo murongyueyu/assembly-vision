@@ -46,18 +46,37 @@ BG = (28, 28, 28)                 # 黑底
 TRAY = (46, 46, 46)               # 料盘本体
 POCKET = (34, 34, 34)             # 槽底
 
+# ══════════════════════════════════════════════════════════════════════════
+# ★★ 槽位几何（2026-10 按实物实测修正）
+#
+# ★ 这个字典必须与 config/workpiece.yaml 的 slots 保持一致！
+#   测试的做法是「用本文件渲染合成图 -> 用 workpiece.yaml 的槽位算覆盖率」，
+#   两边不一致就会误判（实测踩过：改了 yaml 但没改这里，
+#   test_segment / test_polar 立刻挂掉，报「四个槽都判为有件」失败）。
+#   改动任一处都要同步另一处。
+#
+# ★ 实测值来源：用 c3 单应把空料盘图正交化成 160x160mm 正视图（4 px/mm），
+#   再做凹陷检测拟合 minAreaRect。实测与零件名义尺寸交叉吻合：
+#     轮盘 Ø74.4 ↔ 槽 Ø75；底座 Ø59.3 ↔ 槽 Ø65；立柱长 85 ↔ 槽 91
+# ★ 实测布局（用户确认）：左上=轮盘 / 右上=立柱 / 左下=顶盖 / 右下=底座。
+#   旧值把四个槽的零件归属全搞错了（左上=立柱 …），导致覆盖率全错。
+# ══════════════════════════════════════════════════════════════════════════
 SLOTS = {
-    "slot_column": dict(kind="capsule", center=(40.0, 40.0), length=85.2,
-                        width=15.6, angle=-45.0, part="P2_column"),
-    "slot_wheel":  dict(kind="circle", center=(120.0, 40.0), diameter=74.4,
+    "slot_wheel":  dict(kind="circle", center=(24.0, 53.0), diameter=75.0,
                         part="P3_wheel"),
-    "slot_base":   dict(kind="circle", center=(40.0, 120.0), diameter=59.3,
-                        part="P1_base"),
-    "slot_cap":    dict(kind="circle", center=(120.0, 120.0), diameter=19.1,
+    # ★ 立柱：真实零件是约 85x15 的细杆，槽是 91x28 的胶囊（有富余）。
+    #   早期把立柱画成 91x28（正好等于槽尺寸），结果**一旋转就超出槽口被截断**，
+    #   形状变形 -> 特征识别失败（实测踩过：转 23°/45°/67°/203° 时认不出立柱）。
+    "slot_column": dict(kind="capsule", center=(105.0, 54.0), length=85.0,
+                        width=16.0, angle=-44.0, part="P2_column"),
+    "slot_cap":    dict(kind="circle", center=(22.0, 132.0), diameter=25.0,
                         part="P4_cap"),
+    "slot_base":   dict(kind="circle", center=(105.0, 130.0), diameter=65.0,
+                        part="P1_base"),
 }
 TRAY_SIZE = (160.0, 160.0)
-ASM_CENTER = (80.0, 250.0)        # 与 workpiece.yaml 的 assembly.center 一致
+ASM_CENTER = (-65.0, 80.0)        # ★ 与 workpiece.yaml 的 assembly.center 一致
+                                  #   （料盘左侧 —— 设备夹桌右侧，工人在左侧作业）
 ASM_RADIUS = 45.0
 
 WHEEL_R = 37.2                    # 轮盘最大外接半径（Ø74.4）
@@ -70,28 +89,86 @@ def mm2px(p_mm, s: float, origin=(0.0, 0.0)):
     return (int(round(origin[0] + p_mm[0] * s)), int(round(origin[1] + p_mm[1] * s)))
 
 
-def canvas_size(px_per_mm: float, margin_mm: float, with_assembly: bool):
-    w = (TRAY_SIZE[0] + 2 * margin_mm) * px_per_mm
-    h_mm = (ASM_CENTER[1] + ASM_RADIUS + margin_mm) if with_assembly \
-        else (TRAY_SIZE[1] + margin_mm)
-    return int(round(w)), int(round(h_mm * px_per_mm))
+def canvas_origin(px_per_mm: float, margin_mm: float):
+    """画布原点（tray-mm 原点 (0,0) 对应的像素位置）。
+
+    ★★ 原点必须**只由内容包围盒决定，与"这次画不画装配位"无关**。
+      踩过的坑：一开始把 origin 算进 canvas_size(..., with_assembly) 里，
+      于是"带装配位"和"不带装配位"两种调用得到**不同的原点**，
+      测试里 make_env 与 render_scene 各用一个，ROI 整体错位 553px。
+
+    包围盒按"完整场景"算（料盘 + 装配位），这样任何一次渲染都用同一个原点，
+    只是画布大小随内容变化。
+    """
+    xs = [0.0, TRAY_SIZE[0], ASM_CENTER[0] - ASM_RADIUS, ASM_CENTER[0] + ASM_RADIUS]
+    ys = [0.0, TRAY_SIZE[1], ASM_CENTER[1] - ASM_RADIUS, ASM_CENTER[1] + ASM_RADIUS]
+    x0 = min(xs) - margin_mm
+    y0 = min(ys) - margin_mm
+    return (-x0 * px_per_mm, -y0 * px_per_mm)
+
+
+def canvas_size(px_per_mm: float, margin_mm: float, with_assembly: bool = True):
+    """画布尺寸 + 原点偏移。返回 (w_px, h_px, origin_px)。
+
+    ★ 装配位在 tray-mm 的**左侧（x 为负）**，所以画布原点不再是 (0,0) 对应的
+      margin 位置 —— 必须按内容包围盒平移，否则装配位会被画到画面外。
+
+    ★★ 画布**恒定按完整场景**（料盘 + 装配位）算，`with_assembly` 参数保留只为
+      兼容旧调用，**不再影响尺寸**。踩过的坑：一开始让尺寸随 with_assembly 变，
+      导致"带装配位"和"不带"两种调用得到不同的画布与原点，
+      测试里 make_env 与 render_scene 各用一个，ROI 整体错位 553px。
+
+      恒定尺寸的代价只是"不带装配位时右侧多一点空白"，换来的是
+      **任何调用路径的画布与原点都完全一致**，值。
+    """
+    xs = [0.0, TRAY_SIZE[0], ASM_CENTER[0] - ASM_RADIUS, ASM_CENTER[0] + ASM_RADIUS]
+    ys = [0.0, TRAY_SIZE[1], ASM_CENTER[1] - ASM_RADIUS, ASM_CENTER[1] + ASM_RADIUS]
+    x1 = max(xs) + margin_mm
+    y1 = max(ys) + margin_mm
+    ox, oy = canvas_origin(px_per_mm, margin_mm)
+    w = int(round(x1 * px_per_mm + ox))
+    h = int(round(y1 * px_per_mm + oy))
+    return w, h, (ox, oy)
+
+
+def _rot_mm(pts_mm, center_mm, deg: float):
+    """把一组 tray-mm 点绕 center_mm 旋转 deg 度（纯几何，无插值）。
+
+    ★ 为什么要几何旋转而不是旋转位图：位图旋转会在离散网格上产生
+      孔洞合并/边缘锯齿等**插值伪影**，用它测"特征是否旋转不变"测不准
+      （实测踩过：用 warpAffine 转掩膜，137°/180° 就认错，但那是伪影导致的，
+        不是特征本身的问题）。几何旋转出的形状才是干净的。
+    """
+    a = np.deg2rad(float(deg))
+    ca, sa = np.cos(a), np.sin(a)
+    p = np.asarray(pts_mm, dtype=np.float64) - np.asarray(center_mm, dtype=np.float64)
+    x = p[:, 0] * ca - p[:, 1] * sa
+    y = p[:, 0] * sa + p[:, 1] * ca
+    return np.stack([x, y], axis=1) + np.asarray(center_mm, dtype=np.float64)
 
 
 def render_scene(px_per_mm: float = 2.5, margin_mm: float = 12.0,
                  missing=(), missing_spokes: int = 0,
                  glove_at=None, glove_r_mm: float = 28.0,
                  draw_tray: bool = True, noise: float = 3.0,
-                 assembly_stage: int = 0, with_assembly: bool = False) -> np.ndarray:
+                 assembly_stage: int = 0, with_assembly: bool = False,
+                 rotate_deg: float = 0.0, wheel_rotate_deg: float = 0.0) -> np.ndarray:
     """画一张合成图。
 
     missing        要"拿出来"的槽 id 集合，例如 {"slot_cap"}
     missing_spokes 轮盘上故意少画几根辐条（0-8）
     glove_at       蓝手套中心（tray mm），None 表示不画
     assembly_stage 装配位完成度：1=底座 2=+立柱 3=+轮盘 4=+顶盖
+    rotate_deg     ★ 把**立柱**绕槽心几何旋转这么多度。
+                   ⚠️ 注意：真实工位里**槽是固定的**，把零件转出槽口范围会被槽壁
+                   截断，覆盖率必然下降。所以这个参数主要用于研究几何，
+                   不要拿它当"朝向鲁棒性"的判据（用 wheel_rotate_deg）。
+    wheel_rotate_deg ★ 把**轮盘辐条图案**绕轮心几何旋转这么多度。
+                   辐条图案是唯一朝向敏感的特征，所以朝向鲁棒性测这个。
+                   8 根辐条下 45° 是一个周期。
     """
-    W, H = canvas_size(px_per_mm, margin_mm, with_assembly or assembly_stage > 0)
+    W, H, org = canvas_size(px_per_mm, margin_mm, with_assembly or assembly_stage > 0)
     img = np.full((H, W, 3), BG, dtype=np.uint8)
-    org = (margin_mm * px_per_mm, margin_mm * px_per_mm)
     s = float(px_per_mm)
 
     if draw_tray:
@@ -114,9 +191,13 @@ def render_scene(px_per_mm: float = 2.5, margin_mm: float = 12.0,
             if sid == "slot_base":
                 cv2.circle(img, c, max(2, int(4.0 * s)), POCKET, -1, cv2.LINE_AA)
             if sid == "slot_wheel":
-                _draw_wheel(img, spec["center"], s, org, missing_spokes)
+                _draw_wheel(img, spec["center"], s, org, missing_spokes,
+                            rotate_deg=wheel_rotate_deg)
         else:
-            _draw_capsule(img, spec, s, org, BRASS, -1)
+            # 立柱是胶囊，本身就带朝向 —— 一并转，验证朝向无关性
+            sp = dict(spec)
+            sp["angle"] = float(spec["angle"]) + float(rotate_deg)
+            _draw_capsule(img, sp, s, org, BRASS, -1)
 
     if assembly_stage > 0:
         _draw_assembly(img, assembly_stage, s, org)
@@ -163,11 +244,16 @@ def _draw_capsule(img, spec, s, org, color, thickness):
     cv2.fillPoly(img, [np.asarray(pts, np.int32)], color)
 
 
-def _draw_wheel(img, center_mm, s, org, missing_spokes: int = 0):
+def _draw_wheel(img, center_mm, s, org, missing_spokes: int = 0,
+                rotate_deg: float = 0.0):
     """按真实结构画轮盘：中心毂 + 8 根辐条臂 + 外圈 + 球头手柄。
 
     辐条"臂"在 r 8~26，外圈在 r 26~30，球头手柄伸出到 37.2。
     所以数辐条的环带要取在臂上（12~24），不能取到外圈上。
+
+    rotate_deg  把辐条图案整体绕轮心转这么多度（几何旋转，无插值伪影）。
+                用来验证"轮盘朝向变了，特征识别与辐条计数还准不准"。
+                注意：8 根辐条下 45° 是一个周期（转 45° 图形与自身重合）。
     """
     c = np.asarray(center_mm, float)
     ring_in, ring_out = 26.0, 30.0
@@ -181,7 +267,7 @@ def _draw_wheel(img, center_mm, s, org, missing_spokes: int = 0):
     for i in range(n):
         if i < int(missing_spokes):
             continue
-        ang = np.deg2rad(i * 360.0 / n + 22.5)
+        ang = np.deg2rad(i * 360.0 / n + 22.5 + float(rotate_deg))
         u = np.array([np.cos(ang), np.sin(ang)])
         v = np.array([-np.sin(ang), np.cos(ang)])
         quad = np.array([c + u * arm_in + v * (arm_w / 2), c + u * arm_out + v * (arm_w / 2),
@@ -199,8 +285,13 @@ def _draw_wheel(img, center_mm, s, org, missing_spokes: int = 0):
 
 # ──────────────────────────────────────────────────────────────
 def write_synthetic_calib(path: str, px_per_mm: float, margin_mm: float) -> bool:
-    """写一份与合成图完全匹配的标定文件，让离线全链路能跑。"""
-    ox = oy = margin_mm * px_per_mm
+    """写一份与合成图完全匹配的标定文件，让离线全链路能跑。
+
+    ★ 原点要和 render_scene 用的一致 —— 从 canvas_size 取，别再自己算
+      （装配位在 tray-mm 左侧后，原点不再是 margin，写死会整体错位）。
+    """
+    _, _, org = canvas_size(px_per_mm, margin_mm, True)
+    ox, oy = float(org[0]), float(org[1])
     text = (
         "# 由 tools/make_synthetic.py 自动生成的合成图标定（仅用于离线开发与回归测试）\n"
         "meta:\n"
@@ -271,7 +362,8 @@ def main() -> int:
             "missing_column": dict(missing={"slot_column"}),
             "spokes_7":       dict(missing_spokes=1),
             "spokes_4":       dict(missing_spokes=4),
-            "glove_on_wheel": dict(glove_at=(120.0, 40.0)),
+            # ★ 轮盘槽实测在左上 (42,43)（原写 (120,40)，那是旧布局）
+            "glove_on_wheel": dict(glove_at=SLOTS["slot_wheel"]["center"]),
             "all_missing":    dict(missing=set(SLOTS.keys())),
             "assembly_done":  dict(missing=set(SLOTS.keys()), assembly_stage=4),
             "assembly_no_cap": dict(missing=set(SLOTS.keys()), assembly_stage=3),

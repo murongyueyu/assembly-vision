@@ -31,12 +31,33 @@ class Segmenter:
 
     # ── 对外主入口 ────────────────────────────────────────────
     def segment(self, bgr: np.ndarray, ts: float = 0.0, scale: float = 1.0,
-                want_features: bool = True) -> SegResult:
+                want_features: bool = True,
+                work_roi: Optional[np.ndarray] = None) -> SegResult:
+        """分割。
+
+        ★ work_roi（工位全局 ROI）：
+          传入一个与 bgr 同尺寸的 0/255 掩膜时，**黄铜只在掩膜内检测**。
+          这是对付"桌面/墙面被当成黄铜"的正解（见 AGENTS.md 2.2）：
+          实测踩过 —— 木桌的 H/S 与黄铜重叠，画面顶部的木桌整块被涂成黄铜，
+          产生 13269mm² 的假连通域（真零件最大才 3281mm²）。
+
+          为什么不用"调阈值"：单独收紧 h_max/s_max 会削掉零件自己的高光
+          （实测零件 S 上限 109、H 上限 45，与桌面区间本就重叠），
+          而 ROI 是**位置即身份**，与颜色无关，稳得多。
+
+          ROI 由调用方算（`Qualifier.work_roi_mask()`），因为它要知道料盘单应
+          和装配位；`core/` 不去猜这些。
+        """
         t0 = time.time()
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
         brass_mask = self._mask(hsv, self.brass)
         glove_mask = self._mask(hsv, self.glove)
+        if work_roi is not None:
+            if work_roi.shape[:2] != brass_mask.shape[:2]:
+                work_roi = cv2.resize(work_roi, (brass_mask.shape[1], brass_mask.shape[0]),
+                                      interpolation=cv2.INTER_NEAREST)
+            brass_mask = cv2.bitwise_and(brass_mask, work_roi)
 
         res = SegResult(ts=ts, scale=scale, brass_mask=brass_mask, glove_mask=glove_mask)
 

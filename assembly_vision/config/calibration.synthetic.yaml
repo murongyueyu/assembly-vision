@@ -6,7 +6,7 @@ fov:
   work_distance_mm: 400.0
   gsd_mm_per_px: 0.4
 tray_map:
-  homography: [[2.5, 0.0, 30.0], [0.0, 2.5, 30.0], [0.0, 0.0, 1.0]]
+  homography: [[2.5, 0.0, 305.0], [0.0, 2.5, 30.0], [0.0, 0.0, 1.0]]
   scale: 1.0
   on_rectified: false
   reprojection_rms_px: 0.0

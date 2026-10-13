@@ -151,35 +151,60 @@ def check_stereo(frame: np.ndarray, mode: str = "side_by_side",
 
 def probe_one(dev, backend_name: str, fourcc: str, w: int, h: int,
               fps_req: float, seconds: float):
-    """试一个模式。返回 dict（失败则 ok=False）。"""
+    """试一个模式。★ 每档都起一个独立子进程。
+
+    为什么不能在同一进程里反复开关：UVC 相机连续 open/close + 切分辨率
+    会陷入降级状态。实测踩过 —— 连续开关十几次后，所有模式的帧率
+    都从 48 fps 掉到 4.5 fps，拔插 USB 才恢复。
+    独立进程能让设备在进程退出时被干净释放。
+    """
+    import json
+    import subprocess
+    import tempfile
+
     res = {"req": (w, h), "ok": False, "got": None, "fps": 0.0,
            "frame": None, "note": ""}
-    backend = resolve_backend(backend_name)
-    cap = cv2.VideoCapture(dev, backend)
-    if not cap.isOpened() and backend != cv2.CAP_ANY:
-        cap.release()
-        cap = cv2.VideoCapture(dev, cv2.CAP_ANY)
-        res["note"] = "回退 CAP_ANY"
-    if not cap.isOpened():
-        cap.release()
-        res["note"] = "打不开"
-        return res
+    one = os.path.join(HERE, "probe_one.py")
+    tmp = os.path.join(tempfile.gettempdir(),
+                       "probe_one_%dx%d.json" % (w, h))
+    cmd = [sys.executable, one,
+           "--device", str(dev), "--backend", backend_name,
+           "--fourcc", fourcc, "--mode", "%dx%d" % (w, h),
+           "--fps", str(fps_req), "--seconds", str(seconds), "--out", tmp]
     try:
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        cap.set(cv2.CAP_PROP_FPS, fps_req)
-        time.sleep(0.3)
-        frame, fps = measure(cap, seconds=seconds)
-        if frame is None:
-            res["note"] = (res["note"] + " 无帧").strip()
-            return res
-        fh, fw = frame.shape[:2]
-        res.update(ok=True, got=(fw, fh), fps=fps, frame=frame)
-        if (fw, fh) != (w, h):
-            res["note"] = (res["note"] + " 回落到 %dx%d" % (fw, fh)).strip()
-    finally:
-        cap.release()
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       timeout=max(20.0, seconds * 6 + 20.0), check=False)
+        if os.path.exists(tmp):
+            with open(tmp, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            os.remove(tmp)
+            got = d.get("got")
+            res.update(ok=bool(d.get("ok")), fps=float(d.get("fps", 0.0)),
+                       note=str(d.get("note", "")),
+                       got=(got[0], got[1]) if got else None)
+    except Exception as e:                                     # noqa: BLE001
+        res["note"] = "子进程失败: %s" % e
+    return res
+
+
+def probe_one_capture(dev, backend_name: str, fourcc: str, w: int, h: int,
+                      fps_req: float, seconds: float, keep_path: str = ""):
+    """同 probe_one，但把样张也带回来（再用一次独立进程）。"""
+    res = probe_one(dev, backend_name, fourcc, w, h, fps_req, seconds)
+    if res["ok"] and keep_path:
+        import subprocess
+        one = os.path.join(HERE, "probe_one.py")
+        cmd = [sys.executable, one,
+               "--device", str(dev), "--backend", backend_name,
+               "--fourcc", fourcc, "--mode", "%dx%d" % (w, h),
+               "--fps", str(fps_req), "--seconds", "0.3", "--keep", keep_path]
+        try:
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=40, check=False)
+            from assemvision.imgio import imread_safe
+            res["frame"] = imread_safe(keep_path)
+        except Exception:                                      # noqa: BLE001
+            res["frame"] = None
     return res
 
 
@@ -220,9 +245,15 @@ def main() -> int:
           % (sys.version.split()[0], cv2.__version__, sys.platform))
     print("=" * 78)
 
+    # ★ 双目校验需要真实画面，所以每档都会存一张样张（放在 data/probe）。
+    #   --keep 只是额外决定要不要把路径打出来。
     results = []
+    keep_dir = os.path.join(ROOT, "data", "probe")
+    os.makedirs(keep_dir, exist_ok=True)
     for (w, h) in modes:
-        r = probe_one(dev, backend_name, args.fourcc, w, h, args.fps, args.seconds)
+        kp = os.path.join(keep_dir, "probe_%dx%d.png" % (w, h))
+        r = probe_one_capture(dev, backend_name, args.fourcc, w, h,
+                              args.fps, args.seconds, kp)
         results.append(r)
         if not r["ok"]:
             print("  %-11s -> %s" % ("%dx%d" % (w, h), r["note"] or "失败"))
@@ -294,12 +325,12 @@ def main() -> int:
     print("     # 单眼为 %dx%d" % (eye_w, eye_h))
     print("=" * 78)
 
-    if args.keep:
-        out = os.path.join(ROOT, "data", "probe")
-        for got, r in sorted(best_by_mode.items()):
-            p = os.path.join(out, "probe_%dx%d.png" % got)
-            if imwrite_safe(p, r["frame"]):
-                print("  样张已存: %s" % p)
+    if keep_dir:
+        saved = [p for p in (os.path.join(keep_dir, "probe_%dx%d.png" % g)
+                             for g in sorted(best_by_mode))
+                 if os.path.exists(p)]
+        for p in saved:
+            print("  样张已存: %s" % p)
     return 0
 
 

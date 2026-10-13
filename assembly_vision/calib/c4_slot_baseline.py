@@ -59,15 +59,29 @@ def main() -> int:
     print("请把【一整套已知合格的标准件】按料位放好，保持不动。")
     ask("准备好了按回车开始采集…")
     n = 0
+    reject = {s["id"]: 0 for s in tray.slots}
     while n < args.frames:
         frame, f = grab_small(src)
         if frame is None:
             print("抓帧失败"); break
-        res = seg.segment(frame, scale=f.scale)
-        slots = q.check_slots(res, f.scale)
+        # ★ 用两遍分割（几何 ROI -> 定位姿 -> 位姿修正的 ROI 再分）：
+        #   木桌的 HSV 与黄铜重叠，不限制范围会出现 13269mm² 的假连通域，
+        #   把覆盖率与零件识别全带偏。见 config 的 work_roi_margin_mm。
+        res, _pose, _src, _ident = q.segment_with_roi(seg, frame, scale=f.scale)
+        # ★★ 必须传 bgr=frame：
+        #   不传的话 check_slots 算不出**色域特征**，而且 `bgr=None` 时
+        #   features_from_blob 也不会补 area_mm2/色域，于是零件识别会用
+        #   "内置初值模板"去比对，跟刚标定好的真实模板对不上 ——
+        #   实测症状：明明零件都放好了，slot_cap/slot_base 却一个样本都采不到。
+        slots = q.check_slots(res, f.scale, bgr=frame)
         for sr in slots:
-            if sr.present:
+            # ★ 用 verdict == OK，不要用 sr.present：
+            #   present 只反映覆盖率，**零件认错时（verdict=NG）它仍可能是 True**，
+            #   那样就把"放错零件"的帧当作标准件基线采进去了。
+            if sr.verdict == "OK":
                 acc[sr.slot_id].append((sr.coverage, sr.features))
+            else:
+                reject[sr.slot_id] = reject.get(sr.slot_id, 0) + 1
         n += 1
         if n % 5 == 0:
             print("  已采 %d/%d 帧，各槽有效样本 %s"
@@ -79,17 +93,31 @@ def main() -> int:
     ok_all = True
     for sid, samples in acc.items():
         if len(samples) < max(3, args.frames // 4):
-            print(" !! %s 有效样本太少（%d），检查该槽是否放了件、ROI 是否正确"
-                  % (sid, len(samples)))
+            nr = reject.get(sid, 0)
+            print(" !! %s 有效样本太少（%d），被拒 %d 帧" % (sid, len(samples), nr))
+            print("    可能原因：① 该槽没放件  ② ROI 位置不对")
+            print("              ③ 零件特征与 part_templates 不符（放错零件？）")
+            print("    排查：跑 tools/tune_slots.py 看该槽的覆盖率与识别结果")
             ok_all = False
             continue
         covs = np.array([s[0] for s in samples])
         print(" %s：" % sid)
-        print("    覆盖率 均值 %.3f  σ %.3f  (min %.3f max %.3f)"
-              % (covs.mean(), covs.std(), covs.min(), covs.max()))
+        print("    覆盖率 均值 %.3f  σ %.3f  (min %.3f max %.3f)  被拒 %d 帧"
+              % (covs.mean(), covs.std(), covs.min(), covs.max(), reject.get(sid, 0)))
         calib.set("slots.%s.coverage" % sid, round(float(covs.mean()), 4))
         calib.set("slots.%s.coverage_std" % sid, round(float(covs.std()), 4))
         calib.set("slots.%s.frames" % sid, len(samples))
+        # ★ has_hole：该槽标准件有没有内孔。
+        #   文档字符串里一直写着会产出这个字段，但代码漏了 —— 补上。
+        #   它给"齐套性/完整性"检查用：孔数对不上就说明零件不对或装反了。
+        holes = [float(s[1].get("holes", np.nan)) for s in samples]
+        holes = [h for h in holes if np.isfinite(h)]
+        if holes:
+            h_med = float(np.median(holes))
+            calib.set("slots.%s.has_hole" % sid, bool(h_med >= 0.5))
+            calib.set("slots.%s.holes_median" % sid, h_med)
+            print("    内孔数 中值 %.0f  -> has_hole=%s"
+                  % (h_med, "是" if h_med >= 0.5 else "否"))
         # 特征
         for fkey in FEATS:
             vals = np.array([s[1].get(fkey, np.nan) for s in samples], dtype=np.float64)

@@ -79,20 +79,60 @@ def main() -> int:
         refs = pc.reference_dict()
         print("位姿标记参考位置已记录：对角线 %.1f px" % (pc.ref_diag_px or 0))
     else:
-        print("在图上依次点出四个已知 tray mm 的点（左上→右上→右下→左下）")
-        pts = show_and_pick(img, 4)
+        print("窗口里连续取流显示：点出料盘的四个【外角顶点】（顺序不限）")
+        pts = show_and_pick(img, 4, src=src)
         if len(pts) < 4:
             print("没点够四点"); return 1
-        mm = []
-        for i, name in enumerate(("左上", "右上", "右下", "左下")):
-            s = ask("第 %d 点(%s) 的 tray 坐标 mm，格式 x,y：" % (i + 1, name), "")
-            try:
-                mm.append([float(v) for v in s.split(",")])
-            except Exception:                       # noqa: BLE001
-                print("格式不对:", s); return 1
+
+        # ══════════════════════════════════════════════════════════
+        # ★★ 自动把"点到的 4 个像素点"对应到"料盘四角 mm 坐标"
+        #
+        # 为什么不能靠用户按顺序输入坐标：实测踩过 ——
+        #   脚本要求 左上→右上→右下→左下，用户按"左上→右上→左下→右下"输入，
+        #   第 3、4 点给反了，单应把轴翻转，之后所有槽位 ROI 全部错位。
+        #   而**两个常用的校验指标都查不出这个错**：
+        #     · 投回残差恒为 0.00 —— 4 点定单应有 8 自由度 8 约束，任何对应都能完美拟合
+        #     · GSD 仍然正确     —— 翻转坐标轴不改变尺度
+        #   => 所以改成自动识别角点顺序，用户只需"点到四个角"，顺序无所谓。
+        #
+        # 识别方法：料盘是平面上的正方形，透视变换下四点的几何关系仍保序。
+        #   ① 用质心把四点分成上/下两组（各 2 点）
+        #   ② 每组内按 x 排序 -> 左上/右上、左下/右下
+        # ══════════════════════════════════════════════════════════
+        P = np.asarray(pts, dtype=np.float64)
+        c = P.mean(axis=0)
+        order = np.argsort(P[:, 1])          # 先按 y 排
+        top, bot = P[order[:2]], P[order[2:]]
+        tl, tr = top[np.argsort(top[:, 0])]  # 上排按 x -> 左上、右上
+        bl, br = bot[np.argsort(bot[:, 0])]  # 下排按 x -> 左下、右下
+        side = float(np.linalg.norm(tr - tl))
+        print("  自动识别角点顺序（你点的顺序无所谓）：")
+        print("     左上 px=(%.0f,%.0f)  右上 px=(%.0f,%.0f)"
+              % (tl[0], tl[1], tr[0], tr[1]))
+        print("     右下 px=(%.0f,%.0f)  左下 px=(%.0f,%.0f)"
+              % (br[0], br[1], bl[0], bl[1]))
+        print("     上边长 %.0f px  下边长 %.0f px  左边长 %.0f px  右边长 %.0f px"
+              % (np.linalg.norm(tr - tl), np.linalg.norm(br - bl),
+                 np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
+        w_ask = ask("料盘边长 mm（回车用默认 160）：", "160")
+        try:
+            SIDE_MM = float(w_ask)
+        except ValueError:
+            SIDE_MM = 160.0
+        # 料盘 mm 坐标系：左上为原点，X 向右、Y 向下
+        mm = [[0.0, 0.0], [SIDE_MM, 0.0], [SIDE_MM, SIDE_MM], [0.0, SIDE_MM]]
+        pts = [tuple(tl), tuple(tr), tuple(br), tuple(bl)]
         H, _ = cv2.findHomography(np.asarray(mm, np.float64),
                                   np.asarray(pts, np.float64), 0)
         src_ok, dst_ok = mm, pts
+
+        # ★ 方向自检：X 向右、Y 向下的映射，其仿射部分的行列式应为【正】。
+        #   若为负，说明角点被镜像识别（点到了意料之外的位置），必须拦下来。
+        det = float(H[0, 0] * H[1, 1] - H[0, 1] * H[1, 0])
+        print("  方向自检：仿射行列式 = %.4f  -> %s"
+              % (det, "✓ 方向正确（X右/Y下）" if det > 0 else "★ 方向异常（疑似镜像）"))
+        if det <= 0:
+            print("  ★ 角点顺序可能被识别反了，请重跑并确认四个角都点在料盘外角顶点上")
 
     if H is None:
         print("单应计算失败")
