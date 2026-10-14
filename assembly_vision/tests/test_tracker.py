@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -182,7 +183,7 @@ def main() -> int:
         return np.zeros(shape, np.uint8)
 
     tr4 = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
-                       "max_area_px": 100000, "lost_grace_frames": 20})
+                       "max_area_px": 100000, "lost_grace_seconds": 0.15})
     b = mk_blob(320, 240, 4000.0)
     tr4.update(frame, [b], detect=True, classify=lambda f: ("P_KEEP", 0.9))
     check(len(tr4.tracks) == 1 and tr4.tracks[0].ever_seen,
@@ -210,14 +211,18 @@ def main() -> int:
           "② 全图能搜到就绝不能判丢（实测 %s）" % sorted(set(ok_again)))
 
     # ③ 遮挡物**移开**且全图**搜不到** -> 超过 lost_grace_frames 才判 lost
+    # ★ 判据改成**按秒**了，所以测试必须让**真实时间过去**
+    #   （第一版未加 sleep，瞬间跑 40 帧 -> clear_seconds 恒为 ~0 -> 永远不判丢）。
     seen = []
+    t0 = time.perf_counter()
     for i in range(1, 41):
         tr4.update(frame, [], detect=True, seen_ids=set(), occluder=no_glove())
         st = tr4.tracks[0].state if tr4.tracks else "PRUNED"
-        seen.append((i, st))
-    early = [st for i, st in seen if i <= 20]
-    late = [st for i, st in seen if i > 20]
-    print("   移开后全图搜不到: 前 20 帧 %s -> 第 21 帧起 %s"
+        seen.append((time.perf_counter() - t0, st))
+        time.sleep(0.02)          # 每帧 20ms -> 40 帧共 0.8s，跨过 0.15s 窗口
+    early = [st for el, st in seen if el <= 0.15]
+    late = [st for el, st in seen if el > 0.15]
+    print("   移开后全图搜不到: 0.15s 内 %s -> 之后 %s"
           % (sorted(set(early)), sorted(set(late))))
     check(all(s == "occluded" for s in early),
           "③ 宽限窗口内应是 occluded（正在全图搜），实测 %s" % sorted(set(early)))
@@ -286,6 +291,63 @@ def main() -> int:
     check(len(changed) == 1,
           "一个块只能被一条轨迹认领（实测被 %d 条同时认领）" % len(changed))
     check(len(tr6.tracks) == 2, "不该因为这个块多出轨迹（实测 %d 条）" % len(tr6.tracks))
+
+    print("\n== “认不出” ≠ “不在”：有像零件但认不出的块时不能判丢 ==")
+    print("   实测踩过：底座明明在那儿，只是分类器没给出 id，")
+    print("   却被报成「丢失」——这是最误导的一种错。")
+    tr7 = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000, "lost_grace_seconds": 0.05})
+    b7 = mk_blob(320, 240, 4000.0)
+    tr7.update(frame, [b7], detect=True, classify=lambda f: ("P_HERE", 0.9))
+    t0 = time.perf_counter()
+    states = []
+    for _ in range(30):
+        # ★ 关键：seen_ids 空（没认出 id）但 unidentified=True（有像零件的块）
+        tr7.update(frame, [], detect=True, seen_ids=set(),
+                   occluder=no_glove(), unidentified=True)
+        states.append(tr7.tracks[0].state if tr7.tracks else "PRUNED")
+        time.sleep(0.01)
+    print("   有未知块、全图没认出 id，跑 %.2fs -> 状态: %s"
+          % (time.perf_counter() - t0, sorted(set(states))))
+    check(all(sv == "occluded" for sv in states),
+          "有‘像零件但认不出’的块时不能判丢（实测 %s）" % sorted(set(states)))
+
+    print("\n== 防幽灵：新轨迹只能建在允许的区域内 ==")
+    tr8 = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000})
+    far = mk_blob(620, 460, 4000.0)          # 在“允许区基”之外
+    tr8.update(frame, [far], detect=True, classify=lambda f: ("P_NOISE", 0.9),
+               allow_new=lambda b: b.centroid[0] < 400)
+    print("   区外的块 + allow_new 拒绝 -> 轨迹数 = %d（应为 0）" % len(tr8.tracks))
+    check(len(tr8.tracks) == 0,
+          "allow_new 拒绝的块不能建轨迹（实测 %d 条）" % len(tr8.tracks))
+    near = mk_blob(200, 200, 4000.0)
+    tr8.update(frame, [near], detect=True, classify=lambda f: ("P_OK", 0.9),
+               allow_new=lambda b: b.centroid[0] < 400)
+    print("   区内的块 -> 轨迹数 = %d（应为 1）" % len(tr8.tracks))
+    check(len(tr8.tracks) == 1, "allow_new 放行的块应正常建轨迹")
+
+    print("\n== 拿走又放回：轨迹不能早删，回来要能恢复 ==")
+    tr9 = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000, "lost_grace_seconds": 0.05,
+                       "gone_keep_seconds": 30.0})
+    b9 = mk_blob(320, 240, 4000.0)
+    tr9.update(frame, [b9], detect=True, classify=lambda f: ("P_BACK", 0.9))
+    for _ in range(30):                      # 拿走（全图搜不到）
+        tr9.update(frame, [], detect=True, seen_ids=set(), occluder=no_glove())
+        time.sleep(0.01)
+    st_gone = tr9.tracks[0].state if tr9.tracks else "PRUNED"
+    print("   拿走后：轨迹数=%d 状态=%s（应仍在，不是 PRUNED）"
+          % (len(tr9.tracks), st_gone))
+    check(len(tr9.tracks) == 1, "拿走后轨迹不能立刻删（否则放回来就成新轨迹）")
+    # 放回原位
+    tr9.update(frame, [mk_blob(320, 240, 4000.0)], detect=True,
+               classify=lambda f: ("P_BACK", 0.9))
+    print("   放回原位：轨迹数=%d 状态=%s 身份=%s"
+          % (len(tr9.tracks), tr9.tracks[0].state if tr9.tracks else "-",
+             tr9.tracks[0].part_id if tr9.tracks else "-"))
+    check(len(tr9.tracks) == 1 and tr9.tracks[0].state == "detected",
+          "放回原位应**恢复同一条轨迹**（而不是新建），否则就是幽灵")
 
     print("\n== IoU 与 ROI 工具 ==")
     check(abs(_iou((0, 0, 10, 10), (0, 0, 10, 10)) - 1.0) < 1e-6, "同框 IoU=1")

@@ -141,6 +141,11 @@ class TrackState:
     state: str = "detected"                    # detected | tracked | occluded | lost
     age: int = 0
     lost_frames: int = 0
+    # ★★ `miss_streak`：连续多少帧**没有拿到检测结果**（不管追踪器报什么）。
+    #   用它决定「还值不值得跑 KCF」—— 因为 `lost_frames` 只在**真检测到**时清零，
+    #   如果用它做这个判断，那些被保留的 `gone` 轨迹会**永远在跑 KCF**
+    #   （实测踩过：保留 60 秒后帧率从 28fps 掉到 **9fps**）。
+    miss_streak: int = 0
     # ── 丢失判据用的三个计时（用户明确定义，见下方 `PartTracker._judge_lost`）──
     #   ★ 语义：**不是"看不见多久就怀疑"，而是"遮挡物移开后再给一小段时间
     #     全图搜不到"才算丢失**（用户原话）。
@@ -148,9 +153,12 @@ class TrackState:
     #     clear_frames     遮挡物**已移开**之后过了多少帧（判丢的计时器）
     #     ever_seen        是否曾经真的检测到过（新建后连一次都没看到的不算"丢"）
     occluded_frames: int = 0
-    clear_frames: int = 0
+    clear_frames: int = 0                        # 兼容旧字段（帧数，仅调试用）
+    clear_since: float = 0.0                     # 遮挡物移开的那一刻（perf_counter）
+    clear_seconds: float = 0.0                   # 已过去多少**秒**（判丢用它）
     ever_seen: bool = False
     covered: bool = False                      # 本帧是否被遮挡物盖着
+    gone_since: float = 0.0                    # 进入 gone 的时刻（用于保留多久）
     # ★★ 「最后一次真正检测到」的位置与轮廓 —— **不要**用卡尔曼预测值做匹配。
     #   实测踩过：追踪失败后卡尔曼会漂移，而匹配用的是 `centroid`（预测值），
     #   配上宽松的 `dist_match_px=40`，一条轨迹会**抢到别处的块**
@@ -203,12 +211,14 @@ class TrackState:
         if self.state == "occluded":
             if self.covered:
                 # ★ 遮挡物**还盖着** —— 永不判丢（用户明确要求）
-                return "被挡 %d帧" % self.occluded_frames
+                return "被挡 %.1fs" % (self.occluded_frames / 30.0)
             if self.visible_ratio <= 0.02:
-                return "全图搜 %d帧" % self.clear_frames
+                # ★ 按**秒**显示，不按帧 —— 帧数在掉帧时与真实时间脱节
+                #   （实测用户"等了一分钟"而计数器只走 64 帧）。
+                return "全图搜 %.1fs" % self.clear_seconds
             return "遮挡 %d%%" % int(round(100 * (1.0 - self.visible_ratio)))
         if self.state == "lost":
-            return "丢失(搜 %d帧无果)" % self.clear_frames
+            return "丢失(全图搜 %.1fs 无果)" % self.clear_seconds
         if self.state == "gone":
             return "已放弃"
         name = self.part_id or "?"
@@ -238,7 +248,23 @@ class PartTracker:
         #     ① 遮挡物**还盖着**的时候，**永不判丢**（挡多久都不算）
         #     ② 计时从"遮挡物**完全移开**"那一刻开始，默认 2 秒
         #     ③ 到期前必须做**全图搜索**（不是只在原位附近找）
-        self.lost_grace_frames = int(c.get("lost_grace_frames", 60))   # 60 帧 ≈ 2 秒
+        # ★★ 宽限期**以秒为准**（用户：「暂定2秒」）。
+        #   `lost_grace_frames` 保留作为兼容字段，内部一律用秒。
+        #   实测踩过：用户感觉「等了一分钟」，而帧数只走了 64 ——
+        #   帧数在掉帧/暂停时与真实时间脱节。
+        self.lost_grace_seconds = float(c.get("lost_grace_seconds", 2.0))
+        self.lost_grace_frames = int(c.get("lost_grace_frames",
+                                           round(self.lost_grace_seconds
+                                                 * float(c.get("assumed_fps", 30.0)))))
+        # ★ 判丢按**秒**算，所以要有个帧率假设把 `lost_grace_frames` 换算成秒。
+        #   相机是 31fps；用 30 作缺省。
+        self.assumed_fps = float(c.get("assumed_fps", 30.0))
+        # ★★「已放弃」的轨迹**也要留够久**，因为零件可能被拿走又放回来 ——
+        #   实测用户问「如果零件回去了，该怎么识别」：留着它，等同一块回来时
+        #   `_detect` 能按位置重新关联上，**身份与历史都恢复**。
+        #   ★ 而且这也是防幽灵的关键：若一个回来的块不能关联到原轨迹，
+        #     它会**新建一条** -> 同一零件两条轨迹 -> 界面上 "零件 8"。
+        self.gone_keep_seconds = float(c.get("gone_keep_seconds", 60.0))   # 60 帧 ≈ 2 秒
         self.cover_overlap_ratio = float(c.get("cover_overlap_ratio", 0.25))
         self.min_area_px = float(c.get("min_area_px", 400))
         self.max_area_px = float(c.get("max_area_px", 8000))
@@ -269,7 +295,9 @@ class PartTracker:
                detect: bool = True,
                classify=None,
                seen_ids: Optional[set] = None,
-               occluder: Optional[np.ndarray] = None) -> List[TrackState]:
+               occluder: Optional[np.ndarray] = None,
+               unidentified: bool = False,
+               allow_new=None) -> List[TrackState]:
         """跑一帧。
 
         参数
@@ -283,9 +311,9 @@ class PartTracker:
         t0 = time.perf_counter()
         self._frame_ref_n += 1
         if detect:
-            self._detect(frame, blobs or [], classify)
+            self._detect(frame, blobs or [], classify, allow_new=allow_new)
             self._run_trackers(frame)          # 检测帧也 update 一次，保持一致
-            self.judge_lost(seen_ids, occluder)
+            self.judge_lost(seen_ids, occluder, unidentified=unidentified)
             self._prune()
             self.stats["detects"] += 1
             self.last_detect_ms = (time.perf_counter() - t0) * 1000.0
@@ -302,7 +330,7 @@ class PartTracker:
         for t in self.tracks:
             t.age += 1
 
-    def _detect(self, frame, blobs, classify) -> None:
+    def _detect(self, frame, blobs, classify, allow_new=None) -> None:
         """把这一帧的分割结果与已有轨迹关联：匹配上的更新，没匹配上的新建。
 
         ★★ 用**全局最优匹配**而不是"按列表顺序贪心"：
@@ -350,8 +378,14 @@ class PartTracker:
             self._adopt(frame, t, b, bb, a, classify)
 
         # ③ 剩下没用上的块 -> 新建轨迹
+        #   ★★ llow_new 是**防幽灵的最后一道闸**：
+        #     全图检测会把画面任何地方的像零件的块都拿进来（是有意的，
+        #     判丢要全图搜），但**建新轨迹**应该只在工位范围内 ——
+        #     否则料盘外的噪声会变成一个个「全图搜」空心圈幽灵。
         for i, (b, bb, a) in enumerate(cands):
             if i in b_used:
+                continue
+            if allow_new is not None and not allow_new(b):
                 continue
             t = TrackState(bbox=bb, area_px=a, area_ref=a, contour=b.contour,
                            centroid=(float(b.centroid[0]), float(b.centroid[1])),
@@ -398,6 +432,7 @@ class PartTracker:
         t.ever_seen = True
         t.clear_frames = 0
         t.covered = False
+        t.miss_streak = 0          # 拿到检测结果了 -> 重置
         # ★ 记录"最后一次真正检测到"的位置/框 —— 匹配用它（不用卡尔曼预测值）
         t.last_bbox = bb
         t.last_centroid = (float(b.centroid[0]), float(b.centroid[1]))
@@ -439,6 +474,7 @@ class PartTracker:
         if key not in self._kf:
             self._kf[key] = KalmanXY(t.centroid[0], t.centroid[1])
         self._frame_ref[key] = self._frame_ref_n
+        t.miss_streak = 0      # 追踪器刚重建，重新计数
 
     def _run_trackers(self, frame) -> None:
         for t in self.tracks:
@@ -450,7 +486,10 @@ class PartTracker:
             #   而它已经"久不可见"，继续跑没有收益。只保留卡尔曼预测，
             #   等全图搜索真找到它时 `_adopt` 会重建追踪器。
             #   （实测踩过：影子轨迹白白吃掉预算，每帧均摊从 32ms 抬到 40ms。）
-            if tr is not None and t.lost_frames <= self.lost_grace_frames:
+            # ★ 只在「还相信它在」时跑 KCF：
+            #   miss_streak 小 =　刚看到过 / 刚被挡 —— 值得跟；
+            #   miss_streak 大 =　久不可见 —— 跑了也白跑（每目标约 8ms）。
+            if tr is not None and t.miss_streak <= self.lost_grace_frames:
                 try:
                     ok, box = tr.update(frame)
                 except Exception:                                  # noqa: BLE001
@@ -471,6 +510,7 @@ class PartTracker:
                     t.centroid = (px, py)
             if not ok:
                 t.lost_frames += 1
+                t.miss_streak += 1
                 # 追踪器 update 失败 = 目标**看不见了**。
                 # ★ 注意：`lost_frames` 只是"连续多少次追踪失败"，
                 #   **不再用它判 lost** —— 判 lost 由 `_judge_lost()` 按
@@ -481,7 +521,8 @@ class PartTracker:
                 t.visible_ratio = 0.0
 
     def judge_lost(self, seen_ids: Optional[set] = None,
-                   occluder: Optional[np.ndarray] = None) -> None:
+                   occluder: Optional[np.ndarray] = None,
+                   unidentified: bool = False) -> None:
         """判定 `occluded` / `lost` / `gone` —— **按用户定义的语义**。
 
         ★★ 用户原话（这是唯一权威定义，别再自己发明）：
@@ -489,56 +530,93 @@ class PartTracker:
              到**遮挡物已经完全消失了之后的一小段时间（暂定2秒）**还是没有检测到
              这个零件，算作这个零件丢失。而且找这个零件是**全图搜索**而不是范围搜索。」
 
-        所以三段逻辑：
-          ① `covered`  —— 遮挡物**还盖着**这个零件：`occluded`，**永不判丢**
-                          （挡多久都不算；零件没动）
-          ② 遮挡物**刚移开**：开始计时 `clear_frames`，在 `lost_grace_frames`
-                          窗口内做**全图搜索**（由调用方传 `seen_ids` 全图识别的结果）；
-                          这段时间仍是 `occluded`（正在找，先别惊动）
+        逻辑：
+          ① `covered`  —— 遮挡物**还盖着**：`occluded`，**永不判丢**（挡多久都不算）
+          ② 遮挡物**已移开**：开始计时（按**秒**），窗口内做**全图搜索**，
+                           这段时间仍是 `occluded`（正在找，先别惊动）
           ③ 窗口过期**还没找到** -> `lost`；再久 -> `gone`（允许清理）
 
         参数
         ----
-        seen_ids : 本帧**全图**识别到的零件 id 集合（不是只在原位附近找）。
-                   ★ 必须来自"覆盖全画面的检测"，否则就退化成范围搜索了。
-        occluder : 遮挡物掩膜（手套）；None 表示没有遮挡物。
+        seen_ids    : 本帧**全图**识别到的零件 id 集合。
+                      ★ 必须来自“覆盖全画面的检测”，否则就退化成范围搜索了。
+        occluder    : 遮挡物掩膜（手套）；None 表示没有遮挡物。
+        unidentified: 画面里**有没有“像零件但认不出身份”的块**。
+                      ★★ 这一条很关键（实测踩过）：如果那个位置**有东西**
+                         （只是分类器没给出 id），那就**不能判“丢失”** ——
+                         “认不出” ≠ “不在”。零件明明在那儿却被报成丢了，
+                         这是最误导的一种错。
+
+        ★ 计时用**真实时间**而不是帧数：实测用户感觉“等了一分钟”，
+          而帧数计数器只走了 64 —— 帧数在掉帧/暂停时与真实时间脱节。
         """
+        now = time.perf_counter()
         for t in self.tracks:
             if not t.ever_seen:
-                # 新建后**一次都没真看到**过：不算"丢"，直接清掉（多是误检）
+                # 新建后**一次都没真看到**过：不算“丢”，过一会儿清掉（多是误检）
                 if t.age > self.lost_grace_frames:
                     t.state = "gone"
                 continue
 
-            # ① 遮挡物还盖着吗？（看它有没有压在这个零件身上）
+            # ① 遮挡物还盖着吗？
             t.covered = self._is_covered(t, occluder)
             if t.covered:
                 t.occluded_frames += 1
-                t.clear_frames = 0
-                t.state = "occluded"          # ★ 挡着就永远是"遮挡"，不管多久
+                t.clear_since = 0.0
+                t.clear_seconds = 0.0
+                t.state = "occluded"          # ★ 挡着就永远是“遮挡”，不管多久
                 continue
 
-            # ② 遮挡物已移开
-            # ★★ 本帧追踪器**成功了**（`lost_frames == 0`）说明它就在那儿 ——
-            #   **不要**改写 `_adopt` / `_run_trackers` 已经算好的
-            #   `detected` / `tracked` 状态。实测踩过：这里无条件覆盖，
-            #   导致"完全可见(0%)"也被标成 `occluded`（遮挡对照图全变橙）。
+            # ② 本帧追踪器**成功了** -> 它就在那儿，
+            #    **不要**改写 `_adopt` / `_run_trackers` 已算好的状态。
+            #    （实测踩过：这里无条件覆盖，导致“完全可见(0%)”也被标 occluded。）
             if t.lost_frames == 0:
-                t.clear_frames = 0
+                t.clear_since = 0.0
+                t.clear_seconds = 0.0
                 continue
 
-            t.clear_frames += 1
+            # ③ 遮挡物已移开、且本帧没看到它 -> 开始/继续计时
+            if t.clear_since <= 0.0:
+                t.clear_since = now
+            t.clear_seconds = now - t.clear_since
+
             found = bool(seen_ids and t.part_id and t.part_id in seen_ids)
             if found:
-                t.clear_frames = 0            # 找到了 -> 它还在（只是刚才被挡）
+                # 全图搜到了 -> 它还在（只是刚才被挡），重置
+                t.clear_since = 0.0
+                t.clear_seconds = 0.0
                 continue
-            if t.clear_frames <= self.lost_grace_frames:
-                # 还在宽限窗口内：**正在全图搜**，先报"遮挡"（别过早惊动）
+            if unidentified:
+                # ★★ 画面里有“像零件但认不出”的块 -> 位置上**有东西**。
+                #    “认不出” ≠ “不在”，**不能判丢**。
                 t.state = "occluded"
-            elif t.clear_frames <= self.lost_grace_frames * 3:
+                continue
+
+            grace_s = self.lost_grace_seconds
+            if t.clear_seconds <= grace_s:
+                t.state = "occluded"          # 还在窗口内：正在全图搜
+            elif t.clear_seconds <= grace_s * 10.0:
                 t.state = "lost"              # 窗口过了还没找到 -> 丢
             else:
                 t.state = "gone"              # 再过久 -> 放弃（允许清理）
+
+    def sanity(self) -> Dict[str, object]:
+        """把匹配质量暴露出来，便于诊断“幽灵轨迹”。
+
+        实测踩过（用户截图）：界面上出现 `零件 8` 而物理上只有 4 个零件 ——
+        说明**同一零件被建了多条轨迹**。原因通常是：
+          · 分割/识别漏了某帧 -> 那块没匹配上 -> 新建一条
+          · 匹配阈值太松 -> 一条轨迹抢到别处的块
+        这里统计“同一 part_id 有几条轨迹”，`max_per_id > 1` 就是有问题。
+        """
+        per: Dict[str, int] = {}
+        for t in self.tracks:
+            if t.part_id:
+                per[t.part_id] = per.get(t.part_id, 0) + 1
+        return {"tracks": len(self.tracks), "per_id": per,
+                "max_per_id": max(per.values()) if per else 0,
+                "duplicated": [k for k, v in per.items() if v > 1]}
+
 
     def _is_covered(self, t: TrackState, occluder: Optional[np.ndarray]) -> bool:
         """这个零件**当前**被遮挡物盖着吗（按它最后已知的位置/轮廓判定）。
@@ -560,18 +638,30 @@ class PartTracker:
             return False
 
     def _prune(self) -> None:
-        """只在 `gone` 时才真删轨迹。
+        """清理轨迹。**只在 gone 且已过 gone_keep_seconds 之后**才真删。
 
-        ★ 为什么不删 `lost`：`lost` 只是"久到可疑"，零件可能还在原位被挡着；
-          删了它，`_last_pose` 缓存与界面上的"它应该在哪"就都没了 ——
-          而手一移开、零件露出来时**本该能立刻恢复**（`_adopt` 会重新关联上）。
+        ★★ 为什么不能早删（用户问「如果零件回去了，该怎么识别」）：
+          零件可能**被拿走又放回原位**。只要轨迹还在，回来的那块就能被
+          _detect 按位置重新关联上，**身份与历史都恢复**。
+          ★ 而且这也是**防幽灵的关键**：若回来的块不能关联到原轨迹，
+            它会**新建一条** -> 同一零件两条轨迹 -> 界面上出现「零件 8」。
+          实测踩过：原来超过宽限窗口就删，于是「拿走 -> 放回」就变成两条。
         """
+        now = time.perf_counter()
         keep = []
         for t in self.tracks:
             if t.state == "gone":
-                self._trackers.pop(id(t), None)
-                self._kf.pop(id(t), None)
-                continue
+                if t.gone_since <= 0.0:
+                    t.gone_since = now
+                    keep.append(t)
+                    continue
+                if now - t.gone_since > self.gone_keep_seconds:
+                    self._trackers.pop(id(t), None)
+                    self._kf.pop(id(t), None)
+                    self._frame_ref.pop(id(t), None)
+                    continue
+            else:
+                t.gone_since = 0.0
             keep.append(t)
         self.tracks = keep
 

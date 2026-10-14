@@ -107,6 +107,10 @@ def main() -> int:
     ap.add_argument("--window-scale", type=float, default=1.0,
                     help="显示放大倍数。★ 相机配置里 scale.realtime=0.5，"
                          "会在 640x480 窗口里塞一张 320x240 的图 -> 四周全是黑边（实测踩过）")
+    ap.add_argument("--allow-new-anywhere", action="store_true",
+                    help="允许在画面任何地方建新轨迹"
+                         "（默认只允许在工位 ROI 内，"
+                         "防止料盘外的噪声变成幽灵）")
     ap.add_argument("--full-search-every", type=int, default=30,
                     help="每 N 帧做一次**全图**检测（供判丢用）。"
                          "★ 判丢要求全图搜索，不能只搜原位附近；"
@@ -186,6 +190,30 @@ def main() -> int:
     for _s in (wp.get("slots") or []):
         if _s.get("part"):
             slot_parts[_s["id"]] = str(_s["part"])
+    # ★★ 防幽灵的最后一道闸：**新轨迹只允许建在工位范围内**。
+    #   全图检测会把画面任何地方的像零件的块都拿进来（这是**有意**的，
+    #   判丢要全图搜），但「建新轨迹」应该只在工位内 —— 否则料盘外的噪声/手边缘
+    #   会变成一个个「全图搜」空心圈幽灵（用户截图里就是这个）。
+    #   实测：work_roi 只占画面 24.8%，而**四个真零件全在里面**。
+    #   ★ 用 --allow-new-anywhere 可关掉这道闸（例如以后要支持「开放位置」）。
+    _roi_cache = {}
+    if args.allow_new_anywhere:
+        def _allow_new(_b):
+            return True
+    else:
+        def _allow_new(_b):
+            key = (frame.shape[0], frame.shape[1])
+            m = _roi_cache.get(key)
+            if m is None:
+                m = q.work_roi_mask(
+                    frame.shape, 1.0,
+                    margin_mm=float(wp.get("segment.work_roi_margin_mm", 25.0)))
+                _roi_cache[key] = m
+            cx, cy = int(_b.centroid[0]), int(_b.centroid[1])
+            if not (0 <= cy < m.shape[0] and 0 <= cx < m.shape[1]):
+                return False
+            return m[cy, cx] > 0
+
     # ★ 预先把槽位多边形算好（`glove_hits` 要它判断"手压在哪个槽"）。
     #   用**标称**位置即可 —— 手压判断只需要大致区域，不必跟位姿。
     slot_polys = {}
@@ -266,6 +294,7 @@ def main() -> int:
                 #   "范围搜索"了）。全图分割比带 ROI 略贵（实测 8.9 vs 10.5ms），
                 #   所以按 `full_search_every` 控制频率（默认约每秒一次）。
                 seen_ids = None
+                unidentified = False
                 occl = res.glove_mask if res is not None else None
                 # ★ 有轨迹进入"遮挡物已移开、正在全图找"的状态时，**加密全图搜索**，
                 #   否则 2 秒宽限窗口内可能一次全图都没跑到（全图比带 ROI 贵，
@@ -284,6 +313,7 @@ def main() -> int:
                     #   只对**面积像零件**的块识别（400~8000px），噪声块直接跳过。
                     try:
                         ids = set()
+                        unid = False
                         for _b in r_full.brass_blobs:
                             if not (tracker.min_area_px <= _b.area_px
                                     <= tracker.max_area_px):
@@ -291,15 +321,23 @@ def main() -> int:
                             _pid, _sc = classify(dict(_b.features or {}))
                             if _pid:
                                 ids.add(_pid)
+                            else:
+                                # ★★ 有“像零件但认不出身份”的块 -> 位置上有东西，
+                                #    只是没认出来。“认不出” ≠ “不在”，**不能判丢**。
+                                unid = True
                         seen_ids = ids
+                        unidentified = unid
                     except Exception:                              # noqa: BLE001
                         seen_ids = None
+                        unidentified = False
                     if occl is None:
                         occl = r_full.glove_mask
 
                 tracks = tracker.update(frame, blobs, detect=need_detect,
                                         classify=classify,
-                                        seen_ids=seen_ids, occluder=occl)
+                                        seen_ids=seen_ids, occluder=occl,
+                                        unidentified=unidentified,
+                                        allow_new=_allow_new)
                 trk_ms = (time.perf_counter() - ts) * 1000.0
 
                 # ── 手（蓝手套）检测 ──────────────────────────────
@@ -377,6 +415,9 @@ def main() -> int:
                 #   但含义不同（前者手移开能恢复，后者已经不管了）。
                 n_lost = sum(1 for t in tracks if t.state == "lost")
                 n_gone = sum(1 for t in tracks if t.state == "gone")
+                _san = tracker.sanity()
+                dup_txt = (("  ⚠ 重复:" + ",".join(_san["duplicated"]))
+                           if _san["duplicated"] else "")
                 hand_txt = ("手: 有（压在 %s）"
                             % ",".join(k.replace("slot_", "")
                                        for k, v in (hand_on or {}).items() if v)
@@ -386,7 +427,8 @@ def main() -> int:
                                   else ("手: 无" if show_hand else "手: 关")))
                 cv2.putText(canvas,
                             "零件 %d（可用 %d / 遮挡 %d / 久不可见 %d / 放弃 %d）  |  %s"
-                            % (len(tracks), n_ok, n_occ, n_lost, n_gone, hand_txt),
+                            % (len(tracks), n_ok, n_occ, n_lost, n_gone,
+                               hand_txt + dup_txt),
                             (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (230, 230, 230), 1,
                             cv2.LINE_AA)
                 cv2.putText(canvas,
