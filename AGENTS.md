@@ -69,6 +69,7 @@
 | **手套 `h_min` 95 是刚好卡住** | 手套 H p10=90/中位94 —— **一半在 95 以下**；150211px 青蓝在 H85~88；扫描 88->误检、**90 起为 0** -> 取 **91**；手套块 3219 -> **21469px**，`pressed_on` 从 none 变 base | 实录 2.26 |
 | **幽灵轨迹 + 缺件不报** | 匹配用了**预测位置**（漂移）+贪心认领 -> 轨迹抢块/虚增；修：`last_centroid` + **全局最优认领** + 不可见时不画轮廓；缺件改用**全图检测 `seen_ids`**（不是"轨迹在不在槽里"） | 实录 2.27 |
 | **幽灵在料盘外 + 「全图搜 0帧」** | 「0帧」=刚建就没跟住过 -> 从噪声里生的轨迹；`work_roi` 是**外扩 25mm** 的，挡不住边沿噪声 -> **先内缩 6px** + 新轨迹的块**必须能被认成零件**(0.60)；另：为支持放回而保留 gone 轨迹 -> 忘了停 KCF -> **9fps**，用 `miss_streak` 修回 26.6fps | 实录 2.28 |
+| **「全图搜 0帧」橙色标记** | 「0帧」=刚诞生没跟住过 -> **完全不画**；★★ `miss_streak` **不能在遮挡期间累计**（手盖 60 帧 -> 手移开再 30 帧就把**真零件当幻影删了**）——**被遮挡不是不存在的证据**；★ 不能用 KCF 返回值判幻影（**纯灰背景上它也返回 True**）| 实录 2.29 |
 
 ---
 
@@ -191,6 +192,7 @@ python tools/check_hand_box.py                   # 手（蓝手套）方框渲�
 python tools/verify_glove_fix.py                 # 手套检出对账（有手要检出/无手要 0）
 python tools/measure_glove_area.py               # 量手套面积分布（定 min_area_px 用）
 python tools/measure_glove_gamut.py              # 量手套色域余量（定 h_min 用）
+python tools/verify_allow_new.py                # 逐块看“新建轨迹”放行/拒绝及原因
 python tools/fix_glove_fragments.py              # 扫闭运算核 x 面积闸门
 python app.py --windowed                      # 正式跑（窗口模式方便调试）
 ```
