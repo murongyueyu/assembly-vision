@@ -151,6 +151,15 @@ class TrackState:
     clear_frames: int = 0
     ever_seen: bool = False
     covered: bool = False                      # 本帧是否被遮挡物盖着
+    # ★★ 「最后一次真正检测到」的位置与轮廓 —— **不要**用卡尔曼预测值做匹配。
+    #   实测踩过：追踪失败后卡尔曼会漂移，而匹配用的是 `centroid`（预测值），
+    #   配上宽松的 `dist_match_px=40`，一条轨迹会**抢到别处的块**
+    #   -> 那个块本该新建轨迹却没有，而轨迹数虚增 -> 界面上出现
+    #      "全图搜 N帧" 的**幽灵轮廓**（形状扭曲、位置在料盘外）。
+    last_bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    last_centroid: Tuple[float, float] = (0.0, 0.0)
+    # 遮挡时**只冻结位置、保留轮廓**：轮廓用于显示"它本来在哪、有多大"，
+    # 但部位不动。★ 只在 `ever_seen`（真的看到过）时才有意义。
     is_glove: bool = False
     detail: Dict[str, float] = field(default_factory=dict)
     id_margin: float = 0.12                    # 换标签需要比现有分数高出这么多
@@ -294,7 +303,16 @@ class PartTracker:
             t.age += 1
 
     def _detect(self, frame, blobs, classify) -> None:
-        """把这一帧的分割结果与已有轨迹关联：匹配上的更新，没匹配上的新建。"""
+        """把这一帧的分割结果与已有轨迹关联：匹配上的更新，没匹配上的新建。
+
+        ★★ 用**全局最优匹配**而不是"按列表顺序贪心"：
+           贪心时先遍历到的轨迹会抢走后面轨迹更该拿的块，
+           结果是"一条轨迹吃掉别人的块 + 那个块不再新建" -> 轨迹错配、数量虚增。
+           做法：把所有 (轨迹, 块) 的合法配对按打分排序，从高到低依次认领，
+           **每条轨迹与每个块都只能用一次**（互相最优）。
+        ★★ 匹配位置用 `last_centroid`（**最后一次真正检测到**的位置），
+           不用卡尔曼预测值 —— 见 `TrackState.last_centroid` 的说明。
+        """
         cands = []
         for b in blobs:
             a = float(b.area_px)
@@ -303,30 +321,42 @@ class PartTracker:
             x, y, w, h = cv2.boundingRect(b.contour)
             cands.append((b, (int(x), int(y), int(w), int(h)), a))
 
-        used = set()
-        for t in list(self.tracks):
-            best, best_iou = None, 0.0
-            for i, (b, bb, a) in enumerate(cands):
-                if i in used:
-                    continue
-                iou = _iou(t.bbox, bb)
+        # ① 收集所有合法配对并打分
+        pairs = []
+        for ti, t in enumerate(self.tracks):
+            if not t.ever_seen:
+                continue                       # 从没看到过的轨迹不参与匹配
+            rx, ry = t.last_centroid
+            for bi, (b, _bb, _a) in enumerate(cands):
+                iou = _iou(t.last_bbox, _bb)
                 cx, cy = b.centroid
-                d = float(np.hypot(cx - t.centroid[0], cy - t.centroid[1]))
-                score = iou if iou > 0 else (self.dist_match - d) / self.dist_match * 0.1
-                if (iou >= self.iou_match or d <= self.dist_match) and score > best_iou:
-                    best, best_iou = i, score
-            if best is None:
+                d = float(np.hypot(cx - rx, cy - ry))
+                if iou >= self.iou_match:
+                    pairs.append((iou + 1.0, ti, bi))       # IoU 命中，优先
+                elif d <= self.dist_match:
+                    # 距离命中：按接近程度打分（分数远低于 IoU 命中）
+                    pairs.append((1.0 - d / max(1e-6, self.dist_match), ti, bi))
+        pairs.sort(key=lambda p: -p[0])
+
+        # ② 从高到低认领，轨迹与块都只能用一次
+        t_used, b_used = set(), set()
+        for _score, ti, bi in pairs:
+            if ti in t_used or bi in b_used:
                 continue
-            used.add(best)
-            b, bb, a = cands[best]
+            t_used.add(ti)
+            b_used.add(bi)
+            t = self.tracks[ti]
+            b, bb, a = cands[bi]
             self._adopt(frame, t, b, bb, a, classify)
 
-        # 新目标
+        # ③ 剩下没用上的块 -> 新建轨迹
         for i, (b, bb, a) in enumerate(cands):
-            if i in used:
+            if i in b_used:
                 continue
             t = TrackState(bbox=bb, area_px=a, area_ref=a, contour=b.contour,
                            centroid=(float(b.centroid[0]), float(b.centroid[1])),
+                           last_bbox=bb,
+                           last_centroid=(float(b.centroid[0]), float(b.centroid[1])),
                            state="detected")
             # ★★ 新建轨迹就是"第一次真的看到它" —— 必须置 `ever_seen`。
             #   实测踩过：只在这里漏了，于是 `ever_seen` 恒为 False，
@@ -368,6 +398,9 @@ class PartTracker:
         t.ever_seen = True
         t.clear_frames = 0
         t.covered = False
+        # ★ 记录"最后一次真正检测到"的位置/框 —— 匹配用它（不用卡尔曼预测值）
+        t.last_bbox = bb
+        t.last_centroid = (float(b.centroid[0]), float(b.centroid[1]))
 
         if vis >= self.full_ratio:
             # ② 只有"看得够全"才动参考值，且**只允许缓慢上升/有限下降**
@@ -413,7 +446,11 @@ class PartTracker:
             tr = self._trackers.get(key)
             kf = self._kf.get(key)
             ok, box = (False, t.bbox)
-            if tr is not None:
+            # ★★ 长时间看不见的轨迹**不再跑 KCF** —— 每目标约 8ms（实测），
+            #   而它已经"久不可见"，继续跑没有收益。只保留卡尔曼预测，
+            #   等全图搜索真找到它时 `_adopt` 会重建追踪器。
+            #   （实测踩过：影子轨迹白白吃掉预算，每帧均摊从 32ms 抬到 40ms。）
+            if tr is not None and t.lost_frames <= self.lost_grace_frames:
                 try:
                     ok, box = tr.update(frame)
                 except Exception:                                  # noqa: BLE001
@@ -604,16 +641,31 @@ class PartTracker:
                  "gone": (90, 90, 220)}          # 红：已放弃
         for t in self.tracks:
             col = COLOR.get(t.state, (200, 200, 200))
-            if t.contour is not None and len(t.contour) >= 3:
+            # ★★ 没有可见部分的轨迹（`visible_ratio == 0`）**不要画轮廓** ——
+            #   那个 `contour` 是**旧的**，画出来是一个形状扭曲、位置在料盘外的
+            #   "**幽灵**"，比不画还误导（实测用户直接问"这是什么东西"）。
+            #   -> 只画一个十字 + 文字，明确表示"它曾在这、现在看不到"。
+            solid = t.visible_ratio > 0.02
+            if solid and t.contour is not None and len(t.contour) >= 3:
                 cv2.drawContours(canvas, [t.contour], -1, col, 2)
                 # 轮廓顶点（形状特征的直观体现）
                 for p in t.contour.reshape(-1, 2):
                     cv2.circle(canvas, (int(p[0]), int(p[1])), 1, col, -1)
-            if show_bbox:
+            if show_bbox and solid:
                 x, y, w, h = t.bbox
                 cv2.rectangle(canvas, (x, y), (x + w, y + h), col, 1)
-            cx, cy = int(t.centroid[0]), int(t.centroid[1])
-            cv2.drawMarker(canvas, (cx, cy), col, cv2.MARKER_CROSS, 10, 2)
+            # 质心：用 `last_centroid`（最后一次真看到的位置）比卡尔曼预测更可信
+            lx, ly = t.last_centroid if t.ever_seen else t.centroid
+            cx, cy = int(lx), int(ly)
+            if solid:
+                cv2.drawMarker(canvas, (cx, cy), col, cv2.MARKER_CROSS, 10, 2)
+            else:
+                # 空心的圈 + 放射线，一眼看出"这是记忆位置，不是当前观测"
+                cv2.circle(canvas, (cx, cy), 12, col, 1)
+                for ang in range(0, 360, 90):
+                    a = np.radians(ang)
+                    cv2.line(canvas, (cx, cy),
+                             (int(cx + 18 * np.cos(a)), int(cy + 18 * np.sin(a))), col, 1)
             cv2.putText(canvas, t.label(), (cx + 8, cy - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
 

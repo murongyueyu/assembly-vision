@@ -64,18 +64,6 @@ from assemvision.imgio import imread_safe                         # noqa: E402
 WIN = "零件检测 · 轮廓 + 追踪"
 
 
-def _id_in_slot(t, poly) -> bool:
-    """这个追踪目标的质心落在该槽多边形里吗（用 `cv2.pointPolygonTest`）。
-
-    比"按槽算覆盖率"轻得多，且不依赖分割结果 —— 只用来在面板上报"缺件"。
-    """
-    try:
-        import cv2 as _cv
-        return _cv.pointPolygonTest(
-            poly.reshape(-1, 1, 2).astype(np.float32),
-            (float(t.centroid[0]), float(t.centroid[1])), False) >= 0
-    except Exception:                                              # noqa: BLE001
-        return False
 
 
 def _read_frame(src, images, idx):
@@ -193,6 +181,11 @@ def main() -> int:
         pid, sc, _ = clf.classify(f)
         return pid, sc
 
+    # ★ 槽位 -> 该放的零件 id（"缺件"提示要用它，见下面的说明）
+    slot_parts = {}
+    for _s in (wp.get("slots") or []):
+        if _s.get("part"):
+            slot_parts[_s["id"]] = str(_s["part"])
     # ★ 预先把槽位多边形算好（`glove_hits` 要它判断"手压在哪个槽"）。
     #   用**标称**位置即可 —— 手压判断只需要大致区域，不必跟位姿。
     slot_polys = {}
@@ -214,6 +207,8 @@ def main() -> int:
     blank = 0
     last_detect_frame = -999
     last_full_search = -999
+    last_seen_ids = set()
+    last_missing = []
     full_search_every = max(1, int(args.full_search_every))
     t_start = time.time()
     fps_times = []
@@ -272,16 +267,31 @@ def main() -> int:
                 #   所以按 `full_search_every` 控制频率（默认约每秒一次）。
                 seen_ids = None
                 occl = res.glove_mask if res is not None else None
-                if (res is not None
-                        and frames - last_full_search >= full_search_every):
+                # ★ 有轨迹进入"遮挡物已移开、正在全图找"的状态时，**加密全图搜索**，
+                #   否则 2 秒宽限窗口内可能一次全图都没跑到（全图比带 ROI 贵，
+                #   所以平时按 full_search_every 稀疏跑）。
+                searching = any(
+                    t.state == "occluded" and not t.covered and t.lost_frames > 0
+                    for t in tracker.tracks)
+                gap = max(1, min(full_search_every, 10) if searching else full_search_every)
+                if (res is not None and frames - last_full_search >= gap):
                     last_full_search = frames
                     r_full = seg.segment(frame, scale=1.0)      # ★ 不带 work_roi = 全图
+                    # ★★ 判丢只需要"**哪些零件 id 在画面里可见**"，
+                    #   所以**直接对全图分割出的块做识别**就行 ——
+                    #   不要跑 `check_slots`（那要算覆盖率+特征+逐槽判定，
+                    #   实测把每帧均摊从 32ms 抬到 40ms）。
+                    #   只对**面积像零件**的块识别（400~8000px），噪声块直接跳过。
                     try:
-                        for _sl in q.check_slots(r_full, 1.0, bgr=frame):
-                            pid = (_sl.features or {}).get("id_part")
-                            if pid:
-                                seen_ids = seen_ids or set()
-                                seen_ids.add(pid)
+                        ids = set()
+                        for _b in r_full.brass_blobs:
+                            if not (tracker.min_area_px <= _b.area_px
+                                    <= tracker.max_area_px):
+                                continue
+                            _pid, _sc = classify(dict(_b.features or {}))
+                            if _pid:
+                                ids.add(_pid)
+                        seen_ids = ids
                     except Exception:                              # noqa: BLE001
                         seen_ids = None
                     if occl is None:
@@ -385,12 +395,17 @@ def main() -> int:
                                tracker.detect_every, seg_ms, trk_ms),
                             (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (170, 230, 170), 1,
                             cv2.LINE_AA)
-                # ★ 「缺件」提示：用户明确要"零件在画面里就要认出来"。
-                #   把**该有却没认到**的槽直接打出来 —— 否则"少了一个零件"
-                #   和"那个槽本来就空着"在画面上看不出区别（实测据此排查过一轮）。
-                seen = {t.part_id for t in tracks if t.part_id}
-                missing = [k for k, v in slot_polys.items()
-                           if not any(t.part_id and _id_in_slot(t, v) for t in tracks)]
+                # ★★ 「缺件」提示必须用**全图检测的权威结果** `seen_ids`，
+                #   不能拿"有没有轨迹落在这个槽里"来判断 ——
+                #   实测踩过：幽灵轨迹正好压在底座上，于是**底座已经没了却报"有件"**。
+                #   `seen_ids` 只在跑过全图搜索的帧才有值；没值的帧沿用上一次的结果，
+                #   这样"缺件"不会因为搜索周期而闪。
+                if seen_ids is not None:
+                    last_seen_ids = set(seen_ids)
+                    last_missing = [
+                        k for k, part in slot_parts.items()
+                        if part and part not in last_seen_ids]
+                missing = last_missing
                 if missing:
                     cv2.putText(canvas,
                                 "缺: " + " ".join(m.replace("slot_", "") for m in missing),

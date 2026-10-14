@@ -232,6 +232,61 @@ def main() -> int:
           % (tr4.tracks[0].state if tr4.tracks else "PRUNED"))
     check(tr4.tracks[0].part_id == "P_KEEP", "恢复后身份应仍在")
 
+    print("\n== 防重复轨迹：块不能被「远处的轨迹」抢走（实测出过幽灵轮廓）==")
+    print("   用户截图现象：界面上出现形状扭曲、位置在料盘外的橙色「全图搜」影子。")
+    print("   根因：匹配用的是**卡尔曼预测位置**（追踪失败后会漂移），")
+    print("         配上宽松的 dist_match_px=40 -> 轨迹抢到别处的块 -> 轨迹错配/虚增。")
+    print("   修法：匹配改用 last_centroid（最后一次真正检测到的位置）+ 全局最优认领。")
+    tr5 = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000, "iou_match": 0.15, "dist_match_px": 40.0})
+    # 在 A 点建一条轨迹
+    tr5.update(frame, [mk_blob(200, 200, 4000.0)], detect=True,
+               classify=lambda f: ("P_A", 0.9))
+    check(len(tr5.tracks) == 1, "A 点应建立 1 条轨迹")
+    # 之后 A 点**一直空着**，同时在**很远**的 B 点放一块 -> 必须是**新建**轨迹
+    for _ in range(5):
+        tr5.update(frame, [mk_blob(560, 400, 4000.0)], detect=True,
+                   classify=lambda f: ("P_B", 0.9))
+    ids = sorted(t.part_id for t in tr5.tracks if t.part_id)
+    print("   A 点空着 + B 点有块 -> 轨迹身份: %s（应为 P_A 与 P_B 两条）"
+          % ids)
+    check(len(tr5.tracks) == 2 and ids == ["P_A", "P_B"],
+          "远处的新块必须**新建**轨迹，不能被 A 的轨迹抢走（实测 %s）" % ids)
+    # A 的轨迹位置不应被 B 的块带跑
+    ta = next((t for t in tr5.tracks if t.part_id == "P_A"), None)
+    check(ta is not None and abs(ta.last_centroid[0] - 200) < 30,
+          "A 的轨迹不该被 B 的块拉走（实测 last_centroid=%s）"
+          % (str(None if ta is None else tuple(round(v) for v in ta.last_centroid)),))
+
+    print("\n== 全局最优认领：一个块只能被一条轨迹拿走 ==")
+    print("   ★ 构造要点：两条轨迹必须**互相靠近到都能匹配同一个块**，")
+    print("     否则测不出「只能被一条认领」（第一版把两条隔了 60px，")
+    print("     结果它们自己被合成一条了）。")
+    tr6 = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000, "iou_match": 0.1, "dist_match_px": 200.0})
+    tr6.update(frame, [mk_blob(300, 200, 4000.0)], detect=True,
+               classify=lambda f: ("P_1", 0.9))
+    # 第二块放在 100px 外：与第一条的 last_bbox 不重叠，但 dist(100) < dist_match(200)
+    # -> 会被当成"同一条轨迹移动了"，所以这里要**先让它成为独立轨迹**：
+    #    直接改第一条的 last_bbox 让它"看起来没动过"是不行的，
+    #    改用较小 dist_match 建两条，再放大 dist_match 测认领。
+    tr6.dist_match = 40.0
+    tr6.update(frame, [mk_blob(300, 200, 4000.0), mk_blob(400, 200, 4000.0)],
+               detect=True, classify=lambda f: ("P_2", 0.9))
+    check(len(tr6.tracks) == 2, "应建立 2 条轨迹（实测 %d）" % len(tr6.tracks))
+    # 现在放宽 dist_match，让两条轨迹**都**够得着下面这块
+    tr6.dist_match = 200.0
+    before = [(t.part_id, tuple(round(v) for v in t.last_centroid))
+              for t in sorted(tr6.tracks, key=lambda z: z.part_id or "")]
+    tr6.update(frame, [mk_blob(340, 200, 4000.0)], detect=True)
+    after = [(t.part_id, tuple(round(v) for v in t.last_centroid))
+             for t in sorted(tr6.tracks, key=lambda z: z.part_id or "")]
+    changed = [i for i in range(len(before)) if before[i] != after[i]]
+    print("   一块喂进去 -> 被更新的轨迹数 = %d（应为 1）" % len(changed))
+    check(len(changed) == 1,
+          "一个块只能被一条轨迹认领（实测被 %d 条同时认领）" % len(changed))
+    check(len(tr6.tracks) == 2, "不该因为这个块多出轨迹（实测 %d 条）" % len(tr6.tracks))
+
     print("\n== IoU 与 ROI 工具 ==")
     check(abs(_iou((0, 0, 10, 10), (0, 0, 10, 10)) - 1.0) < 1e-6, "同框 IoU=1")
     check(_iou((0, 0, 10, 10), (100, 100, 10, 10)) == 0.0, "不重叠 IoU=0")
