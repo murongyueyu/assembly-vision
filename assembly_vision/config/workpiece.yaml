@@ -144,6 +144,48 @@ segment:
     min_area_px: 3000
     max_area_px: 200000
     max_aspect: 6.0
+# ══════════════════════════════════════════════════════════════
+# 零件追踪（tools/part_track_demo.py 与 pipeline 共用）
+#   ★ 为什么需要：实测 640×480 全图分割 **9.88ms（PC）/ ≈59ms（树莓派 4B）**
+#     也就是 Pi 上"每帧全分割"最多 17fps。而追踪器 update 只要
+#     **MOSSE 0.25ms / KCF 2.0ms**（Pi 估 2 / 12ms）。
+#     -> 检测 + 追踪：每 N 帧才全图分割，中间帧靠追踪器，帧率就上去了。
+# ══════════════════════════════════════════════════════════════
+tracking:
+  # 追踪后端。实测 update 耗时（PC / 树莓派按 6x 估）：
+  #   mosse      0.25ms /  2ms   <- **树莓派推荐**
+  #   medianflow 1.83ms / 11ms
+  #   kcf        2.01ms / 12ms   <- PC 默认（精度/速度平衡）
+  #   csrt      22.72ms / 136ms  <- ★ 太慢，别在 Pi 上用
+  #   mil        较慢，精度一般
+  backend: kcf
+  # 每 N 帧做一次全图检测；其余帧只跑追踪。调大省算力、调小更稳。
+  #   Pi 上建议 8~10；PC 上 3~5。
+  detect_every_n: 5
+  # 追踪框连丢这么多帧就判"丢失"并清掉
+  max_lost_frames: 12
+  # 参与追踪的面积闸门（像素）。上台面是 400（滤掉噪声），
+  # 上盖是 8000（滤掉木桌那种几万像素的假黄铜）
+  min_area_px: 400
+  max_area_px: 8000
+  # 检测框与已有轨迹的关联阈值
+  iou_match: 0.15
+  dist_match_px: 40.0
+  # ── 遮挡处理（用户要求：「手拿起来就算遮一部分也要能认」）──
+  # 实测（tools/part_track_occlusion_test.py）：遮挡 30% 保留 76% 轮廓、
+  #   50% 保留 46%、**70% 仍保留 20% 且轮廓形状完整**
+  #   -> 遮挡不是"丢了"，而是"面积变小"。分三档处理：
+  #     visible >= full_ratio      -> 正常：**重新识别身份**
+  #     occluded_ratio <= v < full -> 只更新位置与轮廓，**身份沿用**
+  #     v <= occluded_ratio        -> 记 occluded，**冻结身份**（残缺件拿去认必然认错）
+  #   ★ 取舍说清楚：遮挡时**不重判身份**是有意的 —— 实测底座被切到
+  #     1542mm² 时曾被认成轮盘（§2.19），拿残缺件去认必然出错。
+  full_ratio: 0.80
+  occluded_ratio: 0.55
+  # 面积参考（判断"被遮了多少"）的更新速率与换标签的分数余量
+  area_ref_rate: 0.15
+  id_margin: 0.12
+
 check:
   coverage_present: 0.45
   coverage_absent: 0.15

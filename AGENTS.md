@@ -60,6 +60,7 @@
 | 其他已知问题 | 深度基线字段路径、合成图颜色、谓词判装配位、辐条只判少不判多… | 实录 2.17 |
 | 辐条半径带**不能切 3 份投票** | 球头只落在最内侧 1.9px 子带 -> 数成 5 根；改按**角度均匀度**挑带（`select: uniform`） | 实录 2.18 |
 | 零件识别方法与量化 | 特征向量+区间匹配+加权；合成序列 **98.3%/召回 75%/精确 100%**；旋转 ±20° 误差 0 | 实录 2.19 |
+| **零件实时检测+追踪+遮挡** | 检测+追踪（分割 9.9ms 摊薄到 1/N）；**只描可见部分轮廓**；遮挡 3 档冻结身份；卡尔曼扫参定；Pi 用 `mosse` | 实录 2.20 |
 
 ---
 
@@ -98,6 +99,8 @@ assembly_vision/
 │   │   ├── polar.py            极坐标展开 + 自适应阈值数峰（辐条计数）
 │   │   ├── roi.py              料盘 mm ↔ 像素、槽位 ROI、覆盖率
 │   │   ├── part_id.py          ★ 零件识别：旋转不变特征向量（形状+物理面积+色域）
+│   │   ├── part_tracker.py     ★ 零件追踪：卡尔曼平滑 + KCF/MOSSE + **遮挡三档处理**
+│   │   │                         只描可见轮廓；遮挡时冻结身份；两套 tracker API 兼容 Pi
 │   │   ├── checks.py           合格性(①) + 齐套性(④) + 装配位布尔量
 │   │   ├── fsm.py              前置条件表(③) + 去抖 + 遮挡冻结
 │   │   ├── events.py           取件/装配事件
@@ -120,6 +123,11 @@ assembly_vision/
 │   ├── measure_part_id_e2e.py  ★ **零件识别端到端测量**：TP/TN/FN/FP，
 │   │                             准确率 + **召回率 + 精确率**（三者缺一不可）；
 │   │                             `--live` 用「零件在哪个槽」当真值测真机
+│   ├── part_track_demo.py      ★★ **零件检测实时演示**：实时画面 + **形状轮廓**（不是方框）
+│   │                             + 卡尔曼去抖 + 追踪；`--backend kcf|mosse|csrt|medianflow`；
+│   │                             `--bench` 只测帧率；按键 空格=暂停 b=方框 d=调试
+│   ├── part_track_occlusion_test.py  ★ 遮挡对照图（0/30/50/70/85%），
+│   │                             验证「只描可见部分」+ 遮挡时身份冻结
 │   ├── measure_rotation.py     ★ **料盘旋转/平移检测能力**：直接喂已知真值的质心，
 │   │                             含边界（少件/0 件/超闸门/认错零件）
 │   ├── measure_part_id_accuracy.py  按槽归属对账（需 `--files` 指定干净帧）
@@ -128,8 +136,9 @@ assembly_vision/
 ├── tests/                      _common / make_synthetic / run_all
 │                               test_features / test_segment / test_polar /
 │                               test_fsm / test_part_id / test_tray_pose /
-│                               test_work_roi / test_assembly / test_ui_renderer
-│                               ★ 共 9 个模块，登记在 run_all.py 的 MODULES
+│                               test_work_roi / test_assembly / test_ui_renderer /
+│                               test_tracker
+│                               ★ 共 **10** 个模块，登记在 run_all.py 的 MODULES
 └── data/                       synthetic / synthetic_seq / ui_preview / probe / refs / videos
 ```
 
@@ -146,7 +155,7 @@ cd assembly_vision
 # ── 离线（不需要相机）────────────────────────────
 python tools/make_synthetic.py --out data/synthetic --seq data/synthetic_seq \
         --calib config/calibration.synthetic.yaml
-python tests/run_all.py                       # 9 个模块，应全绿
+python tests/run_all.py                       # 10 个模块，应全绿
 python app.py --source images --path data/synthetic_seq \
         --calibration config/calibration.synthetic.yaml --no-ui --max-frames 200
 python tools/ui_preview.py --renderer qt --out data/ui_preview
@@ -164,6 +173,10 @@ python calib/c4_slot_baseline.py --frames 20  # ★ 已跑完：四槽各 20/20
 python calib/c5_assembly_baseline.py --frames 20   # ★ 已跑完：辐条众数 8
 python calib/c6_part_features.py              # ★ 已跑完：4 类零件模板
 python tools/preview.py --guide assembly      # ★ 统一预览（ROI+分割+过曝报警）
+python tools/part_track_demo.py                  # ★★ 零件检测实时演示（轮廓+追踪）
+python tools/part_track_demo.py --backend mosse      # 树莓派推荐
+python tools/part_track_demo.py --source images --path data/synthetic_seq --bench
+python tools/part_track_occlusion_test.py        # 遮挡对照图（只描可见部分）
 python app.py --windowed                      # 正式跑（窗口模式方便调试）
 ```
 
@@ -187,7 +200,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 > 本节只列**已经做到的事实**（带实测数字）。
 > `VERSION.md` 的「待办」一节是摘要，以本文件为准。
 
-- ✅ 代码离线全绿（**9 个测试模块**）；4 类零件/4 工序口径已对齐
+- ✅ 代码离线全绿（**10 个测试模块**）；4 类零件/4 工序口径已对齐
 - ✅ **相机参数已定**：`1280×480`（单眼 640×480）、后端 dshow、31 fps；
   **曝光 `-6.0`**（原 -5.0，因过曝会让判据链静默失效而改，见 2.14）
 - ✅ **c1 完成**：GSD **0.8680 mm/px**，全画幅覆盖 **555×417 mm**
@@ -228,7 +241,19 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 - ✅ **c4/c5 与 `tools/preview.py` 都带实时预览窗口**（见 §3 tools 表）：
   画面上有 ROI / 绿圈提示该放哪 / 黄铜与金属掩膜叠加 / 覆盖率与识别结果 /
   **过曝报警**。`--no-preview` 可关掉。
-- ⬜ 真实画面上四类零件的**色域特征**是否参与识别**未验证**
+- ✅ **零件实时检测 + 追踪已实现**（见实录 **2.20**）：`tools/part_track_demo.py`
+  · 实时画面 + **形状轮廓**（`drawContours` 真实轮廓 + 顶点，**不是方框**）
+  · **卡尔曼去抖**（轨迹误差 2.312 -> 1.286 px，扫参定）+ KCF/MOSSE/MedianFlow 追踪
+  · **遮挡三档**：>=80% 重判身份 / 55~80% 沿用 / <=55% **冻结身份**
+  · **只描可见部分的轮廓**（遮挡 30/50/70% 时轮廓只覆盖未被挡的黄铜，不补全）
+  · 实测 **PC 57~67 fps**；每帧均摊 11ms（Pi 估）-> **≈95 fps**
+  · ★ **瓶颈是分割不是追踪**：三种后端帧率几乎一样
+  · ★ **两套 tracker API 都兼容**（Pi 上 OpenCV 4.x 只有 `*_create()`）
+- ✅ **色域特征在「零件间识别」里零贡献（消融实验证实）**：
+  `full` 与 `no_color` 结果**完全一样**（13/13 认对），`only_color` **一个都认不出**。
+  ★ 但这**不否定色域** —— 它的用途是**零件 vs 背景**与**零件 vs 手套**，
+  不是区分零件与零件（四个零件是同一种黄铜，色相区间只差 1~2°）。
+- ⬜ 真实画面上四类零件的**色域特征**是否参与识别 —— **已量化：不参与**（同上）
 - ✅ **c5 基线已接入 `checks.py`**（P0-1，见 §6.5）：接的是
   `assembly.spoke_peak_count`（辐条数 vs 基线，容差 2）。
   ★ **另外三个（`ring_coverage` / `hub_coverage` / `cap_coverage`）是刻意不接的** ——
@@ -249,7 +274,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 
 | # | 事项 | 状态 |
 |---|---|---|
-| P0-1 | **c5 结果接线** | ✅ **已完成**（只接了有区分度的那一条）<br>新增 `checks.spoke_vs_baseline(count, baseline, slack)` 纯函数 + 真机基线比较。<br>容差 `check.spokes.baseline_slack: 2`，依据 c5 实测 `[8,8,8,8,6,6,7,8,8,6,8,8]`（完整在位就是 6~8）。<br>★ **刻意没接 ring/hub/cap 覆盖率**：实测（合成图各种缺件组合）ring 0.994、hub 0.880~0.998、cap 0.874~1.000 —— **连缺顶盖都还有 0.874，几乎没有区分度**；真机上 c5 三个数全是 ~1.0。拿它们当阈值等于没判。<br>★ 代价（已写进配置注释）：真少 2 根（数出 6）**不会**被发现 —— 不误报优先。<br>新增 `tests/test_assembly.py`（回归 **9 个模块**）。 |
+| P0-1 | **c5 结果接线** | ✅ **已完成**（只接了有区分度的那一条）<br>新增 `checks.spoke_vs_baseline(count, baseline, slack)` 纯函数 + 真机基线比较。<br>容差 `check.spokes.baseline_slack: 2`，依据 c5 实测 `[8,8,8,8,6,6,7,8,8,6,8,8]`（完整在位就是 6~8）。<br>★ **刻意没接 ring/hub/cap 覆盖率**：实测（合成图各种缺件组合）ring 0.994、hub 0.880~0.998、cap 0.874~1.000 —— **连缺顶盖都还有 0.874，几乎没有区分度**；真机上 c5 三个数全是 ~1.0。拿它们当阈值等于没判。<br>★ 代价（已写进配置注释）：真少 2 根（数出 6）**不会**被发现 —— 不误报优先。<br>新增 `tests/test_assembly.py`；后又加 `tests/test_tracker.py`（现共 **10 个模块**）。 |
 | P0-2 | **`wheel_height_mm` 存疑** | ⬜ c5 报 **0.92mm**，而轮盘顶面物理上应在台面上方 30~40mm。单位没错（`compute` 返回 mm），所以是**拟合平面贴住了被测面** → `\|实测−基线\| > 15mm` 这条立柱判据**永远不触发**（静默失效）。<br>c5 已加**平面自检**（打 a/b/c、斜度、平面Z范围 vs 实测范围、高度/视差跨度占比），**低于 5mm 会明确报警**。待定：改 `fit_plane` 的拟合范围（排除料盘/台面），或明确写清深度判据不可用。 |
 | P0-3 | ~~`hub_coverage` 为 nan~~ | ✅ **已修（根因是复制粘贴漏改，与算法无关）**<br>`c5` 里写成 `rings.append(a.hub_coverage)` → rings 收的是 hub 的值、hubs 永远空 → 打印的 `1.000` 其实是**轮毂**的值、`nan` 是空列表均值，**三个数全错位**。<br>★ 教训：`_disc_coverage` 构造 8 种异常输入都**不返回 nan**（最差 0.0）—— 看到 nan 先数"列表里到底有几个元素"，别先怀疑算法。 |
 | P0-4 | 真机全流程联调 | 🔶 **部分完成** —— `app.py --windowed` 原来**一启动就连崩两次**，已修（见下「另修 2」），现在实跑 90 帧**退出码 0、无任何错误**。<br>⬜ 剩下要**你在真机上摆件走一遍 4 工序**，看判据有没有误报。 |
@@ -351,10 +376,10 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 - **中文注释**，风格与现有代码一致；关键处用 `★` 标出"必须实测确认"的项。
 - 改 `config/*.yaml` 时**保留 `★` 注释并更新依据**，不要让注释与值脱节。
 - 阈值/尺寸**不要硬编码在算法里**，一律走配置。
-- 加新功能后**必须跑 `python tests/run_all.py`** 确认 **9 个测试模块**仍全绿
+- 加新功能后**必须跑 `python tests/run_all.py`** 确认 **10 个测试模块**仍全绿
   （`test_features` / `test_segment` / `test_polar` / `test_fsm` /
   `test_part_id` / `test_tray_pose` / `test_work_roi` / `test_assembly` /
-  `test_ui_renderer`）。
+  `test_ui_renderer` / `test_tracker`）。
   新功能要**配套加测试**并登记到 `tests/run_all.py` 的 `MODULES`。
 - **判据逻辑尽量抽成纯函数再测**（例：`checks.spoke_vs_baseline()`）。
   直接测 `check_assembly()` 要造像素分割结果，阈值一动就假失败；
@@ -391,15 +416,30 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 
 | 环节 | 状态 | 依据 |
 |---|---|---|
-| 离线回归 | ✅ **9/9 全绿** | `python tests/run_all.py` |
+| 离线回归 | ✅ **10/10 全绿** | `python tests/run_all.py` |
 | 端到端（合成序列） | ✅ 4 步全过 | `app.py --no-ui --max-frames 120` |
 | **真机窗口模式** | ✅ **能跑** | `app.py --windowed` 实跑 90 帧、退出码 0（原来必崩，见 §6.5「另修 2」） |
 | 标定链 c1~c6 | ✅ **全部完成** | 见 §5 |
-| **零件识别** | ✅ **用户认可** | 「这个色域分割零件我还是比较满意」 |
+| **零件识别** | ✅ **真机 12/12 零误认** | 3 帧 × 4 槽，真值 =「零件在哪个槽」 |
+| **零件实时检测+追踪** | ✅ **能用**（PC 57~67 fps） | `tools/part_track_demo.py`，见实录 2.20 |
 | 4 工序流程判断 | 🔶 逻辑齐、真机未逐步走完 | 见 §7.3 |
 | 树莓派 | ⬜ **一次都没跑过** | 见 §7.3 |
 
-### 7.2 这轮（rev.3e/3f）修掉的真 bug
+### 7.1b 零件检测的三个已知弱点（改这块前先看）
+
+1. **`holes` 区间宽度≈0** —— 真机上同一零件数出 0/1/2/3 个孔，
+   而 c6 把区间收成 `轮盘/立柱 [-0.0002, 0.0002]`、`顶盖/底座 [1.985, 2.015]`。
+   **`holes=1` 时四个零件全部 < min_score（认不出）**，受控实验已证实。
+   ★ 刻意改法（受控实验有效、真机 12/12 不损失）：**放宽到容忍 ±1**。
+   **尚未改** —— 因为端到端测不出收益（那 12 个样本恰好没踩到空档），属**防御性**修改。
+2. **`visible_ratio` 类的"参考值自我拉低"** —— 见实录 2.20 的 bug 1，
+   PartTracker 里已修；但**同类写法在别处出现都要警惕**。
+3. **木桌仍在画面上方**（y 0~204）—— 现在靠工位 ROI + 尺寸闸门挡。
+   用户提过"裁掉上方就行"，但实测**木桌最低到 y=204，比料盘上沿 y=187 还低**，
+   单靠裁剪挡不干净（裁到 205 会切掉料盘上沿 18px）。
+   -> 若要做，**保守裁 `y >= 100` + 保留工位 ROI**（待用户决定）。
+
+### 7.2 修掉的真 bug（累计）
 
 都是**真机或空跑暴露出来的**，不是重构：
 
@@ -411,16 +451,24 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
    ★ 根因是**那条路径从没被任何测试覆盖**。
 4. **"装好了却判缺辐条"** —— `count_spokes` 把半径带切 3 份投票取小，
    球头只落在最内侧 1.9px 的子带 → 数成 5 根。改为按**角度均匀度**挑带（§2.18）。
+5. **`visible_ratio` 恒为 1.0**（追踪器）—— 语句顺序写反，参考值被遮挡后的小面积
+   拉低 → 状态永远 `detected` → 每帧拿残缺件重判身份 → **认错**
+   （遮挡 50% 时 `P3_wheel` 认成 `P2_column`）。见实录 **2.20**。
+6. **`score_ema` 没初始化** —— 新轨迹直接赋值不走 `apply_id()`，
+   `score_ema` 恒为 0 → "换标签要高出一截"的闸门**永远为真**。见实录 2.20。
+7. **完全遮挡时可见度不降** —— 手套把零件盖死时仍显示「可见 100%」。见实录 2.20。
 
 ### 7.3 下一步（按建议顺序，都可独立进行）
 
 | 顺序 | 事项 | 谁做 | 为什么是这个顺序 |
 |---|---|---|---|
-| 1 | **真机重跑 `app.py --windowed`**，看轮盘装好后辐条是否稳定 **8/8**、齐套性是否 **OK** | 你 | 刚修完辐条判据，**必须真机确认**；这是唯一挡着"能用"的一步 |
-| 2 | **真机摆件走完 4 工序**，记录每步的判定 | 你 | 流程判断只在合成序列上验过 |
-| 3 | **定 P0-2 的方案**（深度基线 0.92mm 是修还是废） | 你定，我做 | 见 §6.5 P0-2；**不影响前两步** |
-| 4 | 树莓派首次部署（**SGBM 耗时必须实测**） | 你 | 见 §6.5 P0-5 |
-| 5 | 再考虑 P1「开放位置」 | 一起 | 见 §6.5 P1-1，**已实测数据齐备，随时可开工** |
+| 1 | **真机跑 `python tools/part_track_demo.py`**：看轮廓是否贴合、遮挡时行为是否正确、帧率多少 | 你 | **零件检测是项目基础**（用户明确）；先确认它好用 |
+| 2 | 决定是否**放宽 `holes` 区间**（容忍 ±1） | 你定，我做 | 见 §7.1b 弱点 1；防御性修改，受控实验有效、真机不损失 |
+| 3 | **真机重跑 `app.py --windowed`**，看轮盘装好后辐条是否稳定 **8/8**、齐套性是否 **OK** | 你 | 刚修完辐条判据，**必须真机确认** |
+| 4 | **真机摆件走完 4 工序**，记录每步的判定 | 你 | 流程判断只在合成序列上验过 |
+| 5 | **定 P0-2 的方案**（深度基线 0.92mm 是修还是废） | 你定，我做 | 见 §6.5 P0-2；**不影响前两步** |
+| 6 | 树莓派首次部署（**SGBM 耗时必须实测**） | 你 | 见 §6.5 P0-5 |
+| 7 | 再考虑 P1「开放位置」 | 一起 | 见 §6.5 P1-1，**已实测数据齐备，随时可开工** |
 
 ### 7.4 收尾时要做的事（约定）
 
@@ -430,7 +478,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
    ★ 新的坑写进 `docs/踩坑实录.md`（详录），并在 §2 的索引表加一行 ——
    **别把详录直接堆回 `AGENTS.md`**：它超 65536 字节会被截断，
    尾部（§6 约定、§7 交接）反而看不见了
-4. 跑 `python tests/run_all.py`（9 个模块）+ 端到端 + **`--windowed` 实跑**
+4. 跑 `python tests/run_all.py`（**10 个模块**）+ 端到端 + **`--windowed` 实跑**
 5. `git commit`（提交信息写清"为什么"，不只是"改了什么"）
 
 > ★ 历史决策的完整过程在 `docs/`：
