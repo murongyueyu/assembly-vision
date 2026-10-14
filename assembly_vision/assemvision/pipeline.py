@@ -286,7 +286,11 @@ class Pipeline:
                 asm_cfg = self.wp.get("assembly", {}) or {}
                 base_h = float((asm_cfg.get("baseline", {}) or {}).get("base_height_mm", 5.0))
                 col_depth = bool(wh > (base_h + 30.0))
-            flags = self.qualifier.assembly_flags(seg, scale, column_by_depth=col_depth)
+            # ★★ 必须传 pose：`work_roi_mask()` 里装配位是**跟着位姿修正的**，
+            #   如果这里不传，就会出现"ROI 跟着料盘走了、判定用的圈没走"——
+            #   圈住的和判的不是同一个地方（实测踩过，见 checks.assembly_polygon_px）。
+            flags = self.qualifier.assembly_flags(seg, scale, column_by_depth=col_depth,
+                                                  pose=self._last_pose)
 
             ctx = {
                 "asm": lambda key: bool(flags.get(key, False)),
@@ -344,7 +348,9 @@ class Pipeline:
                                          want_features=False)
         with self.sh.lock:
             wh = self.sh.wheel_height_mm
-        asm = self.qualifier.check_assembly(seg_full, scale=1.0, wheel_height_mm=wh)
+        # ★ 同样要传 pose（理由见 assembly_flags 那处注释）
+        asm = self.qualifier.check_assembly(seg_full, scale=1.0, wheel_height_mm=wh,
+                                            pose=self._last_pose)
         with self.sh.lock:
             self.sh.assembly = asm
         print("[inspect] 齐套性: %s%s" % (asm.verdict,

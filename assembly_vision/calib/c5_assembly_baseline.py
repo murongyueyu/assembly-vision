@@ -324,7 +324,16 @@ def main() -> int:
         a = q.check_assembly(res, f.scale)
         if a.center_px is None:
             continue
-        covs.append(a.ring_coverage); rings.append(a.hub_coverage)
+        # ★★ 这里原来写错了（复制粘贴漏改）：`rings.append(a.hub_coverage)`
+        #   —— rings 收的是 hub 的值、hubs 永远是空的。
+        #   症状：「外圈环带覆盖率 1.000  轮毂覆盖率 nan  顶盖覆盖率 1.000」，
+        #   而 1.000 其实是**轮毂**的值、nan 是空列表的均值 —— 三个数全错位。
+        #   它还骗了我很久：我以为 `_disc_coverage` 会返回 nan，
+        #   构造 8 种异常输入去试，它**任何情况下都不返回 nan**（最差 0.0）。
+        #   ★ 教训：看到 nan 先数一数"列表里到底有几个元素"，别先怀疑算法。
+        covs.append(a.ring_coverage)
+        rings.append(a.ring_coverage)
+        hubs.append(a.hub_coverage)
         caps.append(a.cap_coverage)
         if a.spoke is not None:
             spokes.append(a.spoke.count)
@@ -387,6 +396,32 @@ def main() -> int:
                     c = poly.mean(axis=0) * depth.scale
                     r_px = q.r_outer / mmpp * depth.scale
                     h = depth.height_at(hm, (c[0], c[1]), r_px)
+
+                    # ★★ 平面自检（实测踩过）：c5 报出 0.92mm，而轮盘顶面
+                    #   物理上应在台面上方 30~40mm。"0.92mm"这种小得可疑的值
+                    #   说明**拟合平面几乎贴着被测面**，于是
+                    #   `|实测高度 − 基线| > 15mm` 这条立柱判据永远不触发 ——
+                    #   **判据静默失效**，而终端只打印一个看着挺正常的数字。
+                    #   所以把平面的形状参数与覆盖范围一起打出来核对。
+                    vv, uu = np.mgrid[0:d.shape[0], 0:d.shape[1]]
+                    z_plane = plane[0] * uu + plane[1] * vv + plane[2]
+                    print(" 平面自检：")
+                    print("   a=%.5f  b=%.5f  c=%.2f   (Z = a*u + b*v + c，单位 mm)"
+                          % (plane[0], plane[1], plane[2]))
+                    print("   斜度：沿 u 每 100px 变化 %+.1f mm，沿 v 每 100px 变化 %+.1f mm"
+                          % (plane[0] * 100.0, plane[1] * 100.0))
+                    print("   平面 Z 范围 %.1f ~ %.1f mm  ；实测深度范围 %.1f ~ %.1f mm"
+                          % (float(z_plane.min()), float(z_plane.max()),
+                             float(np.nanmin(d)), float(np.nanmax(d))))
+                    print("   有效视差占比 %.1f%%" % (100.0 * float(np.isfinite(d).mean())))
+                    if h is not None:
+                        span = float(np.nanmax(d) - np.nanmin(d))
+                        print("   轮盘区域高度 %.2f mm  /  视差跨度 %.1f mm  =  占比 %.1f%%"
+                              % (h, span, 100.0 * h / max(1e-6, span)))
+                        if h < 5.0:
+                            print("   ★★ 高度 <5mm 可疑：轮盘顶面物理上应在台面上方 30~40mm。")
+                            print("      说明拟合平面贴住了被测面 -> 立柱高度判据**永远不触发**。")
+                            print("      见 AGENTS.md P0-2；这条基线暂不可当有效判据用。")
                     if h is not None:
                         print(" 轮盘区域高度基线 = %.1f mm" % h)
                         # ★ 两处都写：checks.py 读的是 assembly.baseline.wheel_height_mm，

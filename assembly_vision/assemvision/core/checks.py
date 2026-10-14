@@ -459,11 +459,35 @@ class Qualifier:
     # ══════════════════════════════════════════════════════════
     # 装配位的布尔量（给流程判断用，比 check_assembly 轻）
     # ══════════════════════════════════════════════════════════
+    def assembly_polygon_px(self, scale: float = 1.0, pose=None):
+        """装配位 ROI 多边形（像素）。★ 所有需要装配位的地方都必须走这里。
+
+        ★★ 为什么必须用 pose 参数（实测踩过，是个真 bug，与"开放位置"无关）：
+          `work_roi_mask()` 里**装配位是跟着位姿修正的**，而
+          `check_assembly()` / `assembly_flags()` 原来直接用
+          `self.tray.assembly_polygon_px()`（标称坐标）——
+          **同一个装配位在两处算出来的圈不一样**。
+          料盘一挪，ROI 跟着走了、判定用的圈没走，
+          "圈住的"和"判的"就不是同一个地方。
+        """
+        if pose is None or not getattr(pose, "ok", False):
+            return self.tray.assembly_polygon_px(scale)
+        asm = self.cfg.get("assembly", {}) or {}
+        if not asm or not asm.get("enabled", False):
+            return None
+        c = np.asarray(asm.get("center", [0.0, 0.0]), dtype=np.float64).reshape(1, 2)
+        ac = pose.apply(c)[0]
+        r = float(asm.get("radius", 45.0))
+        t = np.linspace(0.0, 2.0 * np.pi, 64, endpoint=False)
+        pts = np.stack([ac[0] + r * np.cos(t), ac[1] + r * np.sin(t)], axis=1)
+        return self.tray.mm_to_px(pts, scale)
+
     def assembly_flags(self, seg: SegResult, scale: float = 1.0,
-                       column_by_depth: Optional[bool] = None) -> Dict[str, object]:
+                       column_by_depth: Optional[bool] = None,
+                       pose=None) -> Dict[str, object]:
         out: Dict[str, object] = {"base": False, "column": False, "wheel": False,
                                   "cap": False, "spokes": 0, "coverage": 0.0}
-        poly = self.tray.assembly_polygon_px(scale)
+        poly = self.assembly_polygon_px(scale, pose=pose)
         if poly is None or seg.brass_mask is None:
             return out
         blob = self._blob_in(seg, poly)
@@ -515,7 +539,8 @@ class Qualifier:
     # 要求④ 装配体缺件检查
     # ══════════════════════════════════════════════════════════
     def check_assembly(self, seg: SegResult, scale: float = 1.0,
-                       wheel_height_mm: Optional[float] = None) -> AssemblyResult:
+                       wheel_height_mm: Optional[float] = None,
+                       pose=None) -> AssemblyResult:
         asm = self.cfg.get("assembly", {}) or {}
         # ★ 深度基线的字段路径历史上不一致：
         #   c5_assembly_baseline.py 写的是 assembly.wheel_height_mm，
@@ -527,7 +552,7 @@ class Qualifier:
         if h_ref is None:
             h_ref = asm.get("wheel_height_mm", None)
         res = AssemblyResult(wheel_height_mm=wheel_height_mm, height_baseline_mm=h_ref)
-        poly = self.tray.assembly_polygon_px(scale)
+        poly = self.assembly_polygon_px(scale, pose=pose)
         if poly is None:
             res.verdict = SLOT_SUSPECT
             res.reasons.append("未配置装配位")
