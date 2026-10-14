@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -618,6 +618,15 @@ class Qualifier:
             res.reasons.append("辐条峰数 %d < %d（角度位置见 peaks/missing）"
                                % (spk.count, spk.required))
 
+        # ── ★ 用 c5 实测基线比"轮盘完整度"（P0-1 接线）────────────────
+        # 判据本体抽到 `spoke_vs_baseline()` 里，便于离线测试（见 tests/test_assembly.py）
+        bad, why = spoke_vs_baseline(
+            spk.count, asm.get("spoke_peak_count", None),
+            slack=int(self.spk.get("baseline_slack", 2)))
+        if bad:
+            res.missing.append("轮盘辐条 %d/基线%s" % (spk.count, asm.get("spoke_peak_count")))
+            res.reasons.append(why)
+
         # 顶盖
         if res.cap_coverage < 0.5:
             res.missing.append("顶盖铭牌")
@@ -642,6 +651,45 @@ class Qualifier:
 
 
 # ──────────────────────────────────────────────────────────────
+def spoke_vs_baseline(count: int, baseline, slack: int = 2) -> Tuple[bool, str]:
+    """把实测辐条数与 c5 标定的基线比较。返回 (是否异常, 理由文字)。
+
+    ★ 为什么只比"辐条数"这一条基线，而不是 ring/hub/cap 覆盖率：
+      实测（合成图各种缺件组合）ring 0.994~0.994、hub 0.880~0.998、
+      cap 0.874~1.000 —— **连缺顶盖都还有 0.874，几乎没有区分度**；
+      真机上 c5 实测三个数全是 ~1.0（1.0 / nan→1.0 / 1.0）。
+      拿它们当阈值等于没判。**不要为了"用上基线"而加没有区分度的判据。**
+
+    ★ 容差 2 的依据：c5 真机实测 12 帧
+      `[8,8,8,8,6,6,7,8,8,6,8,8]` —— **完整在位就是 6~8，散布 ±1**。
+      取 2 表示"少 2 根以上才报"。
+
+    ★ 明确写下的代价：真少 2 根（数出 6）**不会**被发现，因为"完整在位"
+      本身就出现过 6。这是"不误报"优先于"不漏报"的取舍；要收紧就传 slack=1，
+      但那与本项目的实测散布直接冲突。
+
+    边界：
+      baseline 无效（None/0/非数字）-> 不判（返回 False，附说明）
+      count == 0 -> 不在这里判。0 根说明整个轮盘没装，由
+                    `spk.count < spk.required` 那条更基础的判据负责，
+                    这里再报一次只会重复。
+    """
+    try:
+        base = int(baseline) if baseline is not None else 0
+    except (TypeError, ValueError):
+        base = 0
+    if base <= 0:
+        return False, "未标定辐条基线（先跑 c5），本条不判"
+    c = int(count)
+    if c <= 0:
+        return False, "辐条 0 根由基础判据负责，这里不重复报"
+    if c < base - int(slack):
+        return True, ("辐条峰数 %d 比标定基线 %d 少 %d 根（容差 %d），"
+                      "轮盘可能被遮挡或不完整"
+                      % (c, base, base - c, int(slack)))
+    return False, "辐条 %d 相对基线 %d 在容差内" % (c, base)
+
+
 def _blob_mask(shape, blob: Blob) -> np.ndarray:
     m = np.zeros(shape[:2], dtype=np.uint8)
     cv2.drawContours(m, [blob.contour], -1, 255, cv2.FILLED)

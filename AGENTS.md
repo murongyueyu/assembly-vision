@@ -718,7 +718,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 
 见 `VERSION.md` 的「待办」一节。要点：
 
-- ✅ 代码离线全绿（**7 个测试模块**）；4 类零件/4 工序口径已对齐
+- ✅ 代码离线全绿（**8 个测试模块**）；4 类零件/4 工序口径已对齐
 - ✅ **相机参数已定**：`1280×480`（单眼 640×480）、后端 dshow、31 fps；
   **曝光 `-6.0`**（原 -5.0，因过曝会让判据链静默失效而改，见 2.14）
 - ✅ **c1 完成**：GSD **0.8680 mm/px**，全画幅覆盖 **555×417 mm**
@@ -770,11 +770,19 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 
 | # | 事项 | 状态 |
 |---|---|---|
-| P0-1 | **c5 结果接线** | ⬜ 把 `assembly.ring_coverage / cap_coverage / spoke_peak_count` **接进 `checks.py`** 的合格性判定（现在算了但不比阈值）。c5 已跑出 `辐条峰数 8`（样本 `[8,8,8,8,6,6,7,8,8,6,8,8]`）。 |
+| P0-1 | **c5 结果接线** | ✅ **已完成**（只接了有区分度的那一条）<br>新增 `checks.spoke_vs_baseline(count, baseline, slack)` 纯函数 + 真机基线比较。<br>容差 `check.spokes.baseline_slack: 2`，依据 c5 实测 `[8,8,8,8,6,6,7,8,8,6,8,8]`（完整在位就是 6~8）。<br>★ **刻意没接 ring/hub/cap 覆盖率**：实测（合成图各种缺件组合）ring 0.994、hub 0.880~0.998、cap 0.874~1.000 —— **连缺顶盖都还有 0.874，几乎没有区分度**；真机上 c5 三个数全是 ~1.0。拿它们当阈值等于没判。<br>★ 代价（已写进配置注释）：真少 2 根（数出 6）**不会**被发现 —— 不误报优先。<br>新增 `tests/test_assembly.py`（回归 **8 个模块**）。 |
 | P0-2 | **`wheel_height_mm` 存疑** | ⬜ c5 报 **0.92mm**，而轮盘顶面物理上应在台面上方 30~40mm。单位没错（`compute` 返回 mm），所以是**拟合平面贴住了被测面** → `\|实测−基线\| > 15mm` 这条立柱判据**永远不触发**（静默失效）。<br>c5 已加**平面自检**（打 a/b/c、斜度、平面Z范围 vs 实测范围、高度/视差跨度占比），**低于 5mm 会明确报警**。待定：改 `fit_plane` 的拟合范围（排除料盘/台面），或明确写清深度判据不可用。 |
 | P0-3 | ~~`hub_coverage` 为 nan~~ | ✅ **已修（根因是复制粘贴漏改，与算法无关）**<br>`c5` 里写成 `rings.append(a.hub_coverage)` → rings 收的是 hub 的值、hubs 永远空 → 打印的 `1.000` 其实是**轮毂**的值、`nan` 是空列表均值，**三个数全错位**。<br>★ 教训：`_disc_coverage` 构造 8 种异常输入都**不返回 nan**（最差 0.0）—— 看到 nan 先数"列表里到底有几个元素"，别先怀疑算法。 |
-| P0-4 | 真机全流程联调 | ⬜ `app.py --windowed` 走一遍 4 工序。 |
-| P0-5 | 树莓派首次部署 | ⬜ **SGBM 耗时必须实测**（PC 15ms，按 6 倍估 Pi 上 ~90ms）。 |
+| P0-4 | 真机全流程联调 | ⬜ `app.py --windowed` 走一遍 4 工序。**需要你在真机上跑**。 |
+| P0-5 | 树莓派首次部署 | ⬜ **SGBM 耗时必须实测**（PC 15ms，按 6 倍估 Pi 上 ~90ms）。**需要你在 Pi 上跑**。 |
+
+**另修（原属 P1-1 第 4 条，但它是真 bug，不修会一直错）**：
+
+**装配位 pose 对齐** —— `work_roi_mask()` 里装配位**跟着位姿修正**，
+而 `check_assembly()` / `assembly_flags()` 用**标称坐标** → 同一装配位两处算出不同的圈。
+实测：料盘挪 `tx=8.8mm` 时两处差 **10.0px（8.7mm）**。
+已新增 `Qualifier.assembly_polygon_px(scale, pose=None)` 统一入口，两个函数都加 `pose` 参数，
+`pipeline.py` 两处调用都传 `self._last_pose`。
 
 ### P1 —— 架构性需求（用户已明确要求，但暂不实现）
 
@@ -789,7 +797,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 | **零件识别本身** | ✅ **已经是位置无关的** —— 只用形状/面积/色域特征，不用槽位坐标。<br>实测：底座放在 tray-mm `(-93.9, 73.3)`（一个没想到的位置）仍识别为 `P1_base` **得分 1.00** |
 | 料盘位置 + 旋转 | ✅ 已开放（每帧从零件星座反解刚体变换，槽位 ROI 跟着走） |
 | 工位全局 ROI | ⚠️ 仍框在"料盘 + 装配位"内 → **零件放到框外就看不到** |
-| **装配位判定** | ❌ **完全冻结** —— `check_assembly()` / `assembly_flags()` **没有 `pose` 参数**，<br>永远用 `self.tray.assembly_polygon_px()` 的标称坐标；<br>而 `work_roi_mask()` 里装配位**跟着位姿动** —— **两处不一致** |
+| **装配位判定** | ✅ **已对齐**（2026-10 修，见 P0 下方"另修"）—— `check_assembly()` / `assembly_flags()` 现在都收 `pose`，与 `work_roi_mask()` 用的圈一致。<br>★ 这一条**不是**为了"开放位置"才做的，它本身就是 bug（两处算出的圈不一样）。 |
 | 料盘尺寸 | ⚠️ `160mm` 写在 `workpiece.yaml`，与 c3 标定时的值必须一致 |
 
 **已实测的关键数据（实现时直接用，不用重新测）**：
@@ -836,10 +844,13 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 - **中文注释**，风格与现有代码一致；关键处用 `★` 标出"必须实测确认"的项。
 - 改 `config/*.yaml` 时**保留 `★` 注释并更新依据**，不要让注释与值脱节。
 - 阈值/尺寸**不要硬编码在算法里**，一律走配置。
-- 加新功能后**必须跑 `python tests/run_all.py`** 确认 **7 个测试模块**仍全绿
+- 加新功能后**必须跑 `python tests/run_all.py`** 确认 **8 个测试模块**仍全绿
   （`test_features` / `test_segment` / `test_polar` / `test_fsm` /
-  `test_part_id` / `test_tray_pose` / `test_work_roi`）。
+  `test_part_id` / `test_tray_pose` / `test_work_roi` / `test_assembly`）。
   新功能要**配套加测试**并登记到 `tests/run_all.py` 的 `MODULES`。
+- **判据逻辑尽量抽成纯函数再测**（例：`checks.spoke_vs_baseline()`）。
+  直接测 `check_assembly()` 要造像素分割结果，阈值一动就假失败；
+  **判据与像素解耦，测试才稳。**
 - **改动 `workpiece.yaml` 的槽位几何时，必须同步 `tools/make_synthetic.py` 的 `SLOTS`**
   （测试是"用 SLOTS 渲染 -> 用 yaml 判定"，不同步必然误判）。
 - **改动 `assembly.center` 时也要同步 `make_synthetic.py` 的 `ASM_CENTER`**，并且注意
