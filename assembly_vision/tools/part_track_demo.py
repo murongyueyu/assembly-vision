@@ -119,6 +119,11 @@ def main() -> int:
     ap.add_argument("--window-scale", type=float, default=1.0,
                     help="显示放大倍数。★ 相机配置里 scale.realtime=0.5，"
                          "会在 640x480 窗口里塞一张 320x240 的图 -> 四周全是黑边（实测踩过）")
+    ap.add_argument("--full-search-every", type=int, default=30,
+                    help="每 N 帧做一次**全图**检测（供判丢用）。"
+                         "★ 判丢要求全图搜索，不能只搜原位附近；"
+                         "全图的代价是去掉了挡木桌的工位 ROI，"
+                         "所以按这个周期跑（默认 30 帧 ≈ 1 秒）")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--bench", action="store_true", help="只测帧率，不开窗口")
     ap.add_argument("--no-preview", action="store_true")
@@ -208,6 +213,8 @@ def main() -> int:
     frames = 0
     blank = 0
     last_detect_frame = -999
+    last_full_search = -999
+    full_search_every = max(1, int(args.full_search_every))
     t_start = time.time()
     fps_times = []
     writer = None
@@ -259,8 +266,30 @@ def main() -> int:
                     seg_ms = (time.perf_counter() - ts) * 1000.0
 
                 ts = time.perf_counter()
+                # ★★ 判丢要**全图搜索**（用户明确要求）—— 所以 `seen_ids` 必须来自
+                #   **覆盖全画面**的检测，不能只用工位 ROI 内的那一份（那就退化成
+                #   "范围搜索"了）。全图分割比带 ROI 略贵（实测 8.9 vs 10.5ms），
+                #   所以按 `full_search_every` 控制频率（默认约每秒一次）。
+                seen_ids = None
+                occl = res.glove_mask if res is not None else None
+                if (res is not None
+                        and frames - last_full_search >= full_search_every):
+                    last_full_search = frames
+                    r_full = seg.segment(frame, scale=1.0)      # ★ 不带 work_roi = 全图
+                    try:
+                        for _sl in q.check_slots(r_full, 1.0, bgr=frame):
+                            pid = (_sl.features or {}).get("id_part")
+                            if pid:
+                                seen_ids = seen_ids or set()
+                                seen_ids.add(pid)
+                    except Exception:                              # noqa: BLE001
+                        seen_ids = None
+                    if occl is None:
+                        occl = r_full.glove_mask
+
                 tracks = tracker.update(frame, blobs, detect=need_detect,
-                                        classify=classify)
+                                        classify=classify,
+                                        seen_ids=seen_ids, occluder=occl)
                 trk_ms = (time.perf_counter() - ts) * 1000.0
 
                 # ── 手（蓝手套）检测 ──────────────────────────────

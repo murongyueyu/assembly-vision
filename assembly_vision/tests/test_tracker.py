@@ -166,50 +166,71 @@ def main() -> int:
           "形状已失真（aspect=5，像细杆）时不该换成 P_ROD —— "
           "实测就发生过「轮盘被遮一半 -> 认出 P_column」")
 
-    print("\n== 完全被遮住算「遮挡」，不算「丢失」（用户明确要求）==")
-    print("   用户原话：被全部遮挡应算遮挡 ——「我没有动底座应该算作遮挡」；")
-    print("   只有长时间什么都看不见，才算可能被拿走。")
-    print("   ★ 实测踩过：原来 12 帧（0.4 秒）就判 lost，手搭上去半秒就报「丢失」。")
+    print("\n== 丢失判据：遮挡物移开后 2 秒全图搜不到才算丢（用户明确定义）==")
+    print("   用户原话：「不是持续很久才被怀疑，而是最后一次还检测到有零件的位置")
+    print("   的时候，到**遮挡物已经完全消失了之后的一小段时间（暂定2秒）**还是")
+    print("   没有检测到这个零件，算作这个零件丢失。而且找这个零件是**全图搜索**。』")
+    print("   -> 三条必须成立：① 盖着时永不判丢 ② 计时从「移开」开始 ③ 找它是全图")
+
+    def glove_mask_over(contour, shape=(480, 640)):
+        """造一个"盖住这个轮廓"的遮挡物掩膜。"""
+        m = np.zeros(shape, np.uint8)
+        cv2.drawContours(m, [contour], -1, 255, -1)
+        return m
+
+    def no_glove(shape=(480, 640)):
+        return np.zeros(shape, np.uint8)
+
     tr4 = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
-                       "max_area_px": 100000, "max_occluded_frames": 20,
-                       "max_lost_frames": 40})
-    tr4.update(frame, [mk_blob(320, 240, 4000.0)], detect=True,
-               classify=lambda f: ("P_KEEP", 0.9))
-    check(len(tr4.tracks) == 1, "应先建立 1 条轨迹")
-    # 喂 10 帧"什么都看不到"（blobs 为空 = 完全被手挡住）
-    seen_states = []
-    for i in range(10):
-        tr4.update(frame, [], detect=True)
-        seen_states.append(tr4.tracks[0].state if tr4.tracks else "PRUNED")
-    print("   连续 %d 帧完全不可见 -> 状态: %s" % (len(seen_states),
-                                                 sorted(set(seen_states))))
-    check(all(s == "occluded" for s in seen_states),
-          "完全被遮住（还不算久）必须报 occluded，不能报 lost（实测 %s）"
-          % sorted(set(seen_states)))
-    check(len(tr4.tracks) == 1, "occluded 状态绝不能把轨迹删掉（删了就找不回来了）")
-    check(tr4.tracks[0].part_id == "P_KEEP", "被完全遮住时身份必须保留")
+                       "max_area_px": 100000, "lost_grace_frames": 20})
+    b = mk_blob(320, 240, 4000.0)
+    tr4.update(frame, [b], detect=True, classify=lambda f: ("P_KEEP", 0.9))
+    check(len(tr4.tracks) == 1 and tr4.tracks[0].ever_seen,
+          "应先建立 1 条轨迹且标记 ever_seen")
 
-    # 继续遮到超过 max_occluded(20) -> 升级为 lost，但**仍然不删**
-    for i in range(15):
-        tr4.update(frame, [], detect=True)
-    st = tr4.tracks[0].state if tr4.tracks else "PRUNED"
-    print("   遮到 %d 帧 -> 状态 %s（应 lost，但仍保留）" % (10 + 15, st))
-    check(st == "lost", "超过 max_occluded_frames 才升级为 lost（实测 %s）" % st)
-    check(len(tr4.tracks) == 1, "lost 状态**仍不删** —— 手移开露出来要能恢复")
+    # ① 遮挡物**一直盖着** -> 不管多少帧都必须是 occluded，不能 lost
+    glove = glove_mask_over(b.contour)
+    states_covered = []
+    for _ in range(60):                     # 60 帧远超 lost_grace_frames(20)
+        tr4.update(frame, [], detect=True, seen_ids=set(), occluder=glove)
+        states_covered.append(tr4.tracks[0].state if tr4.tracks else "PRUNED")
+    print("   遮挡物盖着 60 帧 -> 状态: %s" % sorted(set(states_covered)))
+    check(all(s == "occluded" for s in states_covered),
+          "① 遮挡物**还盖着**时永不判丢（实测 %s）" % sorted(set(states_covered)))
+    check(len(tr4.tracks) == 1 and tr4.tracks[0].part_id == "P_KEEP",
+          "盖着时轨迹与身份都必须保留")
 
-    # 手移开：零件重新可见 -> 应能恢复
-    tr4.update(frame, [mk_blob(320, 240, 4000.0)], detect=True,
-               classify=lambda f: ("P_KEEP", 0.9))
+    # ② 遮挡物**移开**但零件**重新出现**（全图搜到了）-> 一直 occluded/detected，不判丢
+    ok_again = []
+    for _ in range(30):
+        tr4.update(frame, [], detect=True, seen_ids={"P_KEEP"}, occluder=no_glove())
+        ok_again.append(tr4.tracks[0].state if tr4.tracks else "PRUNED")
+    print("   移开后全图搜到 P_KEEP 30 帧 -> 状态: %s" % sorted(set(ok_again)))
+    check("lost" not in ok_again,
+          "② 全图能搜到就绝不能判丢（实测 %s）" % sorted(set(ok_again)))
+
+    # ③ 遮挡物**移开**且全图**搜不到** -> 超过 lost_grace_frames 才判 lost
+    seen = []
+    for i in range(1, 41):
+        tr4.update(frame, [], detect=True, seen_ids=set(), occluder=no_glove())
+        st = tr4.tracks[0].state if tr4.tracks else "PRUNED"
+        seen.append((i, st))
+    early = [st for i, st in seen if i <= 20]
+    late = [st for i, st in seen if i > 20]
+    print("   移开后全图搜不到: 前 20 帧 %s -> 第 21 帧起 %s"
+          % (sorted(set(early)), sorted(set(late))))
+    check(all(s == "occluded" for s in early),
+          "③ 宽限窗口内应是 occluded（正在全图搜），实测 %s" % sorted(set(early)))
+    check("lost" in late,
+          "③ 宽限窗口过后还没搜到 -> lost（实测 %s）" % sorted(set(late)))
+
+    # ④ 恢复：全图又搜到了 -> 立刻回来
+    tr4.update(frame, [b], detect=True, classify=lambda f: ("P_KEEP", 0.9),
+               seen_ids={"P_KEEP"}, occluder=no_glove())
     check(tr4.tracks and tr4.tracks[0].state == "detected",
-          "手移开后必须恢复为 detected（实测 %s）"
+          "④ 搜到就立刻恢复 detected（实测 %s）"
           % (tr4.tracks[0].state if tr4.tracks else "PRUNED"))
     check(tr4.tracks[0].part_id == "P_KEEP", "恢复后身份应仍在")
-
-    # 再遮到超过 max_lost(40) -> gone，此时才允许清掉
-    for i in range(45):
-        tr4.update(frame, [], detect=True)
-    gone_ok = (not tr4.tracks) or tr4.tracks[0].state in ("lost", "gone")
-    check(gone_ok, "超过 max_lost_frames 之后才允许清理")
 
     print("\n== IoU 与 ROI 工具 ==")
     check(abs(_iou((0, 0, 10, 10), (0, 0, 10, 10)) - 1.0) < 1e-6, "同框 IoU=1")

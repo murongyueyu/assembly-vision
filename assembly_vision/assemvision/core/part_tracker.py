@@ -141,6 +141,16 @@ class TrackState:
     state: str = "detected"                    # detected | tracked | occluded | lost
     age: int = 0
     lost_frames: int = 0
+    # ── 丢失判据用的三个计时（用户明确定义，见下方 `PartTracker._judge_lost`）──
+    #   ★ 语义：**不是"看不见多久就怀疑"，而是"遮挡物移开后再给一小段时间
+    #     全图搜不到"才算丢失**（用户原话）。
+    #     occluded_frames  当前**被遮挡物盖着**的帧数（这期间永不判丢）
+    #     clear_frames     遮挡物**已移开**之后过了多少帧（判丢的计时器）
+    #     ever_seen        是否曾经真的检测到过（新建后连一次都没看到的不算"丢"）
+    occluded_frames: int = 0
+    clear_frames: int = 0
+    ever_seen: bool = False
+    covered: bool = False                      # 本帧是否被遮挡物盖着
     is_glove: bool = False
     detail: Dict[str, float] = field(default_factory=dict)
     id_margin: float = 0.12                    # 换标签需要比现有分数高出这么多
@@ -182,11 +192,14 @@ class TrackState:
           实测踩过：原来"被完全挡住 0.4 秒"就报 lost，与"真被拿走"分不开。
         """
         if self.state == "occluded":
+            if self.covered:
+                # ★ 遮挡物**还盖着** —— 永不判丢（用户明确要求）
+                return "被挡 %d帧" % self.occluded_frames
             if self.visible_ratio <= 0.02:
-                return "完全被挡 %d帧" % self.lost_frames
+                return "全图搜 %d帧" % self.clear_frames
             return "遮挡 %d%%" % int(round(100 * (1.0 - self.visible_ratio)))
         if self.state == "lost":
-            return "久不可见 %d帧" % self.lost_frames
+            return "丢失(搜 %d帧无果)" % self.clear_frames
         if self.state == "gone":
             return "已放弃"
         name = self.part_id or "?"
@@ -207,20 +220,17 @@ class PartTracker:
         c = dict(cfg or {})
         self.backend = str(c.get("backend", "kcf"))
         self.detect_every = int(c.get("detect_every_n", 5))
-        # ── 遮挡 / 丢失 的**时长阈值**（用户明确要求区分这两者）──
-        #   ★★ 语义（用户原话）：
-        #     「被全部遮挡应该算遮挡还是丢失。但很显然我没有动底座应该算作遮挡。
-        #       只有当遮挡物全部移开之后或者手，如果屏幕里面没有任何该零件的一小部分
-        #       才应该算作丢失。」
-        #     -> **完全被遮住仍算 `occluded`**；`lost` 表示"可能真被拿走了"，
-        #        必须**持续很久看不见**才成立。
-        #   ★ 实测踩过：原来只用 `max_lost_frames=12`（约 0.4 秒）就判 lost，
-        #     于是**手搭在零件上超过半秒就报"丢失"，哪怕零件一动没动**。
-        #   两个阈值分工：
-        #     max_occluded_frames  追踪失败但仍认为"在，只是被挡" -> 150 帧 ≈ 5 秒
-        #     max_lost_frames      再久才升级为"可能被拿走"        -> 300 帧 ≈ 10 秒
-        self.max_occluded = int(c.get("max_occluded_frames", 150))
-        self.max_lost = int(c.get("max_lost_frames", 300))
+        # ── 丢失判据（用户明确定义，不要再用"看不见多久"来判）──
+        #   ★★ 用户原话：
+        #     「不是持续很久才被怀疑，而是最后一次还检测到有零件的位置的时候，
+        #       到遮挡物已经完全消失了之后的一小段时间（暂定2秒）还是没有检测到
+        #       这个零件，算作这个零件丢失。而且找这个零件是**全图搜索**而不是范围搜索。」
+        #   -> 三件事：
+        #     ① 遮挡物**还盖着**的时候，**永不判丢**（挡多久都不算）
+        #     ② 计时从"遮挡物**完全移开**"那一刻开始，默认 2 秒
+        #     ③ 到期前必须做**全图搜索**（不是只在原位附近找）
+        self.lost_grace_frames = int(c.get("lost_grace_frames", 60))   # 60 帧 ≈ 2 秒
+        self.cover_overlap_ratio = float(c.get("cover_overlap_ratio", 0.25))
         self.min_area_px = float(c.get("min_area_px", 400))
         self.max_area_px = float(c.get("max_area_px", 8000))
         self.iou_match = float(c.get("iou_match", 0.15))
@@ -248,13 +258,25 @@ class PartTracker:
     # ── 对外 ────────────────────────────────────────────────
     def update(self, frame: np.ndarray, blobs: Optional[Sequence[Blob]] = None,
                detect: bool = True,
-               classify=None) -> List[TrackState]:
-        """跑一帧。`classify(features)->(part,score)` 可选，用于给新框打身份。"""
+               classify=None,
+               seen_ids: Optional[set] = None,
+               occluder: Optional[np.ndarray] = None) -> List[TrackState]:
+        """跑一帧。
+
+        参数
+        ----
+        blobs     : 本帧分割出的零件块。★ 判丢要求**全图搜索**，
+                    所以检测帧请传**全画面**的块（别只传工位 ROI 内的）。
+        classify  : `classify(features) -> (part_id, score)`，给新框打身份。
+        seen_ids  : 本帧**全图**识别到的零件 id 集合 —— 判丢用它（用户要求全图搜索）。
+        occluder  : 遮挡物掩膜（手套）。有它才能判断"遮挡物是否已移开"。
+        """
         t0 = time.perf_counter()
         self._frame_ref_n += 1
         if detect:
             self._detect(frame, blobs or [], classify)
             self._run_trackers(frame)          # 检测帧也 update 一次，保持一致
+            self.judge_lost(seen_ids, occluder)
             self._prune()
             self.stats["detects"] += 1
             self.last_detect_ms = (time.perf_counter() - t0) * 1000.0
@@ -306,6 +328,14 @@ class PartTracker:
             t = TrackState(bbox=bb, area_px=a, area_ref=a, contour=b.contour,
                            centroid=(float(b.centroid[0]), float(b.centroid[1])),
                            state="detected")
+            # ★★ 新建轨迹就是"第一次真的看到它" —— 必须置 `ever_seen`。
+            #   实测踩过：只在这里漏了，于是 `ever_seen` 恒为 False，
+            #   `judge_lost()` 直接把它当成"误检"清掉（`state=gone`），
+            #   表现是**轨迹莫名消失、判丢逻辑完全不生效**。
+            #   （与上面 `score_ema` 那个坑同一类：新建路径与更新路径必须一致。）
+            t.ever_seen = True
+            t.occluded_frames = 0
+            t.clear_frames = 0
             self._attach(frame, t)
             if classify is not None:
                 pid, sc = classify(dict(b.features or {}))
@@ -333,6 +363,11 @@ class PartTracker:
         t.centroid = (float(b.centroid[0]), float(b.centroid[1]))
         t.lost_frames = 0
         t.visible_ratio = vis
+        # ★ 「真的看到过」与"遮挡物已移开"都要在这里重置 ——
+        #   判丢的前提是"曾看到过"（见 judge_lost）。
+        t.ever_seen = True
+        t.clear_frames = 0
+        t.covered = False
 
         if vis >= self.full_ratio:
             # ② 只有"看得够全"才动参考值，且**只允许缓慢上升/有限下降**
@@ -399,26 +434,96 @@ class PartTracker:
                     t.centroid = (px, py)
             if not ok:
                 t.lost_frames += 1
-                # ★★ 追踪器 update 失败 = 目标**完全看不见了**（被手/别的东西盖死）。
-                #   此时必须把可见度**降下去**，否则 `visible_ratio` 会一直停在
-                #   上一次的值（实测：手套把零件完全盖住时仍显示「可见 100%」）。
+                # 追踪器 update 失败 = 目标**看不见了**。
+                # ★ 注意：`lost_frames` 只是"连续多少次追踪失败"，
+                #   **不再用它判 lost** —— 判 lost 由 `_judge_lost()` 按
+                #   "遮挡物移开后再等 2 秒"来做（用户明确要求）。
                 #   ★ `lost_frames` 的清零只由 `_adopt`（真的看到检测）负责 ——
                 #     **不要**在 `ok=True` 时清零：追踪器在完全遮挡时也可能报 ok，
-                #     那样计数永远涨不上去，`state` 就降不下来。
+                #     那样计数永远涨不上去。
                 t.visible_ratio = 0.0
-                # ★★ 「完全被遮住」应当算 **occluded**，不是 lost（用户明确要求）：
-                #   零件还在原位、只是被挡；只有**长时间**什么都看不见，
-                #   才值得怀疑"是不是真被拿走了"。
-                #   实测踩过：原来 12 帧（0.4 秒）就判 lost，手搭上去半秒就报"丢失"。
-                if t.lost_frames <= self.max_occluded:
-                    t.state = "occluded"
-                elif t.lost_frames <= self.max_lost:
-                    t.state = "lost"          # 久到可疑，但**先不删**（还能恢复）
-                else:
-                    t.state = "gone"          # 超过 max_lost -> 允许 _prune 清掉
+
+    def judge_lost(self, seen_ids: Optional[set] = None,
+                   occluder: Optional[np.ndarray] = None) -> None:
+        """判定 `occluded` / `lost` / `gone` —— **按用户定义的语义**。
+
+        ★★ 用户原话（这是唯一权威定义，别再自己发明）：
+            「不是持续很久才被怀疑，而是最后一次还检测到有零件的位置的时候，
+             到**遮挡物已经完全消失了之后的一小段时间（暂定2秒）**还是没有检测到
+             这个零件，算作这个零件丢失。而且找这个零件是**全图搜索**而不是范围搜索。」
+
+        所以三段逻辑：
+          ① `covered`  —— 遮挡物**还盖着**这个零件：`occluded`，**永不判丢**
+                          （挡多久都不算；零件没动）
+          ② 遮挡物**刚移开**：开始计时 `clear_frames`，在 `lost_grace_frames`
+                          窗口内做**全图搜索**（由调用方传 `seen_ids` 全图识别的结果）；
+                          这段时间仍是 `occluded`（正在找，先别惊动）
+          ③ 窗口过期**还没找到** -> `lost`；再久 -> `gone`（允许清理）
+
+        参数
+        ----
+        seen_ids : 本帧**全图**识别到的零件 id 集合（不是只在原位附近找）。
+                   ★ 必须来自"覆盖全画面的检测"，否则就退化成范围搜索了。
+        occluder : 遮挡物掩膜（手套）；None 表示没有遮挡物。
+        """
+        for t in self.tracks:
+            if not t.ever_seen:
+                # 新建后**一次都没真看到**过：不算"丢"，直接清掉（多是误检）
+                if t.age > self.lost_grace_frames:
+                    t.state = "gone"
+                continue
+
+            # ① 遮挡物还盖着吗？（看它有没有压在这个零件身上）
+            t.covered = self._is_covered(t, occluder)
+            if t.covered:
+                t.occluded_frames += 1
+                t.clear_frames = 0
+                t.state = "occluded"          # ★ 挡着就永远是"遮挡"，不管多久
+                continue
+
+            # ② 遮挡物已移开
+            # ★★ 本帧追踪器**成功了**（`lost_frames == 0`）说明它就在那儿 ——
+            #   **不要**改写 `_adopt` / `_run_trackers` 已经算好的
+            #   `detected` / `tracked` 状态。实测踩过：这里无条件覆盖，
+            #   导致"完全可见(0%)"也被标成 `occluded`（遮挡对照图全变橙）。
+            if t.lost_frames == 0:
+                t.clear_frames = 0
+                continue
+
+            t.clear_frames += 1
+            found = bool(seen_ids and t.part_id and t.part_id in seen_ids)
+            if found:
+                t.clear_frames = 0            # 找到了 -> 它还在（只是刚才被挡）
+                continue
+            if t.clear_frames <= self.lost_grace_frames:
+                # 还在宽限窗口内：**正在全图搜**，先报"遮挡"（别过早惊动）
+                t.state = "occluded"
+            elif t.clear_frames <= self.lost_grace_frames * 3:
+                t.state = "lost"              # 窗口过了还没找到 -> 丢
+            else:
+                t.state = "gone"              # 再过久 -> 放弃（允许清理）
+
+    def _is_covered(self, t: TrackState, occluder: Optional[np.ndarray]) -> bool:
+        """这个零件**当前**被遮挡物盖着吗（按它最后已知的位置/轮廓判定）。
+
+        判据：遮挡物掩膜与"零件上次所在区域"的重叠比例 > `cover_overlap_ratio`。
+        ★ 用**上次所在位置**而不是当前位置 —— 位置正是我们不知道的东西。
+        """
+        if occluder is None or t.contour is None:
+            return False
+        try:
+            cm = np.zeros(occluder.shape[:2], np.uint8)
+            cv2.drawContours(cm, [t.contour], -1, 255, -1)
+            a = float(np.count_nonzero(cm))
+            if a <= 0:
+                return False
+            inter = float(np.count_nonzero(cv2.bitwise_and(occluder, cm)))
+            return (inter / a) >= self.cover_overlap_ratio
+        except Exception:                                          # noqa: BLE001
+            return False
 
     def _prune(self) -> None:
-        """只在 `gone`（远超过 `max_lost`）时才真删轨迹。
+        """只在 `gone` 时才真删轨迹。
 
         ★ 为什么不删 `lost`：`lost` 只是"久到可疑"，零件可能还在原位被挡着；
           删了它，`_last_pose` 缓存与界面上的"它应该在哪"就都没了 ——
