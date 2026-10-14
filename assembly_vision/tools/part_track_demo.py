@@ -58,10 +58,24 @@ from assemvision.config import load_config                        # noqa: E402
 from assemvision.core.checks import Qualifier                     # noqa: E402
 from assemvision.core.part_tracker import PartTracker, make_tracker   # noqa: E402
 from assemvision.core.roi import TrayMap                          # noqa: E402
-from assemvision.core.segment import Segmenter                    # noqa: E402
+from assemvision.core.segment import Segmenter, glove_hits         # noqa: E402
 from assemvision.imgio import imread_safe                         # noqa: E402
 
 WIN = "零件检测 · 轮廓 + 追踪"
+
+
+def _id_in_slot(t, poly) -> bool:
+    """这个追踪目标的质心落在该槽多边形里吗（用 `cv2.pointPolygonTest`）。
+
+    比"按槽算覆盖率"轻得多，且不依赖分割结果 —— 只用来在面板上报"缺件"。
+    """
+    try:
+        import cv2 as _cv
+        return _cv.pointPolygonTest(
+            poly.reshape(-1, 1, 2).astype(np.float32),
+            (float(t.centroid[0]), float(t.centroid[1])), False) >= 0
+    except Exception:                                              # noqa: BLE001
+        return False
 
 
 def _read_frame(src, images, idx):
@@ -100,6 +114,11 @@ def main() -> int:
                     help="每 N 帧做一次全图检测；其余帧只追踪。"
                          "★ 实测调大它**几乎不提帧率**（26~29fps 之间），"
                          "因为瓶颈是 KCF 的每目标成本、不是分割（见文件头）")
+    ap.add_argument("--no-hand", action="store_true",
+                    help="不画手（蓝手套）的检测框；默认画")
+    ap.add_argument("--window-scale", type=float, default=1.0,
+                    help="显示放大倍数。★ 相机配置里 scale.realtime=0.5，"
+                         "会在 640x480 窗口里塞一张 320x240 的图 -> 四周全是黑边（实测踩过）")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--bench", action="store_true", help="只测帧率，不开窗口")
     ap.add_argument("--no-preview", action="store_true")
@@ -169,8 +188,21 @@ def main() -> int:
         pid, sc, _ = clf.classify(f)
         return pid, sc
 
+    # ★ 预先把槽位多边形算好（`glove_hits` 要它判断"手压在哪个槽"）。
+    #   用**标称**位置即可 —— 手压判断只需要大致区域，不必跟位姿。
+    slot_polys = {}
+    for _s in (wp.get("slots") or []):
+        try:
+            _p = tray.slot_polygon_px(_s["id"], 1.0)
+            if _p is not None:
+                slot_polys[_s["id"]] = _p
+        except Exception:                                          # noqa: BLE001
+            pass
+
     paused = False
     show_bbox = False
+    show_hand = not args.no_hand
+    last_hand = (None, 0.0, None)
     debug = False
     idx = 0
     frames = 0
@@ -213,6 +245,7 @@ def main() -> int:
                 stale = (frames - last_detect_frame) >= every * 2
                 need_detect = (frames % every == 1) or (not tracker.tracks and stale)
                 blobs = []
+                res = None
                 if need_detect:
                     last_detect_frame = frames
                     ts = time.perf_counter()
@@ -229,6 +262,26 @@ def main() -> int:
                 tracks = tracker.update(frame, blobs, detect=need_detect,
                                         classify=classify)
                 trk_ms = (time.perf_counter() - ts) * 1000.0
+
+                # ── 手（蓝手套）检测 ──────────────────────────────
+                #   ★ 用户要求：「还要能识别工人的手，手用方框框就可以了」。
+                #   手**只在检测帧算一次**（`_mask` 要跑 HSV + 连通域，占几个 ms），
+                #   非检测帧沿用上一帧的手位 —— 手移动慢，且装配时本来就该少动。
+                hand_box, hand_area, hand_on = None, 0.0, None
+                if res is not None:
+                    hand_box = res.glove_bbox
+                    hand_area = res.glove_area_px
+                    # ★★ `Segmenter.segment()` **不填 `hand_on`** ——
+                    #   它是 `pipeline.py` 另调 `glove_hits(mask, polygons)` 算的
+                    #   （实测踩过：直接读 `res.hand_on` 永远是空字典）。
+                    #   这里照 pipeline 的做法补上，否则"手压在哪个槽"永远不显示。
+                    try:
+                        hand_on = glove_hits(res.glove_mask, slot_polys)
+                    except Exception:                              # noqa: BLE001
+                        hand_on = {}
+                    last_hand = (hand_box, hand_area, hand_on)
+                elif show_hand:
+                    hand_box, hand_area, hand_on = last_hand
 
                 # ── 遮挡处理：用追踪框当 ROI **重新分割**，取回轮廓 ──
                 #    实测遮挡 70% 仍能取回（面积剩 20%、轮廓完整）
@@ -271,6 +324,10 @@ def main() -> int:
                                     t.state = "tracked"
 
                 canvas = frame.copy()
+                # 手**先画**（方框在下层），零件轮廓后画（压在上面，不被手框盖住）
+                if show_hand:
+                    tracker.draw_hand(canvas, hand_box, hand_area,
+                                      hand_on=hand_on, mm_per_px=mmpp)
                 tracker.draw(canvas, show_bbox=show_bbox)
 
                 # 面板
@@ -278,9 +335,16 @@ def main() -> int:
                 n_ok = sum(1 for t in tracks if t.visible)
                 n_occ = sum(1 for t in tracks if t.state == "occluded")
                 n_lost = sum(1 for t in tracks if t.state == "lost")
+                hand_txt = ("手: 有（压在 %s）"
+                            % ",".join(k.replace("slot_", "")
+                                       for k, v in (hand_on or {}).items() if v)
+                            if (show_hand and hand_box is not None and
+                                any((hand_on or {}).values()))
+                            else ("手: 有" if (show_hand and hand_box is not None)
+                                  else ("手: 无" if show_hand else "手: 关")))
                 cv2.putText(canvas,
-                            "零件 %d（可用 %d / 遮挡 %d / 丢失 %d）"
-                            % (len(tracks), n_ok, n_occ, n_lost),
+                            "零件 %d（可用 %d / 遮挡 %d / 丢失 %d）  |  %s"
+                            % (len(tracks), n_ok, n_occ, n_lost, hand_txt),
                             (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (230, 230, 230), 1,
                             cv2.LINE_AA)
                 cv2.putText(canvas,
@@ -289,6 +353,17 @@ def main() -> int:
                                tracker.detect_every, seg_ms, trk_ms),
                             (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (170, 230, 170), 1,
                             cv2.LINE_AA)
+                # ★ 「缺件」提示：用户明确要"零件在画面里就要认出来"。
+                #   把**该有却没认到**的槽直接打出来 —— 否则"少了一个零件"
+                #   和"那个槽本来就空着"在画面上看不出区别（实测据此排查过一轮）。
+                seen = {t.part_id for t in tracks if t.part_id}
+                missing = [k for k, v in slot_polys.items()
+                           if not any(t.part_id and _id_in_slot(t, v) for t in tracks)]
+                if missing:
+                    cv2.putText(canvas,
+                                "缺: " + " ".join(m.replace("slot_", "") for m in missing),
+                                (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (80, 200, 255), 1, cv2.LINE_AA)
                 if debug:
                     lines = ["状态明细:",
                              "  tracker API = %s" % (api or "-"),
@@ -310,7 +385,15 @@ def main() -> int:
                     writer.write(canvas)
 
                 if not args.bench and not args.no_preview:
-                    cv2.imshow(WIN, canvas)
+                    # ★ 画面以 `scale.realtime` 缩过（相机配置里是 0.5），
+                    #   直接 imshow 会在窗口里留一大圈黑边（实测踩过：截图里
+                    #   640x480 的窗口只用了左上 320x240）。这里按需放大回满窗。
+                    view = canvas
+                    if args.window_scale and abs(args.window_scale - 1.0) > 1e-6:
+                        view = cv2.resize(
+                            canvas, None, fx=args.window_scale, fy=args.window_scale,
+                            interpolation=cv2.INTER_NEAREST)
+                    cv2.imshow(WIN, view)
                     k = cv2.waitKey(1) & 0xFF
                     if k in (27, ord("q")):
                         break
@@ -349,6 +432,15 @@ def main() -> int:
     print("═" * 78)
     print("  实测结果")
     print("═" * 78)
+    if frames == 0:
+        # ★★ 一帧都没读到 —— 最常见的两个原因，直接说清，别让用户猜。
+        #   （实测踩过：相机被另一个进程占着时会静默读到 0 帧。）
+        print("  ★★ 一帧都没读到（%.1f 秒）" % el)
+        print("     最可能的原因：**相机被别的程序占用**。")
+        print("       ① 先关掉其它正在用相机的窗口（app.py --windowed / 预览窗口 / 会议软件）")
+        print("       ② 跑 python tools/probe_camera.py 确认相机本身能出图")
+        print("       ③ 还不行就拔插一次 USB（DSHOW 偶尔要重新枚举）")
+        return 2
     print("  处理帧数       : %d（%.1f 秒）" % (frames, el))
     # ★★ 报**中位帧率**，不报平均 —— 实测踩过：
     #   相机 DSHOW 开流要预热，前几帧很慢（一次实测均值 6.8fps、中位 31.7fps）。
@@ -368,18 +460,23 @@ def main() -> int:
     print("  检测帧 / 纯追踪: %d / %d" % (n_det, n_trk))
     print("  全图分割(检测帧): %.2f ms      追踪 update/帧: %.2f ms" % (seg_ms, trk_ms))
     # ★ 每帧均摊 = 分割/检测周期 + 追踪。这是判断"能不能跟上相机"的正确指标。
-    per_frame = seg_ms / max(1, tracker.detect_every) + trk_ms
-    print("  ★ 实测每帧均摊  : %.2f ms  -> 上限 %.1f fps（相机 31 fps）"
-          % (per_frame, 1000.0 / max(1e-6, per_frame)))
+    if seg_ms > 0 or trk_ms > 0:
+        per_frame = seg_ms / max(1, tracker.detect_every) + trk_ms
+        print("  ★ 实测每帧均摊  : %.2f ms  -> 上限 %.1f fps（相机 31 fps）"
+              % (per_frame, 1000.0 / max(1e-6, per_frame)))
+    else:
+        per_frame = 0.0
+        print("  ★ 实测每帧均摊  : 未测到（没有检测帧/追踪帧）")
     print("     其中分割被摊薄到 1/%d（每 %d 帧才跑一次全图分割）"
           % (tracker.detect_every, tracker.detect_every))
-    if per_frame <= 32.0:
+    if per_frame and per_frame <= 32.0:
         print("     ✓ 够用：每帧均摊 <= 32ms，能贴住相机 31fps")
-    else:
+    elif per_frame:
         print("     ★ 不够：每帧均摊 > 32ms，会掉帧 -> 把 --detect-every 调大")
-    per_frame_pi = (seg_ms * 6.0) / max(1, tracker.detect_every) + trk_ms * 6.0
-    print("  树莓派估（6x）  : 每帧约 %.0f ms -> 上限约 %.0f fps"
-          % (per_frame_pi, 1000.0 / max(1e-6, per_frame_pi)))
+    if per_frame:
+        per_frame_pi = (seg_ms * 6.0) / max(1, tracker.detect_every) + trk_ms * 6.0
+        print("  树莓派估（6x）  : 每帧约 %.0f ms -> 上限约 %.0f fps"
+              % (per_frame_pi, 1000.0 / max(1e-6, per_frame_pi)))
     print()
     print("  ── 后端选择（实测，别按「常见做法」选）──")
     print("     kcf       5.5ms/目标  ★ 唯一可靠的，默认")

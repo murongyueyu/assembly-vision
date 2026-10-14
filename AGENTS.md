@@ -62,6 +62,7 @@
 | 零件识别方法与量化 | 特征向量+区间匹配+加权；合成序列 **98.3%/召回 75%/精确 100%**；旋转 ±20° 误差 0 | 实录 2.19 |
 | **零件实时检测+追踪+遮挡** | 检测+追踪（分割 9.9ms 摊薄到 1/N）；**只描可见部分轮廓**；遮挡 3 档冻结身份；卡尔曼扫参定；后端只有 `kcf` 可靠 | 实录 2.20 |
 | **追踪后端只有 KCF 可靠** | mosse 的 `update` 恒返回 False、medianflow 会崩、csrt 太慢；`segment` 耗时与 ROI 大小无关；裁剪加速试过已放弃（快 14% 但漂移 2.76->131px）；真机中位 **28.9fps**（相机 31） | 实录 2.21 |
+| **手（蓝手套）画方框** | **零件画轮廓、手画方框**（刻意的）；`hand_on` **不是 `segment()` 填的**，要自己调 `glove_hits`；`max_aspect=6.0` 挡不住 260x60（比值 4.28） | 实录 2.22 |
 
 ---
 
@@ -129,6 +130,8 @@ assembly_vision/
 │   │                             `--bench` 只测帧率；按键 空格=暂停 b=方框 d=调试
 │   ├── part_track_occlusion_test.py  ★ 遮挡对照图（0/30/50/70/85%），
 │   │                             验证「只描可见部分」+ 遮挡时身份冻结
+│   ├── check_hand_box.py       ★ 手（蓝手套）**方框**渲染验证（用合成手套，
+│   │                             不依赖相机 —— 真机没看到框可能是画面里真没手）
 │   ├── measure_rotation.py     ★ **料盘旋转/平移检测能力**：直接喂已知真值的质心，
 │   │                             含边界（少件/0 件/超闸门/认错零件）
 │   ├── measure_part_id_accuracy.py  按槽归属对账（需 `--files` 指定干净帧）
@@ -178,6 +181,7 @@ python tools/part_track_demo.py                  # ★★ 零件检测实时演�
 python tools/part_track_demo.py --bench                  # 只测帧率
 python tools/part_track_demo.py --source images --path data/synthetic_seq --bench
 python tools/part_track_occlusion_test.py        # 遮挡对照图（只描可见部分）
+python tools/check_hand_box.py                   # 手（蓝手套）方框渲染验证
 python app.py --windowed                      # 正式跑（窗口模式方便调试）
 ```
 
@@ -253,6 +257,13 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
   · ★★ **后端只有 `kcf` 可靠**：mosse 的 `update` 恒返回 False（实测 40/40 全丢）、
     medianflow 会崩、csrt 太慢 —— 详见实录 **2.21**
   · ★ **真机实测中位 28.9 fps**（相机上限 31，已 93%）；每帧均摊 31.91ms
+- ✅ **手（蓝手套）检测已实现**（见实录 **2.22**）：`PartTracker.draw_hand()`
+  · **零件画形状轮廓、手画方框** —— 两者刻意不同（手是非刚体，画轮廓没意义）
+  · 方框带**四角加粗** + 标签「手 N mm² 压在:槽名」
+  · ★ 坑：`hand_on` **不是 `segment()` 填的**，要自己调 `glove_hits`
+  · 手只在**检测帧**算一次（`_mask` 要几 ms），非检测帧沿用上一帧
+  · 面板另有「缺: 槽名」提示 —— 让「少了一个零件」与「槽本来就空」能区分开
+  · `--no-hand` 可关闭
 - ✅ **色域特征在「零件间识别」里零贡献（消融实验证实）**：
   `full` 与 `no_color` 结果**完全一样**（13/13 认对），`only_color` **一个都认不出**。
   ★ 但这**不否定色域** —— 它的用途是**零件 vs 背景**与**零件 vs 手套**，

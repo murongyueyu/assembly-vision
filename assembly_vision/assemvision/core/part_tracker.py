@@ -404,6 +404,48 @@ class PartTracker:
             return None
         return (x - pad, y - pad, x + w + pad, y + h + pad)
 
+    def draw_hand(self, canvas: np.ndarray,
+                  bbox: Optional[Sequence[int]],
+                  area_px: float = 0.0,
+                  hand_on: Optional[Dict[str, bool]] = None,
+                  mm_per_px: float = 1.0) -> bool:
+        """把**工人的手（蓝手套）用方框**标出来。
+
+        ★ 用户要求：「还要能识别工人的手，工人的手用方框框就可以了（戴蓝手套）」
+          所以**手画方框**（而零件画形状轮廓）—— 两者刻意不同，别统一。
+        ★ 为什么手用方框就够：手是非刚体、形状多变，画轮廓既不准也没意义；
+          而下游要的是「手在哪、有没有压到某个槽」（`hand_on`），方框足够。
+
+        `bbox` 来自 `SegResult.glove_bbox`（`Segmenter.segment()` 已经算好，
+        并把非手套的蓝色块剔除了）。返回是否画了。
+        """
+        if bbox is None:
+            return False
+        x, y, w, h = (int(v) for v in bbox)
+        if w <= 0 or h <= 0:
+            return False
+        # 手用**青色**，与零件的绿/黄/橙/红全部区分开
+        COL = (255, 220, 60)
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), COL, 2)
+        # 四角加粗（一眼看出是"检测框"而不是随便一个矩形）
+        L = max(6, min(w, h) // 5)
+        for (px, py, dx, dy) in ((x, y, 1, 1), (x + w, y, -1, 1),
+                                 (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
+            cv2.line(canvas, (px, py), (px + dx * L, py), COL, 3)
+            cv2.line(canvas, (px, py), (px, py + dy * L), COL, 3)
+        # 标签：手 + 面积（换算成 mm²，便于判断是不是误检的小蓝块）
+        mm2 = float(area_px) * float(mm_per_px) * float(mm_per_px)
+        txt = "手 %.0fmm²" % mm2
+        if hand_on:
+            hit = [k.replace("slot_", "") for k, v in hand_on.items() if v]
+            if hit:
+                txt += " 压在:" + ",".join(hit)
+        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(canvas, (x, y - th - 8), (x + tw + 8, y), COL, -1)
+        cv2.putText(canvas, txt, (x + 4, y - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 20, 20), 1, cv2.LINE_AA)
+        return True
+
     def draw(self, canvas: np.ndarray, show_bbox: bool = False) -> None:
         """画**形状轮廓**（不是方框）+ 卡尔曼平滑后的质心。
 
