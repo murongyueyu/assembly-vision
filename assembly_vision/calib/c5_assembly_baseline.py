@@ -39,7 +39,15 @@ from assemvision.core.segment import Segmenter                          # noqa: 
 
 def sweep_band(mask, center_px, mmpp: float, required: int = 8,
                r_lo_mm: float = 8.0, r_hi_mm: float = 40.0) -> dict:
-    """扫优数辐条的环带：找一个「峰数 == required 且对比度最大」的半径区间。"""
+    """扫优数辐条的环带：找一个「峰数 == required **且角度均匀** 且对比度最大」的半径区间。
+
+    ★★ 为什么必须判"角度均匀"（实测踩过，见 AGENTS.md 2.13）：
+      只看"峰数 == 8"会选出**凑出来的 8 个峰**。实测：
+        brass 掩膜 28mm 带 -> 8 峰，但间隔 38/37/43/91/23/10/22/96°（抖动 33°）
+        metal 掩膜 30~35mm -> 8 峰，间隔 52/41/36/42/43/43/48/56°（抖动 5.9°）
+      前者是噪声凑数，后者才是真的 8 辐条。**只看峰数会把两者当成一样好。**
+      真 8 辐条的角度间隔应当均匀 = 360/8 = 45°。
+    """
     best = None
     for lo in np.arange(r_lo_mm, r_hi_mm - 4.0, 1.0):
         for span in (4.0, 6.0, 8.0, 12.0):
@@ -58,10 +66,20 @@ def sweep_band(mask, center_px, mmpp: float, required: int = 8,
             minw = min(p[1] for p in pk)
             if minw < 8.0:
                 continue
-            score = contrast * min(1.0, minw / 15.0)
+            # ★ 角度均匀度：间隔相对 360/required 的抖动
+            angs = sorted(float(p[0]) for p in pk)
+            diffs = np.diff(angs + [angs[0] + 360.0])
+            jitter = float(np.std(diffs))
+            # 抖动超过 12° 就认为"不是规整的 required 辐条"，直接排除。
+            #   实测真辐条抖动 5.9°、凑数的 33° -> 12° 是很宽的判据。
+            if jitter > 12.0:
+                continue
+            # 打分：对比度 × 峰宽 × 均匀度（抖动越小越高）
+            score = contrast * min(1.0, minw / 15.0) * max(0.2, 1.0 - jitter / 45.0)
             if best is None or score > best["score"]:
                 best = dict(score=score, r_min=float(lo), r_max=float(hi),
                             contrast=contrast, min_width=float(minw),
+                            jitter=jitter,
                             peaks=[round(p[0], 1) for p in pk])
     return best or {}
 
@@ -185,8 +203,8 @@ def main() -> int:
                                   (13.0, (255, 128, 0)),    # r_hub 轮毂
                                   (26.0, (0, 255, 0)),      # ring_band 内
                                   (30.0, (0, 255, 0)),      # ring_band 外
-                                  (33.0, (255, 0, 255)),    # spoke_band_outer 内
-                                  (37.5, (255, 0, 255)),    # spoke_band_outer 外
+                                  (30.0, (255, 0, 255)),    # spoke_band_outer 内
+                                  (35.0, (255, 0, 255)),    # spoke_band_outer 外
                                   (45.0, (0, 165, 255))):   # assembly.radius
                     rr = r_mm / mmpp
                     cv2.circle(vis, (int(round(c[0])), int(round(c[1]))),
@@ -196,9 +214,9 @@ def main() -> int:
             pc = np.round(c_nom).astype(int)
             cv2.drawMarker(vis, (int(pc[0]), int(pc[1])), (255, 0, 255),
                            cv2.MARKER_TILTED_CROSS, 18, 2)
-            cv2.putText(vis, "red=ROI  magenta+=nominal_center  circles=12.5/26/30/33/37.5/45mm",
+            cv2.putText(vis, "red=ROI  magenta+=nominal_center  circles=12.5/26/30/35/45mm",
                         (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3)
-            cv2.putText(vis, "red=ROI  magenta+=nominal_center  circles=12.5/26/30/33/37.5/45mm",
+            cv2.putText(vis, "red=ROI  magenta+=nominal_center  circles=12.5/26/30/35/45mm",
                         (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
             outp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "data", "refs", "c5_assembly_diag.png")
@@ -239,11 +257,35 @@ def main() -> int:
     if not best:
         print("扫优失败：整段半径里都数不出 8 个峰。检查轮盘是否完整、光照是否均匀。")
     else:
-        print(" 槽内最优环带: r = %.1f ~ %.1f mm  对比度 %.2f  最窄峰 %.1f°"
-              % (best["r_min"], best["r_max"], best["contrast"], best["min_width"]))
+        print(" 槽内最优环带: r = %.1f ~ %.1f mm  对比度 %.2f  最窄峰 %.1f°  角度抖动 %.1f°"
+              % (best["r_min"], best["r_max"], best["contrast"],
+                 best["min_width"], best.get("jitter", float("nan"))))
         print(" 峰角度:", best["peaks"])
         calib.set("assembly.radii_mm.spoke_band", [best["r_min"], best["r_max"]])
         calib.set("assembly.radii_mm.spoke_band_score", round(best["score"], 4))
+
+    # ── 第一步补充：装配体上的辐条环带（球头端）也要在这里扫 ──────
+    #   ★★ 为什么必须在**料盘里的轮盘**上扫，而不能等第二步在装配体上扫：
+    #     装配体上的球头只有 6px 宽、边缘被绿垫混色，**brass 掩膜切不到**，
+    #     而 metal 掩膜能切到。所以两次分别用对应的掩膜扫。
+    print()
+    print("=== 第一步补充：轮盘的球头带（用 metal 掩膜扫，供装配体数辐条用）===")
+    f2, ff2 = grab_small(src)
+    if f2 is not None:
+        r2, _p, _s, _i = q.segment_with_roi(seg, f2, scale=ff2.scale)
+        bl = q._blob_in(r2, tray.slot_polygon_px("slot_wheel", ff2.scale))
+        if bl is not None and r2.metal_mask is not None:
+            b_metal = sweep_band(r2.metal_mask, bl.centroid, tray.mm_per_px(ff2.scale),
+                                 required=8, r_lo_mm=24.0, r_hi_mm=42.0)
+            if b_metal:
+                print(" 球头带（metal 掩膜）: r = %.1f ~ %.1f mm  对比度 %.2f  角度抖动 %.1f°"
+                      % (b_metal["r_min"], b_metal["r_max"],
+                         b_metal["contrast"], b_metal.get("jitter", float("nan"))))
+                print(" 峰角度:", b_metal["peaks"])
+                calib.set("assembly.radii_mm.spoke_band_outer",
+                          [b_metal["r_min"], b_metal["r_max"]])
+            else:
+                print(" ★ metal 掩膜也扫不出规整的 8 峰，沿用配置里的现值")
 
     print()
     print("=== 第二步：装配位基线 ===")
@@ -269,21 +311,35 @@ def main() -> int:
         src.close()
         return 1
     spk_mode = int(np.bincount(np.array(spokes)).argmax())
+    # ★ nan 保护：hub/ring 在半径过小时 `_disc_coverage` 会返回 0，但若
+    #   mask 为空数组求均值会得到 nan —— 写进 YAML 变成 `.nan`，
+    #   之后读出来是 nan，比对全部静默失败。实测踩过（c5 首次跑）。
+    def _safe_mean(xs):
+        arr = np.asarray([x for x in xs if x is not None and np.isfinite(x)], float)
+        return float(arr.mean()) if arr.size else float("nan")
     print(" 外圈环带覆盖率 %.3f   轮毂覆盖率 %.3f   顶盖覆盖率 %.3f"
-          % (np.mean(rings), np.mean(hubs), np.mean(caps)))
+          % (_safe_mean(rings), _safe_mean(hubs), _safe_mean(caps)))
     print(" 辐条峰数（众数） %d   样本 %s" % (spk_mode, spokes[:12]))
-    calib.set("assembly.ring_coverage", round(float(np.mean(rings)), 4))
-    calib.set("assembly.hub_coverage", round(float(np.mean(hubs)), 4))
-    calib.set("assembly.cap_coverage", round(float(np.mean(caps)), 4))
-    calib.set("assembly.spoke_peak_count", spk_mode)
+    for key, val in (("ring_coverage", _safe_mean(rings)),
+                     ("hub_coverage", _safe_mean(hubs)),
+                     ("cap_coverage", _safe_mean(caps))):
+        if np.isfinite(val):
+            calib.set("assembly.%s" % key, round(val, 4))
+        else:
+            print(" ★ %s 全是 nan，**不写入**（避免污染配置）" % key)
+    if spk_mode > 0:
+        calib.set("assembly.spoke_peak_count", spk_mode)
+    else:
+        print(" ★ 辐条峰数众数为 0，**不写入**（0 峰说明判据没调好，写进去会污染基线）")
 
-    # 装配体上的辐条环带（球头端）
+    # 装配体上的辐条环带（球头端）—— 用 metal 掩膜
     frame, f = grab_small(src)
     if frame is not None:
         res, _p, _s, _i = q.segment_with_roi(seg, frame, scale=f.scale)
         blob = q._blob_in(res, tray.assembly_polygon_px(f.scale))
         if blob is not None:
-            b2 = sweep_band(res.brass_mask, blob.centroid, mmpp, required=8,
+            b2 = sweep_band(res.metal_mask if res.metal_mask is not None else res.brass_mask,
+                            blob.centroid, mmpp, required=8,
                             r_lo_mm=26.0, r_hi_mm=42.0)
             if b2:
                 print(" 装配体上最优环带: r = %.1f ~ %.1f mm  对比度 %.2f"

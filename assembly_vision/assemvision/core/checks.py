@@ -563,7 +563,16 @@ class Qualifier:
         # 辐条：★ 装配体上必须数"球头端伸出外圈的凸起"，不能数"臂"。
         #   臂与臂之间的空隙里看到的是下方的底座圆盘（同样是黄铜），
         #   在装配体上用臂的环带数只会得到"整圈都是金属"→ 一个峰都数不出来。
-        spk = count_spokes(m, (cx, cy),
+        #
+        # ★★ 而且**必须用 metal 掩膜，不能用 brass 掩膜**（c5 实测踩过）：
+        #   球头只有 Ø5mm，在 0.86mm/px 下只有 6 像素宽，边缘被绿垫抗锯齿
+        #   混色后色相从 H=30 跳到 **H=59**，被 brass 的 `h_max=45` 整条挡掉，
+        #   于是辐条数恒为 0（实测 20 帧全是 0）。
+        #   换 metal 掩膜（"亮 + 不是绿垫"，不看色相上限）后：
+        #     brass 在 28mm 处 8 峰但角度抖 33°（凑的）
+        #     metal 在 30~35mm 带 8 峰、角度抖 **5.9°**（真的）—— 见 AGENTS.md 2.13
+        spoke_mask = seg.metal_mask if seg.metal_mask is not None else m
+        spk = count_spokes(spoke_mask, (cx, cy),
                            self.r_spoke_out[0] / mmpp, self.r_spoke_out[1] / mmpp,
                            required=int(self.spk.get("required", 8)),
                            n_radii_bands=int(self.spk.get("n_radii", 3)),

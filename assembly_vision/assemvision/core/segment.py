@@ -27,6 +27,8 @@ class Segmenter:
         seg = wp_cfg.get("segment", {}) or {}
         self.brass = dict(seg.get("brass", {}) or {})
         self.glove = dict(seg.get("glove", {}) or {})
+        # ★ 金属掩膜（不靠色相）：见 `_metal_mask()` 的说明与 AGENTS.md 2.13
+        self.metal = dict(seg.get("metal", {}) or {})
         self.background = str(seg.get("background", "black"))
 
     # ── 对外主入口 ────────────────────────────────────────────
@@ -60,6 +62,21 @@ class Segmenter:
             brass_mask = cv2.bitwise_and(brass_mask, work_roi)
 
         res = SegResult(ts=ts, scale=scale, brass_mask=brass_mask, glove_mask=glove_mask)
+
+        # ── 金属掩膜：不靠色相，只判"亮 + 不是绿垫" ──────────────
+        # ★ 为什么单独做一条通路（c5 实测踩过，见 AGENTS.md 2.13）：
+        #   装配体上的球头只有 Ø5mm，在 0.86mm/px 下只有 6 像素宽。
+        #   边缘与绿垫抗锯齿混色后色相从黄铜的 H=30 跳到 **H=59**
+        #   （被绿垫染成淡绿），于是被 brass 的 `h_max=45` 整条挡掉。
+        #   结果：装配位上数辐条一个峰都数不出来（实测评分数 0/8）。
+        #
+        #   而"不是绿垫"这个判据**不含色相上限**，所以能救回这些像素：
+        #     实测同一帧 brass 掩膜在 28mm 处 8 峰但角度抖 33°（凑的），
+        #     metal 掩膜在 30~35mm 带 8 峰、角度抖仅 **5.9°**（真的）。
+        #
+        #   ★ 判据必须同时有 V 下限：木桌也是"非绿"，光看非绿会把桌子算进来。
+        #     `v_min` 挡住暗部；同时外层还有 work_roi 兜着（位置即身份）。
+        res.metal_mask = self._metal_mask(hsv, work_roi)
 
         # 手套：取最大连通域，套面积与长宽比闸门（滤掉蓝色噪声与屏幕反光）
         blobs_g = self._blobs(glove_mask, min_area_px=float(self.glove.get("min_area_px", 3000)))
@@ -117,6 +134,45 @@ class Segmenter:
             # 闭运算专门用来补金属镜面高光造成的空洞
             m = cv2.morphologyEx(m, cv2.MORPH_CLOSE,
                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kc, kc)))
+        return m
+
+    def _metal_mask(self, hsv: np.ndarray,
+                    work_roi: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        """金属掩膜：**不靠色相**，判据 = 亮 + 不是绿垫。
+
+        配置（`segment.metal`，全部有默认值，老配置行为不变）：
+            enabled     是否启用（默认 True）
+            v_min       亮度下限，挡暗部（默认 150）
+            green_h_min / green_h_max / green_s_min
+                        "绿垫"的 HSV 区间（默认 60 / 100 / 120，与实测吻合）
+
+        ★ 为什么不复用 brass 掩膜：brass 的被测对象是**黄铜的色相**，
+          而装配体上球头（Ø5mm = 6px）的边缘被绿垫混色后色相跳到 H=59，
+          整颗球都被 h_max=45 挡掉。金属掩膜不看色相上限，所以能救回来。
+
+        ★ 为什么不能用"非绿"直接当金属：木桌/皮肤也是非绿。
+          所以必须配 V 下限，并且调用方应传 work_roi（位置即身份）。
+        """
+        m_cfg = dict(self.metal)
+        if not bool(m_cfg.get("enabled", True)):
+            return None
+        g_lo, g_hi = int(m_cfg.get("green_h_min", 60)), int(m_cfg.get("green_h_max", 100))
+        g_smin = int(m_cfg.get("green_s_min", 120))
+        v_min = int(m_cfg.get("v_min", 150))
+
+        h = hsv[..., 0]
+        s = hsv[..., 1]
+        v = hsv[..., 2]
+        # 绿垫：色相在 [g_lo, g_hi] 且饱和度够高（低饱和的灰绿不算垫子）
+        green = ((h >= g_lo) & (h <= g_hi) & (s > g_smin))
+        metal = (~green) & (v >= v_min)
+
+        m = (metal.astype(np.uint8)) * 255
+        if work_roi is not None:
+            if work_roi.shape[:2] != m.shape[:2]:
+                work_roi = cv2.resize(work_roi, (m.shape[1], m.shape[0]),
+                                      interpolation=cv2.INTER_NEAREST)
+            m = cv2.bitwise_and(m, work_roi)
         return m
 
     @staticmethod

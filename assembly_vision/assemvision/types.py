@@ -62,6 +62,15 @@ class SegResult:
     ts: float = 0.0
     scale: float = 1.0                                  # 相对全分辨率的缩放
     brass_mask: Optional[np.ndarray] = None
+    # ★ "金属"掩膜：**不靠色相**，判据是"亮 + 不是绿垫"。
+    #   为什么需要它（c5 实测踩过）：装配体上的**球头只有 Ø5mm**，
+    #   在 0.86mm/px 下只有 6 像素宽，边缘与绿垫抗锯齿混色后
+    #   色相从黄铜的 H=30 跳到 **H=59**（被绿垫染成淡绿），
+    #   于是被 brass 的 `h_max=45` 整条挡掉 —— 辐条一个都数不出来。
+    #   实测同一帧：brass 掩膜在 28mm 处只有 8 峰但角度抖 33°（凑出来的），
+    #   而 metal 掩膜在 30~35mm 带 **8 峰、角度抖仅 5.9°**（真的）。
+    #   见 AGENTS.md 2.13。
+    metal_mask: Optional[np.ndarray] = None
     glove_mask: Optional[np.ndarray] = None
     brass_blobs: List[Blob] = field(default_factory=list)
     glove_bbox: Optional[Tuple[int, int, int, int]] = None
