@@ -364,7 +364,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 
 | # | 事项 |
 |---|---|
-| P2-1 | 真实画面上四类零件的**色域特征**是否真的参与识别，未验证 |
+| P2-1 | ~~色域特征是否参与识别~~ ✅ **已量化：不参与「零件间识别」**<br>消融实验：`full` 与 `no_color` **结果完全一样**（13/13 认对），`only_color` **一个都认不出**。<br>★ 色域的用途是**零件 vs 背景**与**零件 vs 手套**，不是区分零件与零件（四个零件同为黄铜，色相区间只差 1~2°）。<br>工具：`tools/measure_color_ablation.py`、`tools/measure_color_roles.py` |
 | P2-2 | 重跑 `c6` 让模板与当前光照对齐（需先解决 c6「零件放错也照写」） |
 | P2-3 | `assembly_flags` 用 `spoke_band`(12~24mm)、`check_assembly` 用 `spoke_band_outer`(30~35mm) —— 两个半径带、两个用途，别混 |
 | P2-4 | 齐套性不查外圈/轮毂（见 2.17 表） |
