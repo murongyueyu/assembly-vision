@@ -104,13 +104,62 @@ def count_peaks(curve: np.ndarray, k_mad: float = 3.0,
     return out
 
 
+def spoke_jitter_deg(peaks, expected: int) -> float:
+    """峰角度的**角度均匀度**：间隔相对 360/expected 的抖动（度）。
+
+    越小越像"真的均布辐条"。返回 `inf` 表示峰数不对或不足 2 个峰。
+    ★ 与 `c5_assembly_baseline.sweep_band` 用的是同一个判据
+      （那边实测：真辐条抖动 5.9°，凑出来的 8 峰抖动 33°）。
+    """
+    if expected <= 0 or peaks is None or len(peaks) != int(expected):
+        return float("inf")
+    angs = sorted(float(p[0] if isinstance(p, (tuple, list)) else p) for p in peaks)
+    n = len(angs)
+    ideal = 360.0 / n
+    gaps = [((angs[(i + 1) % n] - angs[i]) % 360.0) for i in range(n)]
+    return float(np.sqrt(np.mean([(g - ideal) ** 2 for g in gaps])))
+
+
 def count_spokes(mask: np.ndarray, center_px: Sequence[float],
                  r_min_px: float, r_max_px: float,
                  required: int = 8, n_radii_bands: int = 3,
                  k_mad: float = 3.0, min_width_deg: float = 6.0,
                  n_angles: int = 720,
-                 baseline_angles_deg: Optional[Sequence[float]] = None) -> SpokeResult:
-    """多半径投票数辐条，并指出缺失角度。"""
+                 baseline_angles_deg: Optional[Sequence[float]] = None,
+                 select: str = "uniform", max_jitter_deg: float = 15.0) -> SpokeResult:
+    """多半径投票数辐条，并指出缺失角度。
+
+    ★★ `select` 为什么必须有（真机实测踩到的**假 NG**，务必看清）：
+
+    原来是「`n_radii_bands` 个子带各自数峰 -> 取众数 -> **并列时取较小值**」
+    （注释写的是"宁少不多，避免漏报"）。这个偏置在**没有真值可依**时是对的，
+    但在这里会**稳定地少数**：
+
+    ```
+    真机装配体实测（30~35mm 切成 3 个带，每带仅 1.67mm ≈ 1.9px）：
+      带(mm)        med    p95-med  阈值    峰数
+      30.0~31.7    0.000   1.000   0.600    8   <- ★ 球头只落在最内侧这个带
+      31.7~33.3    0.000   1.000   0.600    6
+      33.3~35.0    0.000   1.000   0.600    5
+    -> 计数 [8,6,5] 三个全不同、**没有众数** -> 并列取较小值 -> **5**
+    -> `5 < required(8)` -> **明明装好的轮盘被判"缺辐条"**
+    ```
+
+    而同一帧**整条 30~35mm 一次数**（c5 的做法）是 **8 峰、抖动 5.9°**。
+    **两边做法不一致，所以一个数出 8、一个数出 5。**
+
+    ★ 怎么改才对：**按"角度均匀度"挑最好的带**，而不是让 3 个带投票取最小值。
+      球头只有 Ø5mm，在 0.86mm/px 下**只占约 6px**，落进哪个子带是碰运气；
+      但**真辐条的角度是均布的**，所以"抖动最小"是比"票数最多"可靠得多的判据。
+      这也让 `check_assembly` 与 c5 的 `sweep_band` **用上同一个判据**。
+
+    select:
+      "uniform"（默认）—— 在「各子带」与「整条带」里挑抖动最小的；抖动相同再要峰多的
+      "vote"          —— 老行为（众数 + 并列取小），保留以便对比与回退
+    max_jitter_deg:
+      抖动超过它就认为这条带**根本没数出规整辐条**，宁可退回"峰最多但抖动大"的结果
+      （这样"真的缺辐条"仍会被如实报出来，不会因为我们挑剔而变成 0）。
+    """
     res = SpokeResult(count=0, required=int(required))
     r0, r1 = float(r_min_px), float(r_max_px)
     if r1 <= r0 or mask is None or mask.size == 0:
@@ -129,24 +178,49 @@ def count_spokes(mask: np.ndarray, center_px: Sequence[float],
         if k == bands // 2:
             res.curve = prof
 
-    # 投票：取出现次数最多的计数。
-    # ★ 先剔除"一个峰都没数到"的环带 —— 那说明这个半径上根本没有对比度
-    #   （例如环带选到了整圈都是金属的位置），不能让它投票说"有 0 根辐条"。
-    valid = [c for c in counts if c > 0]
-    pool = valid if valid else counts
-    vals, freq = np.unique(np.array(pool), return_counts=True)
-    # 并列时取较小值（宁少不多，避免漏报）
-    best = int(vals[int(np.argmax(freq))])
-    if freq.max() > 1:
-        best = int(min(vals[freq == freq.max()]))
-    res.count = best
+    if str(select).lower() == "vote":
+        # ── 老行为（众数 + 并列取小）—— 保留以便对比与回退 ──────────
+        # ★ 先剔除"一个峰都没数到"的环带 —— 那说明这个半径上根本没有对比度
+        #   （例如环带选到了整圈都是金属的位置），不能让它投票说"有 0 根辐条"。
+        valid = [c for c in counts if c > 0]
+        pool = valid if valid else counts
+        vals, freq = np.unique(np.array(pool), return_counts=True)
+        # 并列时取较小值（宁少不多，避免漏报）
+        best = int(vals[int(np.argmax(freq))])
+        if freq.max() > 1:
+            best = int(min(vals[freq == freq.max()]))
+        cand = [pb for c, pb in zip(counts, peaks_per_band) if len(pb) == best]
+        pk = max(cand, key=len) if cand else peaks_per_band[bands // 2]
+        res.count = int(best)
+        res.peaks_deg = [round(float(p[0]), 1) for p in pk]
+    else:
+        # ── 默认：按角度均匀度挑最好的带（见 docstring 里的实测依据）──
+        # 候选 = 各子带 + 整条带（整条带正是 c5 扫出来的那个用法）
+        full_prof = polar_profile(mask, center_px, r0, r1,
+                                  n_angles=n_angles, n_radii=25)
+        full_pk = count_peaks(full_prof, k_mad=k_mad, min_width_deg=min_width_deg)
+        cands: List[Tuple[np.ndarray, List[Tuple[float, float, float]]]] = \
+            [(polar_profile(mask, center_px, edges[k], edges[k + 1],
+                            n_angles=n_angles, n_radii=9), peaks_per_band[k])
+             for k in range(bands)]
+        cands.append((full_prof, full_pk))
 
-    # 报告用的峰角度：选与多数一致的、峰最多的那个半径带
-    cand = [pb for c, pb in zip(counts, peaks_per_band) if len(pb) == best]
-    pk = max(cand, key=len) if cand else peaks_per_band[bands // 2]
-    res.peaks_deg = [round(p[0], 1) for p in pk]
+        # 排序键：抖动小优先 -> 峰多优先（抖动同为 inf 时才轮到峰数）
+        pick = min(cands, key=lambda cp: (spoke_jitter_deg(cp[1], required),
+                                          -len(cp[1])))
+        # ★ 即使最好的候选抖动也超阈值 = 这一圈本来就不规整（真缺辐条/被遮挡）。
+        #   此时**退回"峰最多"**那个，让缺陷被如实报出来，
+        #   而不是因为我们挑剔就报成 0（那会变成另一种假 NG）。
+        if spoke_jitter_deg(pick[1], required) > float(max_jitter_deg):
+            pick = max(cands, key=lambda cp: len(cp[1]))
+
+        res.curve = pick[0]
+        res.count = len(pick[1])
+        res.peaks_deg = [round(float(p[0]), 1) for p in pick[1]]
+        res.jitter_deg = spoke_jitter_deg(pick[1], int(required))
 
     # 指出缺失角度：用第一个峰做相位参考，生成理想均布位置，找没有峰靠近的
+    best = int(res.count)
     if best > 0 and best < required:
         if baseline_angles_deg:
             ideal = list(baseline_angles_deg)

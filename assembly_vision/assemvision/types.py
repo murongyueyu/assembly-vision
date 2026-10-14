@@ -104,6 +104,11 @@ class SpokeResult:
     peaks_deg: List[float] = field(default_factory=list)
     missing_deg: List[float] = field(default_factory=list)
     ok: bool = False
+    # ★ 峰角度的均布抖动（度）。`inf` = 峰数不等于 required，算不出抖动。
+    #   实测判据：真辐条抖动 **5.9°**，凑出来的 8 峰抖动 **33°**。
+    #   `count_spokes` 用它来**挑最好的半径带**（见 polar.py 的 docstring）——
+    #   因为球头只有 Ø5mm，落进哪个子带是碰运气，但真辐条的角度是均布的。
+    jitter_deg: float = float("inf")
 
 
 @dataclass

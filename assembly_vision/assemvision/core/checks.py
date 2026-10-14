@@ -611,7 +611,12 @@ class Qualifier:
                            required=int(self.spk.get("required", 8)),
                            n_radii_bands=int(self.spk.get("n_radii", 3)),
                            k_mad=float(self.spk.get("peak_k_mad", 3.0)),
-                           min_width_deg=float(self.spk.get("min_peak_width_deg", 6.0)))
+                           min_width_deg=float(self.spk.get("min_peak_width_deg", 6.0)),
+                           # ★ 必须走配置：默认的 "uniform" 是按角度均匀度挑半径带，
+                           #   修的是"装好的轮盘被判缺辐条"的真机假 NG
+                           #   （见 polar.count_spokes 的 docstring 与 workpiece.yaml）
+                           select=str(self.spk.get("select", "uniform")),
+                           max_jitter_deg=float(self.spk.get("max_jitter_deg", 15.0)))
         res.spoke = spk
         if spk.count < spk.required:
             res.missing.append("辐条 %d/%d" % (spk.count, spk.required))
