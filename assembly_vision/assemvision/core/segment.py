@@ -107,6 +107,20 @@ class Segmenter:
         res.brass_blobs = blobs_b
 
         res.detail = {"seg_ms": (time.time() - t0) * 1000.0}
+
+        # ── 过曝自检 ──────────────────────────────────────────────
+        # ★★ 为什么必须查这个（c5 实测踩过）：过曝的后果**不是"少切一点"，
+        #   而是整条判据链静默失效** ——
+        #     过曝 -> 黄铜的色相被推向绿/青 -> 被判成"绿垫" -> 从 metal 掩膜剔除
+        #          -> 装配体上数辐条恒为 0 峰
+        #   实测某次光照下：整幅均值 BGR 217/244/97、近全白像素 **8.0%**、
+        #   装配位 V 中值 **255**（完全饱和），而界面上只是"看着亮一点"，
+        #   完全看不出判据已经废了。
+        #   所以这里把过曝量记进 detail，让上层能报警而不是默默出错。
+        #   依据：曝光 -6.0 时近全白像素 0.00%，-5.0 时 7.96%。
+        blown = float((bgr.min(axis=2) >= 250).mean())
+        res.detail["blown_ratio"] = blown
+        res.detail["v_mean"] = float(hsv[..., 2].mean())
         return res
 
     # ── 内部工具 ──────────────────────────────────────────────
@@ -159,13 +173,26 @@ class Segmenter:
         g_lo, g_hi = int(m_cfg.get("green_h_min", 60)), int(m_cfg.get("green_h_max", 100))
         g_smin = int(m_cfg.get("green_s_min", 120))
         v_min = int(m_cfg.get("v_min", 150))
+        s_max = int(m_cfg.get("s_max", 100))
 
         h = hsv[..., 0]
         s = hsv[..., 1]
         v = hsv[..., 2]
-        # 绿垫：色相在 [g_lo, g_hi] 且饱和度够高（低饱和的灰绿不算垫子）
+        # ★★ 判据的准确形式："**既不像黑底、也不像绿垫**"（实测踩过两次）
+        #   ① 只写 `~green` —— green 用的是「H 在绿区间**且** S>120」，
+        #      于是**木桌**（H=19, S=122, V=210）因为色相不在绿区间而成了"非绿"
+        #      -> 被判成金属，顶部木桌区 metal 占比 **99.9%**，辐条扫优全废。
+        #   ② 改成 `~green & V>=v_min` 后又踩一次：**黑底**（H≈0, S≈0, V≈0）
+        #      也是"非绿"，且合成图的深色底 V 可能 >=150，
+        #      于是合成圈整幅变金属 -> 端到端离线从 OK 掉成「辐条 0/8」。
+        #   现在的形式对两种背景都安全：
+        #      黑底：S 低 -> `s > g_smin` 不成立 -> green=False -> metal=False ✓
+        #      绿垫：H 在绿区间且 S≈255 -> green=True  -> metal=False ✓
+        #      木桌/皮肤：S≈122 但 H 不在绿区间 -> green=False，
+        #                 但 S 超出 s_max=130 -> metal=False ✓
+        #      黄铜/球头：V 高、S ≤109 -> metal=True ✓
         green = ((h >= g_lo) & (h <= g_hi) & (s > g_smin))
-        metal = (~green) & (v >= v_min)
+        metal = (v >= v_min) & (s <= s_max) & (~green)
 
         m = (metal.astype(np.uint8)) * 255
         if work_roi is not None:

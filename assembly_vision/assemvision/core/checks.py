@@ -571,7 +571,16 @@ class Qualifier:
         #   换 metal 掩膜（"亮 + 不是绿垫"，不看色相上限）后：
         #     brass 在 28mm 处 8 峰但角度抖 33°（凑的）
         #     metal 在 30~35mm 带 8 峰、角度抖 **5.9°**（真的）—— 见 AGENTS.md 2.13
-        spoke_mask = seg.metal_mask if seg.metal_mask is not None else m
+        #
+        # ★★ 回落条件是"有没有内容"，**不是"是不是 None"**（实测踩过）：
+        #   metal 判据要求"不是绿垫"，所以在**深色底**（合成图、黑垫）上
+        #   正确地什么都匹配不到 -> mask 是**全 0 的数组而不是 None**。
+        #   写成 `is not None` 就会拿这个空掩膜去数辐条 -> 恒为 0，
+        #   端到端离线测试因此从 OK 掉成「辐条 0/8」。
+        spoke_mask = m
+        mm_ = seg.metal_mask
+        if mm_ is not None and int(np.count_nonzero(mm_)) > 200:
+            spoke_mask = mm_
         spk = count_spokes(spoke_mask, (cx, cy),
                            self.r_spoke_out[0] / mmpp, self.r_spoke_out[1] / mmpp,
                            required=int(self.spk.get("required", 8)),
