@@ -63,6 +63,7 @@
 | **零件实时检测+追踪+遮挡** | 检测+追踪（分割 9.9ms 摊薄到 1/N）；**只描可见部分轮廓**；遮挡 3 档冻结身份；卡尔曼扫参定；后端只有 `kcf` 可靠 | 实录 2.20 |
 | **追踪后端只有 KCF 可靠** | mosse 的 `update` 恒返回 False、medianflow 会崩、csrt 太慢；`segment` 耗时与 ROI 大小无关；裁剪加速试过已放弃（快 14% 但漂移 2.76->131px）；真机中位 **28.9fps**（相机 31） | 实录 2.21 |
 | **手（蓝手套）画方框** | **零件画轮廓、手画方框**（刻意的）；`hand_on` **不是 `segment()` 填的**，要自己调 `glove_hits`；`max_aspect=6.0` 挡不住 260x60（比值 4.28） | 实录 2.22 |
+| **手在画面里却显示「手: 无」** | 手指**碎成 4~5 块**、每块 < `min_area_px` -> 整只被滤掉；`glove_mask`（判定用）没被清空，所以**遮挡判定一直对、只有显示错**；修法=先闭运算连块(5->21)再定闸门(3000->2000) | 实录 2.23 |
 
 ---
 
@@ -182,6 +183,9 @@ python tools/part_track_demo.py --bench                  # 只测帧率
 python tools/part_track_demo.py --source images --path data/synthetic_seq --bench
 python tools/part_track_occlusion_test.py        # 遮挡对照图（只描可见部分）
 python tools/check_hand_box.py                   # 手（蓝手套）方框渲染验证
+python tools/verify_glove_fix.py                 # 手套检出对账（有手要检出/无手要 0）
+python tools/measure_glove_area.py               # 量手套面积分布（定 min_area_px 用）
+python tools/fix_glove_fragments.py              # 扫闭运算核 x 面积闸门
 python app.py --windowed                      # 正式跑（窗口模式方便调试）
 ```
 
@@ -264,6 +268,8 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
   · 手只在**检测帧**算一次（`_mask` 要几 ms），非检测帧沿用上一帧
   · 面板另有「缺: 槽名」提示 —— 让「少了一个零件」与「槽本来就空」能区分开
   · `--no-hand` 可关闭
+  · ★★ **`morph_close` 必须够大**（21）：手指会**碎成 4~5 块**，`morph_close=5` 时每块最大只有 638px，被 `min_area_px` **整只滤掉**
+  · ★ `glove_mask`（判定用）与 `glove_bbox`（显示用）**生命周期不同** ——会出现「遮挡判定对、但显示手: 无」这种看着矛盾的现象（见实录 2.23）
 - ✅ **色域特征在「零件间识别」里零贡献（消融实验证实）**：
   `full` 与 `no_color` 结果**完全一样**（13/13 认对），`only_color` **一个都认不出**。
   ★ 但这**不否定色域** —— 它的用途是**零件 vs 背景**与**零件 vs 手套**，
