@@ -16,7 +16,8 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 
 MODULES = ["test_features", "test_segment", "test_polar", "test_fsm",
-           "test_part_id", "test_tray_pose", "test_work_roi", "test_assembly"]
+           "test_part_id", "test_tray_pose", "test_work_roi", "test_assembly",
+           "test_ui_renderer"]
 
 
 def main() -> int:

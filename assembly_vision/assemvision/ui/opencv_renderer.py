@@ -17,7 +17,7 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -77,7 +77,27 @@ class OpenCVRenderer(Renderer):
     def __init__(self, window: str = "装配流程检查", fullscreen: bool = True,
                  display: Tuple[int, int] = (1920, 1080), panel_ratio: float = 0.20,
                  font_path: str = "", colors: Optional[Dict[str, Sequence[int]]] = None,
-                 video_fps: int = 30) -> None:
+                 video_fps: int = 30,
+                 actions: Optional[Dict[str, Callable]] = None) -> None:
+        """★ `actions` 必须与 `QtRenderer` **同名同义**（实测踩过）：
+
+        `app.py` 是无条件把 `actions={...}` 传给 `make_renderer()` 的，
+        而 OpenCV 渲染器原本没有这个参数 -> `app.py --windowed` **一启动就崩**：
+            TypeError: OpenCVRenderer.__init__() got an unexpected keyword argument 'actions'
+        因为 `--windowed` 的默认渲染器就是 opencv，所以这条路径当时**根本跑不通**。
+
+        现在两个渲染器接口一致，并且这里**真的把动作接到按键上**：
+            i  手动抽检一次（Qt 版也有这个按钮）
+            r  复位流程
+            q / ESC  退出
+        """
+        # ★ 必须调基类 __init__：`Renderer.__init__` 设了 `self.frames_drawn = 0`，
+        #   而 `Renderer.run()` 靠它做 `--max-frames` 计数。
+        #   漏掉的症状（实测踩过，是 app.py --windowed 的**第二个**崩）：
+        #     AttributeError: 'OpenCVRenderer' object has no attribute 'frames_drawn'
+        #   QtRenderer 是 QMainWindow 子类、链路里自然调到了基类，
+        #   所以只有 OpenCV 渲染器有这个坑 —— 即 --windowed 的默认路径。
+        super().__init__()
         self.window = window
         self.fullscreen = bool(fullscreen)
         self.W, self.H = int(display[0]), int(display[1])
@@ -85,6 +105,7 @@ class OpenCVRenderer(Renderer):
         self.fps = int(video_fps)
         self.font_path = find_cjk_font(font_path)
         self.text = _Text(self.font_path, scale=self.H / 1080.0)
+        self.actions: Dict[str, Callable] = dict(actions or {})
         self._inited = False
         if colors:
             self.set_colors(colors)
@@ -221,6 +242,20 @@ class OpenCVRenderer(Renderer):
         key = cv2.waitKey(max(1, int(1000 / max(1, self.fps)))) & 0xFF
         if key in (27, ord("q")):            # ESC / q 退出
             return False
+        # ★ 动作键（与 QtRenderer 的按钮同义）—— 接口必须一致，
+        #   否则 app.py 传 actions 时两个渲染器行为不一样，很难排查。
+        if key == ord("i") and "inspect" in self.actions:
+            try:
+                self.actions["inspect"]()
+                print("[ui] 已请求手动抽检（i）")
+            except Exception as e:                        # noqa: BLE001
+                print("[ui] 抽检失败: %s" % e)
+        elif key == ord("r") and "reset" in self.actions:
+            try:
+                self.actions["reset"]()
+                print("[ui] 已复位流程（r）")
+            except Exception as e:                        # noqa: BLE001
+                print("[ui] 复位失败: %s" % e)
         return True
 
     def close(self) -> None:

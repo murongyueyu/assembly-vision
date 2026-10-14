@@ -718,7 +718,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 
 见 `VERSION.md` 的「待办」一节。要点：
 
-- ✅ 代码离线全绿（**8 个测试模块**）；4 类零件/4 工序口径已对齐
+- ✅ 代码离线全绿（**9 个测试模块**）；4 类零件/4 工序口径已对齐
 - ✅ **相机参数已定**：`1280×480`（单眼 640×480）、后端 dshow、31 fps；
   **曝光 `-6.0`**（原 -5.0，因过曝会让判据链静默失效而改，见 2.14）
 - ✅ **c1 完成**：GSD **0.8680 mm/px**，全画幅覆盖 **555×417 mm**
@@ -770,19 +770,47 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 
 | # | 事项 | 状态 |
 |---|---|---|
-| P0-1 | **c5 结果接线** | ✅ **已完成**（只接了有区分度的那一条）<br>新增 `checks.spoke_vs_baseline(count, baseline, slack)` 纯函数 + 真机基线比较。<br>容差 `check.spokes.baseline_slack: 2`，依据 c5 实测 `[8,8,8,8,6,6,7,8,8,6,8,8]`（完整在位就是 6~8）。<br>★ **刻意没接 ring/hub/cap 覆盖率**：实测（合成图各种缺件组合）ring 0.994、hub 0.880~0.998、cap 0.874~1.000 —— **连缺顶盖都还有 0.874，几乎没有区分度**；真机上 c5 三个数全是 ~1.0。拿它们当阈值等于没判。<br>★ 代价（已写进配置注释）：真少 2 根（数出 6）**不会**被发现 —— 不误报优先。<br>新增 `tests/test_assembly.py`（回归 **8 个模块**）。 |
+| P0-1 | **c5 结果接线** | ✅ **已完成**（只接了有区分度的那一条）<br>新增 `checks.spoke_vs_baseline(count, baseline, slack)` 纯函数 + 真机基线比较。<br>容差 `check.spokes.baseline_slack: 2`，依据 c5 实测 `[8,8,8,8,6,6,7,8,8,6,8,8]`（完整在位就是 6~8）。<br>★ **刻意没接 ring/hub/cap 覆盖率**：实测（合成图各种缺件组合）ring 0.994、hub 0.880~0.998、cap 0.874~1.000 —— **连缺顶盖都还有 0.874，几乎没有区分度**；真机上 c5 三个数全是 ~1.0。拿它们当阈值等于没判。<br>★ 代价（已写进配置注释）：真少 2 根（数出 6）**不会**被发现 —— 不误报优先。<br>新增 `tests/test_assembly.py`（回归 **9 个模块**）。 |
 | P0-2 | **`wheel_height_mm` 存疑** | ⬜ c5 报 **0.92mm**，而轮盘顶面物理上应在台面上方 30~40mm。单位没错（`compute` 返回 mm），所以是**拟合平面贴住了被测面** → `\|实测−基线\| > 15mm` 这条立柱判据**永远不触发**（静默失效）。<br>c5 已加**平面自检**（打 a/b/c、斜度、平面Z范围 vs 实测范围、高度/视差跨度占比），**低于 5mm 会明确报警**。待定：改 `fit_plane` 的拟合范围（排除料盘/台面），或明确写清深度判据不可用。 |
 | P0-3 | ~~`hub_coverage` 为 nan~~ | ✅ **已修（根因是复制粘贴漏改，与算法无关）**<br>`c5` 里写成 `rings.append(a.hub_coverage)` → rings 收的是 hub 的值、hubs 永远空 → 打印的 `1.000` 其实是**轮毂**的值、`nan` 是空列表均值，**三个数全错位**。<br>★ 教训：`_disc_coverage` 构造 8 种异常输入都**不返回 nan**（最差 0.0）—— 看到 nan 先数"列表里到底有几个元素"，别先怀疑算法。 |
-| P0-4 | 真机全流程联调 | ⬜ `app.py --windowed` 走一遍 4 工序。**需要你在真机上跑**。 |
+| P0-4 | 真机全流程联调 | 🔶 **部分完成** —— `app.py --windowed` 原来**一启动就连崩两次**，已修（见下「另修 2」），现在实跑 90 帧**退出码 0、无任何错误**。<br>⬜ 剩下要**你在真机上摆件走一遍 4 工序**，看判据有没有误报。 |
 | P0-5 | 树莓派首次部署 | ⬜ **SGBM 耗时必须实测**（PC 15ms，按 6 倍估 Pi 上 ~90ms）。**需要你在 Pi 上跑**。 |
 
-**另修（原属 P1-1 第 4 条，但它是真 bug，不修会一直错）**：
+**另修 1（原属 P1-1 第 4 条，但它是真 bug，不修会一直错）**：
 
 **装配位 pose 对齐** —— `work_roi_mask()` 里装配位**跟着位姿修正**，
 而 `check_assembly()` / `assembly_flags()` 用**标称坐标** → 同一装配位两处算出不同的圈。
 实测：料盘挪 `tx=8.8mm` 时两处差 **10.0px（8.7mm）**。
 已新增 `Qualifier.assembly_polygon_px(scale, pose=None)` 统一入口，两个函数都加 `pose` 参数，
 `pipeline.py` 两处调用都传 `self._last_pose`。
+
+**另修 2（★ 教训：`app.py --windowed` 长期没被任何测试覆盖）**：
+
+一跑就连崩**两次**，两次都是「跨模块接口不一致」：
+
+```
+(1) TypeError: OpenCVRenderer.__init__() got an unexpected keyword argument 'actions'
+    app.py 是**无条件**把 actions={...} 传给 make_renderer() 的，
+    而 OpenCVRenderer 没有这个参数。--windowed 的默认渲染器就是 opencv
+    -> **这条路径根本跑不通**。QtRenderer 有 actions，所以只有 opencv 版是坏的。
+
+(2) AttributeError: 'OpenCVRenderer' object has no attribute 'frames_drawn'
+    OpenCVRenderer 没调 super().__init__()，而 Renderer.__init__ 里设了 frames_drawn，
+    Renderer.run() 靠它做 --max-frames 计数。
+    QtRenderer 是 QMainWindow 子类、链路里自然调到了基类 -> 又只有 opencv 版是坏的。
+```
+
+**修法**：给 `OpenCVRenderer` 加 `actions` 参数并**真的接到按键上**
+（`i` 手动抽检 / `r` 复位 / `q`·ESC 退出，与 QtRenderer 的按钮同义），并补 `super().__init__()`。
+
+**★ 新增 `tests/test_ui_renderer.py`**：**逐字按 `app.py` 的真实参数**构造渲染器
+（只构造、不显示，不需要相机/显示器），断言 `actions` 键名、`frames_drawn`、抽象方法都齐。
+这样接口一改就在离线回归里挂，而不是等真机运行时才发现。
+
+> ★ 一般教训：**「只能手工跑」的那条路径最容易烂**。
+> `--no-ui` 一直有测试覆盖（端到端），`--windowed` 一次都没跑过，
+> 所以坏了多久都没人知道。凡是只能手工跑的路径，
+> 至少要有一个**构造级**的离线测试把它钉住。
 
 ### P1 —— 架构性需求（用户已明确要求，但暂不实现）
 
@@ -844,9 +872,10 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 - **中文注释**，风格与现有代码一致；关键处用 `★` 标出"必须实测确认"的项。
 - 改 `config/*.yaml` 时**保留 `★` 注释并更新依据**，不要让注释与值脱节。
 - 阈值/尺寸**不要硬编码在算法里**，一律走配置。
-- 加新功能后**必须跑 `python tests/run_all.py`** 确认 **8 个测试模块**仍全绿
+- 加新功能后**必须跑 `python tests/run_all.py`** 确认 **9 个测试模块**仍全绿
   （`test_features` / `test_segment` / `test_polar` / `test_fsm` /
-  `test_part_id` / `test_tray_pose` / `test_work_roi` / `test_assembly`）。
+  `test_part_id` / `test_tray_pose` / `test_work_roi` / `test_assembly` /
+  `test_ui_renderer`）。
   新功能要**配套加测试**并登记到 `tests/run_all.py` 的 `MODULES`。
 - **判据逻辑尽量抽成纯函数再测**（例：`checks.spoke_vs_baseline()`）。
   直接测 `check_assembly()` 要造像素分割结果，阈值一动就假失败；
