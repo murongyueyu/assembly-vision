@@ -18,11 +18,12 @@ import os
 import sys
 from typing import Dict
 
+import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _util import (ask, grab_small, load_all, open_source, paths,   # noqa: E402
-                   save_calib)
+from _util import (PREVIEW_WIN_NAME, ask, ask_or_preview, grab_small,   # noqa: E402
+                   load_all, open_source, paths, save_calib)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from assemvision.core.checks import Qualifier                       # noqa: E402
@@ -53,7 +54,12 @@ def main() -> int:
     #   静态推理到不了底。一帧诊断直接把答案摆出来，不用反复猜。
     ap.add_argument("--diag", action="store_true",
                     help="单帧诊断：打印各槽中间量后退出（不采集、不写文件）")
+    # ★ 预览开关：默认开。之前是盲跑 —— 一次严重过曝把判据链弄废，
+    #   而终端只报"样本太少"，看不到画面就无从下手。见 _util.preview_until_key。
+    ap.add_argument("--no-preview", action="store_true",
+                    help="关掉实时预览窗口（无显示器/远程时用）")
     args = ap.parse_args()
+    preview = not args.no_preview
 
     cam, wp, calib = load_all(args.camera, args.workpiece)
     if "tray_map" not in calib.data:
@@ -125,8 +131,15 @@ def main() -> int:
         src.close()
         return 0
 
-    print("请把【一整套已知合格的标准件】按料位放好，保持不动。")
-    ask("准备好了按回车开始采集…")
+    if not ask_or_preview(src, "请把【一整套已知合格的标准件】按料位放好，保持不动。",
+                          q=q, seg=seg, title_extra="四类零件放在各自槽位",
+                          guide="", preview=preview):
+        print("已中止"); src.close(); return 1
+    try:
+        cv2.destroyWindow(PREVIEW_WIN_NAME)
+        cv2.waitKey(1)
+    except Exception:                                            # noqa: BLE001
+        pass
     n = 0
     reject = {s["id"]: 0 for s in tray.slots}
     # ★★ 记录"为什么被拒"。

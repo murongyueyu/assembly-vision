@@ -42,6 +42,181 @@ def save_calib(calib: Config, out: str = "") -> str:
     return calib.save(out or p["calib"])
 
 
+# ── 分段预览：让标定脚本"看得见" ─────────────────────────────
+# ★★ 为什么必须有（实测踩过，代价很大）：
+#   c5 之前是"盲跑"—— 用户在终端按回车，脚本自己去抓帧判断，
+#   中途**完全看不到画面**。结果一次严重过曝（曝光 -5.0 在当前光照下
+#   近全白像素 8%、轮盘的黄铜面积从 3200px 塌到 626px）把整条判据链弄废，
+#   而界面上只是"看着亮一点"，终端只报一句"扫优失败"，无从下手。
+#   所以标定的每一步都必须能**看到画面 + 看到过曝量 + 看到分割结果**。
+_PREVIEW_WIN = "标定预览  [空格/回车=继续  q/ESC=中止]"
+# 供标定脚本在预览结束后关掉窗口用
+PREVIEW_WIN_NAME = _PREVIEW_WIN
+
+
+def preview_until_key(src, q=None, seg=None, scale: float = 1.0,
+                      title_extra: str = "", fps_cap: float = 20.0,
+                      guide: str = "") -> str:
+    """实时预览窗口，直到用户按键。返回 "ok" | "quit"。
+
+    画面上会叠加：
+      - 红色多边形        各槽位 ROI + 装配位 ROI（若传了 q）
+      - 绿色粗圈          `guide` 指定的那个槽/装配位（"东西该放这里"）
+      - 黄色              被切成"黄铜"的像素
+      - 品红              被切成"金属"的像素（不靠色相那条通路）
+      - 左上角文字        过曝量 / V 均值 / 分辨率 / 帧率
+      - 左下角文字        各槽覆盖率 + 识别结果 + 判定（让判据可见，不是黑盒）
+      - ★ 过曝量 > 0.5% 时**整屏描红边 + 大字报警**（这正是踩过的坑）
+
+    参数：
+      src    图像来源（要有 .read(want_full=...)）
+      q      Qualifier，用来画 ROI、覆盖率与识别结果（可选）
+      seg    Segmenter，用来做分割叠加（可选，不传就只显示原图）
+      scale  传给 segment 的缩放
+      guide  "slot_wheel" / "assembly" 等，指定要**高亮提示**的目标
+    """
+    win = _PREVIEW_WIN
+    try:
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    except Exception:                                            # noqa: BLE001
+        pass
+    t_last = 0.0
+    fps = 0.0
+    while True:
+        f = src.read(want_full=False)
+        if f is None:
+            time.sleep(0.02)
+            continue
+        bgr = f.left if getattr(f, "left", None) is not None else f.left_full
+        if bgr is None:
+            continue
+        vis = bgr.copy()
+        info: list = []
+        tail: list = []
+        blown = 0.0
+        res = None
+        if seg is not None:
+            try:
+                res = seg.segment(bgr, scale=scale)
+                ov = bgr.copy()
+                # ★ 黄铜用**半透明填充**（它就是要看的主体），
+                #   金属掩膜只画**轮廓** —— 实测它在真机帧上占 28%，
+                #   填充后整个画面糊成品红，反而看不见零件长什么样。
+                if res.brass_mask is not None:
+                    ov[res.brass_mask > 0] = (0, 255, 255)      # 黄 = 黄铜
+                vis = cv2.addWeighted(vis, 0.6, ov, 0.4, 0)
+                mm_ = getattr(res, "metal_mask", None)
+                if mm_ is not None and int(np.count_nonzero(mm_)) > 200:
+                    cnts, _ = cv2.findContours(mm_, cv2.RETR_EXTERNAL,
+                                               cv2.CHAIN_APPROX_SIMPLE)
+                    big = [c for c in cnts if cv2.contourArea(c) > 40]
+                    cv2.drawContours(vis, big, -1, (255, 0, 255), 2)   # 品红轮廓
+                blown = float(res.detail.get("blown_ratio", 0.0))
+                info.append("blown %.2f%%" % (100 * blown))
+                info.append("V %.0f" % res.detail.get("v_mean", 0.0))
+            except Exception as e:                               # noqa: BLE001
+                info.append("分段失败: %s" % e)
+        if q is not None:
+            try:
+                # 画所有槽位 ROI + 装配位 ROI（TrayMap 没有整体的"料盘多边形"）
+                targets = dict(q.tray.slot_polygons_px(scale))
+                ap = q.tray.assembly_polygon_px(scale)
+                if ap is not None:
+                    targets["assembly"] = ap
+                for key, poly in targets.items():
+                    if poly is None or len(poly) < 3:
+                        continue
+                    pts = np.round(np.asarray(poly)).astype(np.int32).reshape(-1, 1, 2)
+                    if guide and key == guide:
+                        cv2.polylines(vis, [pts], True, (0, 255, 0), 5)   # 绿圈=该放这里
+                    else:
+                        cv2.polylines(vis, [pts], True, (0, 0, 255), 2)
+            except Exception:                                    # noqa: BLE001
+                pass
+
+        # 左下角：覆盖率 + 识别结果 + 判定（让判据可见，不是黑盒）
+        if q is not None and res is not None and res.brass_mask is not None:
+            try:
+                for s in q.check_slots(res, scale, bgr=bgr):
+                    idp = "?"
+                    try:
+                        idp = s.features.get("id_part") or "?"
+                    except Exception:                            # noqa: BLE001
+                        pass
+                    tail.append("%-7s cov %.2f  %-10s %s"
+                                % (s.slot_id.replace("slot_", ""), s.coverage,
+                                   idp, s.verdict))
+            except Exception:                                    # noqa: BLE001
+                pass
+
+        now = time.time()
+        if t_last > 0:
+            fps = 0.9 * fps + 0.1 * (1.0 / max(1e-3, now - t_last))
+        t_last = now
+        lines = ["%dx%d  %.1f fps" % (bgr.shape[1], bgr.shape[0], fps)] + info
+        if title_extra:
+            lines.append(title_extra)
+        for i, s in enumerate(lines):
+            y = 22 + 20 * i
+            cv2.putText(vis, s, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                        (0, 0, 0), 3)
+            cv2.putText(vis, s, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                        (255, 255, 255), 1)
+        for i, s in enumerate(reversed(tail)):
+            y = vis.shape[0] - 16 - 18 * i
+            cv2.putText(vis, s, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (0, 0, 0), 3)
+            cv2.putText(vis, s, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (255, 255, 255), 1)
+        if blown > 0.005:
+            # ★ 过曝报警：这是把 c5 弄废的那个原因，必须刺眼
+            cv2.rectangle(vis, (0, 0), (vis.shape[1] - 1, vis.shape[0] - 1),
+                          (0, 0, 255), 8)
+            msg = ("!! 过曝 %.1f%% -> 黄铜会被判成绿垫，判据会失效 !! 调低曝光"
+                   % (100 * blown))
+            yy = 34 + 20 * len(lines)
+            cv2.putText(vis, msg, (10, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 0, 0), 4)
+            cv2.putText(vis, msg, (10, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 0, 255), 2)
+
+        cv2.imshow(win, vis)
+        k = cv2.waitKey(1) & 0xFF
+        if k in (ord("q"), 27):
+            return "quit"
+        if k in (13, 32, 10):        # 回车 / 空格
+            return "ok"
+        try:
+            if cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
+                return "quit"
+        except Exception:                                        # noqa: BLE001
+            pass
+
+
+def ask_or_preview(src, prompt: str, q=None, seg=None, scale: float = 1.0,
+                   title_extra: str = "", preview: bool = True,
+                   guide: str = "") -> bool:
+    """把"按回车继续"和"实时预览"合成一步。返回 True=继续 / False=中止。
+
+    preview=False 时退化成原来的 `ask()`（无窗口环境仍可用）。
+    guide 指定"这一步该放东西的位置"（如 "slot_wheel" / "assembly"），
+    预览里会用**绿色粗圈**高亮它。
+    """
+    print(prompt)
+    if not preview:
+        ask("准备好按回车…")
+        return True
+    print("  ★ 预览窗口已打开（绿圈 = 这一步该放东西的位置）：")
+    print("      看着画面调好摆放/曝光，按【空格或回车】继续，按 q/ESC 中止。")
+    try:
+        return preview_until_key(src, q=q, seg=seg, scale=scale,
+                                 title_extra=title_extra, guide=guide) == "ok"
+    except Exception as e:                                       # noqa: BLE001
+        print("  （预览不可用，退回按回车：%s）" % e)
+        ask("准备好按回车…")
+        return True
+
+
 def warmup(src, seconds: float = 1.5, max_frames: int = 40) -> None:
     """预热：改完曝光/白平衡后连续读帧丢弃，等画面稳定。
 

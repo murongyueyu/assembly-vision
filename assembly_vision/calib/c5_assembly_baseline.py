@@ -26,8 +26,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _util import (ask, grab_full, grab_small, load_all, open_source,  # noqa: E402
-                   save_calib)
+from _util import (PREVIEW_WIN_NAME, ask, ask_or_preview, grab_full,  # noqa: E402
+                   grab_small, load_all, open_source, save_calib)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from assemvision.core.checks import Qualifier                          # noqa: E402
@@ -98,9 +98,15 @@ def main() -> int:
     #   全是"黑盒数字" —— 一旦是 0 或 nan，完全看不出是
     #   ①装配体没被检出 ②ROI 位置偏了 ③辐条环带不对 ④光照不行。
     #   实测踩过：辐条峰数众数 0、轮毂覆盖率 nan，只能靠猜。
+    # ★ 预览开关：默认开。★ 一定要能看见画面再按回车 ——
+    #   之前是盲跑，一次严重过曝（黄铜面积从 3200px 塌到 626px）把整条
+    #   判据链弄废，而终端只报"扫优失败"，完全无从下手。见 _util.preview_until_key。
+    ap.add_argument("--no-preview", action="store_true",
+                    help="关掉实时预览窗口（无显示器/远程时用）")
     ap.add_argument("--diag", action="store_true",
                     help="单帧诊断装配位：打印检出情况/半径/各半径带峰值后退出")
     args = ap.parse_args()
+    preview = not args.no_preview
 
     cam, wp, calib = load_all(args.camera, args.workpiece)
     if "tray_map" not in calib.data:
@@ -227,9 +233,17 @@ def main() -> int:
         src.close()
         return 0
 
-    print("=== 第一步：料盘里的轮盘 —— 扫优「数辐条」用的环带 ===")
-    print("请把【一个完整的轮盘组件】放在它的料位里，保持不动。")
-    ask("准备好按回车…")
+    if not ask_or_preview(src, "=== 第一步：料盘里的轮盘 —— 扫优「数辐条」用的环带 ===\n"
+                               "请把【一个完整的轮盘组件】放在它的料位里（画面上的绿圈）",
+                          q=q, seg=seg, title_extra="第一步：轮盘放在料盘槽里",
+                          guide="slot_wheel", preview=preview):
+        print("已中止"); src.close(); return 1
+    # 关掉预览窗口，避免后面的 imshow 与它抢窗口
+    try:
+        cv2.destroyWindow(PREVIEW_WIN_NAME)
+        cv2.waitKey(1)
+    except Exception:                                            # noqa: BLE001
+        pass
     mask = None
     center = None
     n = 0
@@ -287,10 +301,18 @@ def main() -> int:
             else:
                 print(" ★ metal 掩膜也扫不出规整的 8 峰，沿用配置里的现值")
 
-    print()
-    print("=== 第二步：装配位基线 ===")
-    print("请把【完整装配体（底座+立柱+轮盘+顶盖）】放到装配位，保持不动。")
-    ask("准备好按回车…")
+    if not ask_or_preview(src, "\n=== 第二步：装配位基线 ===\n"
+                               "请把【完整装配体（底座+立柱+轮盘+顶盖）】放到装配位"
+                               "（画面上的绿圈 = 料盘左侧），保持不动。",
+                          q=q, seg=seg,
+                          title_extra="第二步：完整装配体放在料盘左侧装配位",
+                          guide="assembly", preview=preview):
+        print("已中止"); src.close(); return 1
+    try:
+        cv2.destroyWindow(PREVIEW_WIN_NAME)
+        cv2.waitKey(1)
+    except Exception:                                            # noqa: BLE001
+        pass
     covs, rings, hubs, caps, spokes = [], [], [], [], []
     for i in range(args.frames):
         frame, f = grab_small(src)
