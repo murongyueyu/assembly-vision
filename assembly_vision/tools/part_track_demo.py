@@ -107,6 +107,12 @@ def main() -> int:
     ap.add_argument("--window-scale", type=float, default=1.0,
                     help="显示放大倍数。★ 相机配置里 scale.realtime=0.5，"
                          "会在 640x480 窗口里塞一张 320x240 的图 -> 四周全是黑边（实测踩过）")
+    ap.add_argument("--allow-new-inset-px", type=int, default=6,
+                    help="新轨迹的质心必须在工位 ROI **内缩**这么多像素以内"
+                         "（work_roi 本身是料盘外扩 25mm 的，不内缩挡不住料盘外的噪声）")
+    ap.add_argument("--new-track-min-score", type=float, default=0.60,
+                    help="新建轨迹时，那个块**必须被认成某种零件**且得分不低于此值"
+                         "（噪声不会被认成零件，这是比位置更强的一道闸）")
     ap.add_argument("--allow-new-anywhere", action="store_true",
                     help="允许在画面任何地方建新轨迹"
                          "（默认只允许在工位 ROI 内，"
@@ -202,17 +208,35 @@ def main() -> int:
             return True
     else:
         def _allow_new(_b):
-            key = (frame.shape[0], frame.shape[1])
-            m = _roi_cache.get(key)
-            if m is None:
-                m = q.work_roi_mask(
-                    frame.shape, 1.0,
-                    margin_mm=float(wp.get("segment.work_roi_margin_mm", 25.0)))
-                _roi_cache[key] = m
-            cx, cy = int(_b.centroid[0]), int(_b.centroid[1])
-            if not (0 <= cy < m.shape[0] and 0 <= cx < m.shape[1]):
+            # 两道闸：位置（内缩 ROI 内）+ 身份（能被认成某种零件）。
+            if not _in_inset_roi(_b):
                 return False
-            return m[cy, cx] > 0
+            _pid, _sc = classify(dict(_b.features or {}))
+            if not _pid:
+                return False
+            return float(_sc) >= float(args.new_track_min_score)
+
+    def _ensure_roi(_h, _w):
+        """确保内缩 ROI 已算好（两个谓词共用同一份缓存）。"""
+        key = (_h, _w)
+        m = _roi_cache.get(key)
+        if m is None:
+            m = q.work_roi_mask(frame.shape, 1.0,
+                                margin_mm=float(wp.get("segment.work_roi_margin_mm", 25.0)))
+            ins = int(args.allow_new_inset_px)
+            if ins > 0:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ins * 2 + 1,) * 2)
+                m = cv2.erode(m, k)
+            _roi_cache[key] = m
+        return m
+
+    def _in_inset_roi(_b):
+        """质心是否在**内缩后**的工位 ROI 内（用于筛掉料盘外的噪声块）。"""
+        m = _ensure_roi(frame.shape[0], frame.shape[1])
+        cx, cy = int(_b.centroid[0]), int(_b.centroid[1])
+        if not (0 <= cy < m.shape[0] and 0 <= cx < m.shape[1]):
+            return False
+        return m[cy, cx] > 0
 
     # ★ 预先把槽位多边形算好（`glove_hits` 要它判断"手压在哪个槽"）。
     #   用**标称**位置即可 —— 手压判断只需要大致区域，不必跟位姿。
@@ -285,7 +309,15 @@ def main() -> int:
                                           margin_mm=float(wp.get("segment.work_roi_margin_mm",
                                                                  25.0)))
                     res = seg.segment(frame, scale=1.0, work_roi=roi)
-                    blobs = list(res.brass_blobs)
+                    # ★★ 传给追踪器的块必须**限在工位内**（内缩后）。
+                    # ★★ 传给追踪器的块必须**限在工位内**（内缩后）。
+                    #   不能只靠 allow_new 拦：先前这里传的是**外扩 25mm** 的 ROI 块，
+                    #   料盘边沿外那条噪声依然能进来（实测 now_raw.png 里
+                    #   (610,474) 那块甚至被认成 P2_column 0.89）。
+                    #   在这里就把它挡掉，**根上不让它进追踪器**。
+                    #   ★ 而全图搜索那一份（下面 r_full）**必须保持全画面** ——
+                    #     判丢要全图搜，不能只看工位内。两份用途不同，不能混。
+                    blobs = [b for b in res.brass_blobs if _in_inset_roi(b)]
                     seg_ms = (time.perf_counter() - ts) * 1000.0
 
                 ts = time.perf_counter()
@@ -409,6 +441,21 @@ def main() -> int:
 
                 # 面板
                 cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 60), (28, 28, 28), -1)
+                # ★★ 「缺件」必须用**全图检测的权威结果** `seen_ids`，
+                #   不能拿“有没有轨迹落在这个槽里”来判断 ——
+                #   实测踩过：幽灵轨迹正好压在底座上，于是**底座已经没了却报“有件”**。
+                #   `seen_ids` 只在跑过全图搜索的帧才有值；没值的帧沿用上一次结果，
+                #   这样“缺件”不会因为搜索周期而闪。
+                #   ★ 用户明确：**缺什么还是要在面板上显示**（我之前误删，已恢复）；
+                #     要去掉的是**画面上那个橙色的「全图搜 N 帧」标记**。
+                if seen_ids is not None:
+                    last_seen_ids = set(seen_ids)
+                    last_missing = [
+                        k for k, part in slot_parts.items()
+                        if part and part not in last_seen_ids]
+                missing = last_missing
+                miss_txt = ("   缺: " + ",".join(k.replace("slot_", "") for k in missing)
+                            if missing else "")
                 n_ok = sum(1 for t in tracks if t.visible)
                 n_occ = sum(1 for t in tracks if t.state == "occluded")
                 # ★ 「久不可见」与「已放弃」分开报 —— 两者都会让人想去看一眼，
@@ -428,7 +475,7 @@ def main() -> int:
                 cv2.putText(canvas,
                             "零件 %d（可用 %d / 遮挡 %d / 久不可见 %d / 放弃 %d）  |  %s"
                             % (len(tracks), n_ok, n_occ, n_lost, n_gone,
-                               hand_txt + dup_txt),
+                               hand_txt + dup_txt + miss_txt),
                             (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (230, 230, 230), 1,
                             cv2.LINE_AA)
                 cv2.putText(canvas,
@@ -441,18 +488,7 @@ def main() -> int:
                 #   不能拿"有没有轨迹落在这个槽里"来判断 ——
                 #   实测踩过：幽灵轨迹正好压在底座上，于是**底座已经没了却报"有件"**。
                 #   `seen_ids` 只在跑过全图搜索的帧才有值；没值的帧沿用上一次的结果，
-                #   这样"缺件"不会因为搜索周期而闪。
-                if seen_ids is not None:
-                    last_seen_ids = set(seen_ids)
-                    last_missing = [
-                        k for k, part in slot_parts.items()
-                        if part and part not in last_seen_ids]
-                missing = last_missing
-                if missing:
-                    cv2.putText(canvas,
-                                "缺: " + " ".join(m.replace("slot_", "") for m in missing),
-                                (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                (80, 200, 255), 1, cv2.LINE_AA)
+
                 if debug:
                     lines = ["状态明细:",
                              "  tracker API = %s" % (api or "-"),

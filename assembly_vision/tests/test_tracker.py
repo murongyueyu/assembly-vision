@@ -349,6 +349,53 @@ def main() -> int:
     check(len(tr9.tracks) == 1 and tr9.tracks[0].state == "detected",
           "放回原位应**恢复同一条轨迹**（而不是新建），否则就是幽灵")
 
+    print("\n== 幻影轨迹：从未真正跟住过的轨迹要快速清掉 ==")
+    print("   用户现象：黑色料盘外出现橙色「全图搜 0 帧」标记。")
+    print("   「0 帧」=刚建就没跟住过 -> 从噪声里生的轨迹。")
+    print("   修：这类轨迹 i) 画面上不画（tracked_once=False）ii) 活过短限就删")
+    trA = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000, "lost_grace_seconds": 0.05,
+                       "phantom_miss_frames": 20})
+    # 只喂**一帧**：建出轨迹，但之后再也不给它任何块
+    trA.update(frame, [mk_blob(620, 460, 4000.0)], detect=True,
+               classify=lambda f: ("P_GHOST", 0.9))
+    n0 = len(trA.tracks)
+    alive = []
+    for i in range(45):
+        trA.update(frame, [], detect=True, seen_ids=set(), occluder=no_glove())
+        alive.append(len(trA.tracks))
+        time.sleep(0.002)
+    print("   只喂一帧后：建了 %d 条；之后轨迹数 1->%d（前 5 帧 %s）"
+          % (n0, alive[-1], alive[:5]))
+    check(n0 == 1, "应先建出 1 条轨迹")
+    check(alive[-1] == 0,
+          "长时间没拿到检测结果的孤灵轨迹应被清掉"
+          "（实测剩 %d 条）" % alive[-1])
+    # ★ 但**遮挡期间绝不能删**（否则“手盖住真零件”会丢轨迹）
+    trC = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000, "lost_grace_seconds": 0.05,
+                       "phantom_miss_frames": 20})
+    bc = mk_blob(320, 240, 4000.0)
+    trC.update(frame, [bc], detect=True, classify=lambda f: ("P_OCC", 0.9))
+    glove_c = np.zeros(frame.shape[:2], np.uint8)
+    cv2.drawContours(glove_c, [bc.contour], -1, 255, -1)
+    for _ in range(45):
+        trC.update(frame, [], detect=True, seen_ids=set(), occluder=glove_c)
+        time.sleep(0.002)
+    print("   遮挡中 45 帧（超过幻影限 20）：轨迹数 = %d（应为 1）" % len(trC.tracks))
+    check(len(trC.tracks) == 1,
+          "遮挡期间绝不能删轨迹（实测剩 %d 条）" % len(trC.tracks))
+    check(trC.tracks[0].state == "occluded",
+          "遮挡期间应为 occluded（实测 %s）" % trC.tracks[0].state)
+    # 真零件不能被误删：每帧都有检测
+    trB = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000, "never_tracked_frames": 3})
+    for _ in range(10):
+        trB.update(frame, [mk_blob(320, 240, 4000.0)], detect=True,
+                   classify=lambda f: ("P_REAL", 0.9))
+    print("   每帧都有检测的真零件：轨迹数 = %d（应为 1）" % len(trB.tracks))
+    check(len(trB.tracks) == 1, "真零件绝不能被当幻影删掉")
+
     print("\n== IoU 与 ROI 工具 ==")
     check(abs(_iou((0, 0, 10, 10), (0, 0, 10, 10)) - 1.0) < 1e-6, "同框 IoU=1")
     check(_iou((0, 0, 10, 10), (100, 100, 10, 10)) == 0.0, "不重叠 IoU=0")

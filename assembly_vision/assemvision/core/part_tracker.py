@@ -146,6 +146,13 @@ class TrackState:
     #   如果用它做这个判断，那些被保留的 `gone` 轨迹会**永远在跑 KCF**
     #   （实测踩过：保留 60 秒后帧率从 28fps 掉到 **9fps**）。
     miss_streak: int = 0
+    # ★★ 「从未真正跟踪成功过」的帧数 —— 幻影轨迹就是这样：
+    #   它是被一个检测建出来的（所以 `ever_seen=True`），但 `tr.update()` **一次都没成功过**。
+    #   实测踩过：只把它从画面上藏起来不够 —— 它会活到 `gone_keep_seconds`(60s)，
+    #   期间**每帧都在跑 KCF**。所以给它一个短命上限。
+    #   实测踩过：**不能用追踪器的返回值判幽灵** ——
+    #   在一帧纯灰背景上（根本没有零件）`cv2.TrackerKCF.update()` **依然返回 True**，
+    #   它会自己找个东西盯上。-> 只能靠“检测有没有匹配上”。
     # ── 丢失判据用的三个计时（用户明确定义，见下方 `PartTracker._judge_lost`）──
     #   ★ 语义：**不是"看不见多久就怀疑"，而是"遮挡物移开后再给一小段时间
     #     全图搜不到"才算丢失**（用户原话）。
@@ -264,7 +271,17 @@ class PartTracker:
         #   `_detect` 能按位置重新关联上，**身份与历史都恢复**。
         #   ★ 而且这也是防幽灵的关键：若一个回来的块不能关联到原轨迹，
         #     它会**新建一条** -> 同一零件两条轨迹 -> 界面上 "零件 8"。
-        self.gone_keep_seconds = float(c.get("gone_keep_seconds", 60.0))   # 60 帧 ≈ 2 秒
+        self.gone_keep_seconds = float(c.get("gone_keep_seconds", 60.0))
+        # ★★ 幻影轨迹的删除门槛：**已 gone** 且**未被遮挡** 且
+        #   **连续这么多帧没拿到检测结果**。
+        #   实测踩过：不能用“从未被匹配过”做判据 —— 轨迹就是检测建出来的，
+        #   那个条件**永远不成立**（删除逻辑从来没跑到过）。
+        #   也不能在遮挡期间计数 —— 否则“手盖住真零件”会把轨迹删掉。
+        # ★ 默认从宽限期推：**至少 3 倍宽限期，且不少于 90 帧**（约 3 秒）。
+        #   这样在生产配置（宽限 2s）下就是 90 帧；在测试的短宽限配置下会自动收紧，
+        #   不会因为一个写死的数字而让测试永远跑不到那个条件。
+        self.phantom_miss_frames = int(c.get(
+            "phantom_miss_frames", max(90, self.lost_grace_frames * 3)))   # 60 帧 ≈ 2 秒
         self.cover_overlap_ratio = float(c.get("cover_overlap_ratio", 0.25))
         self.min_area_px = float(c.get("min_area_px", 400))
         self.max_area_px = float(c.get("max_area_px", 8000))
@@ -398,6 +415,11 @@ class PartTracker:
             #   表现是**轨迹莫名消失、判丢逻辑完全不生效**。
             #   （与上面 `score_ema` 那个坑同一类：新建路径与更新路径必须一致。）
             t.ever_seen = True
+            # ★★ 新建轨迹就是“被一次检测匹配上了” —— **必须一并置上**。
+            #   实测踩过（本模块第五次同类）：只在 _adopt 里设了 dopted_once，
+            #   新建路径漏了 -> **每条轨迹一出生就被当幻影**（ntf 从 1 开始），
+            #   表现是合法轨迹被当幻影删掉。
+            #   ★ 与 ever_seen / score_ema / 状态覆盖 同一类：**新建与更新路径必须做同样的初始化**。
             t.occluded_frames = 0
             t.clear_frames = 0
             self._attach(frame, t)
@@ -489,7 +511,7 @@ class PartTracker:
             # ★ 只在「还相信它在」时跑 KCF：
             #   miss_streak 小 =　刚看到过 / 刚被挡 —— 值得跟；
             #   miss_streak 大 =　久不可见 —— 跑了也白跑（每目标约 8ms）。
-            if tr is not None and t.miss_streak <= self.lost_grace_frames:
+            if tr is not None and t.miss_streak <= self.phantom_miss_frames:
                 try:
                     ok, box = tr.update(frame)
                 except Exception:                                  # noqa: BLE001
@@ -564,6 +586,14 @@ class PartTracker:
                 t.occluded_frames += 1
                 t.clear_since = 0.0
                 t.clear_seconds = 0.0
+                # ★★ 遮挡期间**把 `miss_streak` 清零** —— 实测踩过：
+                #   不清零的话，“手盖 60 帧”会把它堆到 60，
+                #   手一移开再过 30 帧就超过幻影阈值 ——
+                #   于是**一个真实存在的零件被当幻影删掉**。
+                #   ★ 又是“一个计数器被两种语义抢用”（参 §2.24 / §2.28）：
+                #     它既要表示“多久没检测到”，又要表示“多久真的丢了”。
+                #     **被遮挡不是不存在的证据**，不能计入。
+                t.miss_streak = 0
                 t.state = "occluded"          # ★ 挡着就永远是“遮挡”，不管多久
                 continue
 
@@ -650,6 +680,14 @@ class PartTracker:
         now = time.perf_counter()
         keep = []
         for t in self.tracks:
+            # ★ 幻影：从未跟踪成功过的轨迹，活过短限就删（不让它白吃 KCF）
+            # ★ 幻影：**已 gone + 未被遮挡 + 长时间没拿到检测结果**
+            #   三个条件同时成立才删 —— 保证“挡一下就能恢复”的轨迹不会被误删。
+            if not t.covered and t.miss_streak > self.phantom_miss_frames:
+                self._trackers.pop(id(t), None)
+                self._kf.pop(id(t), None)
+                self._frame_ref.pop(id(t), None)
+                continue
             if t.state == "gone":
                 if t.gone_since <= 0.0:
                     t.gone_since = now
@@ -731,6 +769,18 @@ class PartTracker:
                  "gone": (90, 90, 220)}          # 红：已放弃
         for t in self.tracks:
             col = COLOR.get(t.state, (200, 200, 200))
+            # ★★ 幻影：从来没真正跟住过的轨迹（`miss_streak == 0` 且从未跟丢）
+            #   **完全不画** —— 它本身就是噪声，画出来就是用户看到的
+            #   「黑色料盘外的全图搜 0 帧」那个橙色标记。★ 用户明确不要看到它。
+            #   ★ 用 	racked_once（追踪器从未成功过）而不是看计数器 ——
+            #     这才是“从噪声里生出来”的准确定义。
+            #   实测踩过：不能用“从未被匹配过”（轨迹就是检测建的），
+            #   也不能看 `tracked_once`（KCF 在纯灰背景上也返回 True）。
+            #   用 `miss_streak == 0`：这一帧刚诞生、还没跑过追踪器 —— 正是用户看到的
+            #   「全图搜 0 帧」那个橙色标记。下一帧它就会被判定，不再是幻影。
+            phantom = (t.miss_streak == 0 and t.lost_frames == 0)
+            if phantom:
+                continue
             # ★★ 没有可见部分的轨迹（`visible_ratio == 0`）**不要画轮廓** ——
             #   那个 `contour` 是**旧的**，画出来是一个形状扭曲、位置在料盘外的
             #   "**幽灵**"，比不画还误导（实测用户直接问"这是什么东西"）。
