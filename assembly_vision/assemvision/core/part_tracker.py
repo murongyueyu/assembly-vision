@@ -203,9 +203,17 @@ class PartTracker:
         self.occluded_ratio = float(c.get("occluded_ratio", 0.55))
         self.full_ratio = float(c.get("full_ratio", 0.80))
         self.area_rate = float(c.get("area_ref_rate", 0.15))
+        # ★ KCF 的耗时是**每目标固定成本**（实测 5.5ms/目标，4 目标 35ms/帧），
+        #   与整帧尺寸无关。曾试过「裁剪出小图再跑 KCF」，实测**只快 14% 但
+        #   静止漂移从 2.76px 崩到 131px**（裁剪窗滑动会逼着反复 init，
+        #   而 init 既不快又破坏追踪器状态）—— 已**放弃该方案**，
+        #   详见 docs/踩坑实录.md §2.20。
+        #   所以省算力只能靠「少跟几帧」（见 detect_every_n 与 pipeline 的用法）。
         self.tracks: List[TrackState] = []
         self._trackers: Dict[int, object] = {}
         self._kf: Dict[int, KalmanXY] = {}
+        self._frame_ref: Dict[int, int] = {}
+        self._frame_ref_n = 0
         self._next_key = 0
         self.last_detect_ms = 0.0
         self.last_track_ms = 0.0
@@ -218,6 +226,7 @@ class PartTracker:
                classify=None) -> List[TrackState]:
         """跑一帧。`classify(features)->(part,score)` 可选，用于给新框打身份。"""
         t0 = time.perf_counter()
+        self._frame_ref_n += 1
         if detect:
             self._detect(frame, blobs or [], classify)
             self._run_trackers(frame)          # 检测帧也 update 一次，保持一致
@@ -336,6 +345,7 @@ class PartTracker:
         self._trackers[key] = tr
         if key not in self._kf:
             self._kf[key] = KalmanXY(t.centroid[0], t.centroid[1])
+        self._frame_ref[key] = self._frame_ref_n
 
     def _run_trackers(self, frame) -> None:
         for t in self.tracks:

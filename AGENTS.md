@@ -60,7 +60,8 @@
 | 其他已知问题 | 深度基线字段路径、合成图颜色、谓词判装配位、辐条只判少不判多… | 实录 2.17 |
 | 辐条半径带**不能切 3 份投票** | 球头只落在最内侧 1.9px 子带 -> 数成 5 根；改按**角度均匀度**挑带（`select: uniform`） | 实录 2.18 |
 | 零件识别方法与量化 | 特征向量+区间匹配+加权；合成序列 **98.3%/召回 75%/精确 100%**；旋转 ±20° 误差 0 | 实录 2.19 |
-| **零件实时检测+追踪+遮挡** | 检测+追踪（分割 9.9ms 摊薄到 1/N）；**只描可见部分轮廓**；遮挡 3 档冻结身份；卡尔曼扫参定；Pi 用 `mosse` | 实录 2.20 |
+| **零件实时检测+追踪+遮挡** | 检测+追踪（分割 9.9ms 摊薄到 1/N）；**只描可见部分轮廓**；遮挡 3 档冻结身份；卡尔曼扫参定；后端只有 `kcf` 可靠 | 实录 2.20 |
+| **追踪后端只有 KCF 可靠** | mosse 的 `update` 恒返回 False、medianflow 会崩、csrt 太慢；`segment` 耗时与 ROI 大小无关；裁剪加速试过已放弃（快 14% 但漂移 2.76->131px）；真机中位 **28.9fps**（相机 31） | 实录 2.21 |
 
 ---
 
@@ -99,8 +100,8 @@ assembly_vision/
 │   │   ├── polar.py            极坐标展开 + 自适应阈值数峰（辐条计数）
 │   │   ├── roi.py              料盘 mm ↔ 像素、槽位 ROI、覆盖率
 │   │   ├── part_id.py          ★ 零件识别：旋转不变特征向量（形状+物理面积+色域）
-│   │   ├── part_tracker.py     ★ 零件追踪：卡尔曼平滑 + KCF/MOSSE + **遮挡三档处理**
-│   │   │                         只描可见轮廓；遮挡时冻结身份；两套 tracker API 兼容 Pi
+│   │   ├── part_tracker.py     ★ 零件追踪：卡尔曼平滑 + KCF（**只有它可靠**）+ 遮挡三档处理
+│   │   │                         只描可见轮廓；遮挡时冻结身份；真机中位 28.9fps（相机 31）
 │   │   ├── checks.py           合格性(①) + 齐套性(④) + 装配位布尔量
 │   │   ├── fsm.py              前置条件表(③) + 去抖 + 遮挡冻结
 │   │   ├── events.py           取件/装配事件
@@ -124,7 +125,7 @@ assembly_vision/
 │   │                             准确率 + **召回率 + 精确率**（三者缺一不可）；
 │   │                             `--live` 用「零件在哪个槽」当真值测真机
 │   ├── part_track_demo.py      ★★ **零件检测实时演示**：实时画面 + **形状轮廓**（不是方框）
-│   │                             + 卡尔曼去抖 + 追踪；`--backend kcf|mosse|csrt|medianflow`；
+│   │                             + 卡尔曼去抖 + 追踪；`--backend kcf`（**只有它可靠**）；
 │   │                             `--bench` 只测帧率；按键 空格=暂停 b=方框 d=调试
 │   ├── part_track_occlusion_test.py  ★ 遮挡对照图（0/30/50/70/85%），
 │   │                             验证「只描可见部分」+ 遮挡时身份冻结
@@ -174,7 +175,7 @@ python calib/c5_assembly_baseline.py --frames 20   # ★ 已跑完：辐条众�
 python calib/c6_part_features.py              # ★ 已跑完：4 类零件模板
 python tools/preview.py --guide assembly      # ★ 统一预览（ROI+分割+过曝报警）
 python tools/part_track_demo.py                  # ★★ 零件检测实时演示（轮廓+追踪）
-python tools/part_track_demo.py --backend mosse      # 树莓派推荐
+python tools/part_track_demo.py --bench                  # 只测帧率
 python tools/part_track_demo.py --source images --path data/synthetic_seq --bench
 python tools/part_track_occlusion_test.py        # 遮挡对照图（只描可见部分）
 python app.py --windowed                      # 正式跑（窗口模式方便调试）
@@ -243,12 +244,15 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
   **过曝报警**。`--no-preview` 可关掉。
 - ✅ **零件实时检测 + 追踪已实现**（见实录 **2.20**）：`tools/part_track_demo.py`
   · 实时画面 + **形状轮廓**（`drawContours` 真实轮廓 + 顶点，**不是方框**）
-  · **卡尔曼去抖**（轨迹误差 2.312 -> 1.286 px，扫参定）+ KCF/MOSSE/MedianFlow 追踪
+  · **卡尔曼去抖**（轨迹误差 2.312 -> 1.286 px，扫参定）+ KCF 追踪
   · **遮挡三档**：>=80% 重判身份 / 55~80% 沿用 / <=55% **冻结身份**
   · **只描可见部分的轮廓**（遮挡 30/50/70% 时轮廓只覆盖未被挡的黄铜，不补全）
-  · 实测 **PC 57~67 fps**；每帧均摊 11ms（Pi 估）-> **≈95 fps**
-  · ★ **瓶颈是分割不是追踪**：三种后端帧率几乎一样
+  · 离线 PC 57~67 fps；**真机 28.9 fps**（相机上限 31）
+  · ★ **瓶颈是 KCF 的每目标成本**（4 件 x ~8ms），不是分割（摊薄后仅 0.7~3ms）
   · ★ **两套 tracker API 都兼容**（Pi 上 OpenCV 4.x 只有 `*_create()`）
+  · ★★ **后端只有 `kcf` 可靠**：mosse 的 `update` 恒返回 False（实测 40/40 全丢）、
+    medianflow 会崩、csrt 太慢 —— 详见实录 **2.21**
+  · ★ **真机实测中位 28.9 fps**（相机上限 31，已 93%）；每帧均摊 31.91ms
 - ✅ **色域特征在「零件间识别」里零贡献（消融实验证实）**：
   `full` 与 `no_color` 结果**完全一样**（13/13 认对），`only_color` **一个都认不出**。
   ★ 但这**不否定色域** —— 它的用途是**零件 vs 背景**与**零件 vs 手套**，
@@ -421,7 +425,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 | **真机窗口模式** | ✅ **能跑** | `app.py --windowed` 实跑 90 帧、退出码 0（原来必崩，见 §6.5「另修 2」） |
 | 标定链 c1~c6 | ✅ **全部完成** | 见 §5 |
 | **零件识别** | ✅ **真机 12/12 零误认** | 3 帧 × 4 槽，真值 =「零件在哪个槽」 |
-| **零件实时检测+追踪** | ✅ **能用**（PC 57~67 fps） | `tools/part_track_demo.py`，见实录 2.20 |
+| **零件实时检测+追踪** | ✅ **真机 28.9 fps**（相机上限 31） | `tools/part_track_demo.py`，见实录 2.20/2.21 |
 | 4 工序流程判断 | 🔶 逻辑齐、真机未逐步走完 | 见 §7.3 |
 | 树莓派 | ⬜ **一次都没跑过** | 见 §7.3 |
 

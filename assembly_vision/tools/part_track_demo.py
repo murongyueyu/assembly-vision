@@ -13,10 +13,23 @@
        （实测 640×480 全分割 9.9ms，而 MOSSE 0.25ms / KCF 2.0ms）
   ⑤ 「而且需要去抖」                  -> 卡尔曼平滑质心 + 状态机（detected/tracked/…）
   ⑥ 「最好能用上卡尔曼滤波追踪或者 KCF 追踪或者各种追踪算法」
-        -> `--backend kcf|mosse|csrt|medianflow`，默认 kcf；卡尔曼恒开
+        -> 卡尔曼恒开 + `--backend kcf|mosse|mil`。
+           ★★ **实测只有 KCF 可靠**（别按"常见做法"选后端）：
+             后端        单次update   结论
+             kcf           5.5 ms    ★ 唯一可靠，默认。4 目标约 32ms/帧
+             mosse         0.02 ms   ✗ `update` **恒返回 False**（OpenCV 已知问题），
+                                        实测 40/40 全"丢"，**不可用**
+             medianflow    1.8 ms    ✗ 会崩（lkpyramid 断言前后帧尺寸一致）
+             csrt         22.7 ms    ✗ 太慢（Pi 估 136ms）
+           ★ 而 `segment` 的耗时与 ROI 大小**几乎无关**（全图 10.5ms vs
+             小框 9.2ms）—— 所以"给小 ROI 就快"是错的。
+           ★ 试过"裁剪小图再跑 KCF"：**只快 14%，但静止漂移从 2.76px 崩到 131px**
+             （裁剪窗滑动逼着反复 init），**已放弃**。
+           -> 结论：**省算力只能靠少跟几帧**，而实测调大 `--detect-every`
+             几乎不提帧率（26~29fps），因为瓶颈是 KCF 的每目标固定成本。
   ⑦ 「需要考虑后续延伸到边缘算力也就是树莓派上跑同样能够使用的代码」
         -> 追踪器**两套 API 都试**（OpenCV 4.x 只有 `*_create()`）；
-           `--debug` 显示逐段耗时；**CSRT 实测 Pi 估 136ms，别用**
+           `--bench` 报逐段耗时与树莓派 6x 估算
 
 用法：
     python tools/part_track_demo.py                     # 真机实时
@@ -52,13 +65,25 @@ WIN = "零件检测 · 轮廓 + 追踪"
 
 
 def _read_frame(src, images, idx):
-    """统一取一帧：真机源或图片序列。"""
+    """统一取一帧：真机源或图片序列。
+
+    ★★ 真机路径踩过的坑（用户实跑报「处理帧数 0」）：
+      ① `UvcStereoSource.__init__` **只设 `self.cap = None`，不自动开相机** ——
+         必须显式 `src.open()`（`pipeline.py` 就是这么做的，见其第 145 行）。
+         漏了它 -> `read()` 立刻 `return None` -> 第一帧就退出，**一帧都处理不了**。
+      ② 相机刚开时 `read()` **正常会返回 None**（DSHOW 要预热几帧），
+         不能把"某一帧读到 None"当成"序列结束"。
+      所以这里区分：真机源连续读到 None 由调用方**重试**，图片序列读到末尾才算结束。
+    """
     if images is not None:
         if idx >= len(images):
             return None
         return imread_safe(images[idx])
-    f = src.read()
-    return None if f is None else f.left
+    f = src.read(want_full=False)
+    if f is None:
+        return None
+    # 帧对象可能只有 left（单目）—— 用 getattr 兜住，别让属性名变化直接崩
+    return getattr(f, "left", None)
 
 
 def main() -> int:
@@ -68,11 +93,13 @@ def main() -> int:
     ap.add_argument("--camera", default=os.path.join(ROOT, "config", "camera.yaml"))
     ap.add_argument("--source", default=None, help="uvc | video | images")
     ap.add_argument("--path", default=None, help="images 模式的目录")
-    ap.add_argument("--backend", default="kcf",
-                    choices=["kcf", "mosse", "csrt", "medianflow", "mil"],
-                    help="KCF(默认,平衡) | MOSSE(树莓派推荐) | CSRT(PC 专用,很慢)")
-    ap.add_argument("--detect-every", type=int, default=5,
-                    help="每 N 帧做一次全图检测；其余帧只追踪（帧率靠它）")
+    ap.add_argument("--backend", default="kcf", choices=["kcf", "mosse", "mil"],
+                    help="只有 kcf 可靠（实测）；mosse 的 update 恒返回 False，"
+                         "medianflow 会崩，csrt 太慢 —— 见文件头的实测表")
+    ap.add_argument("--detect-every", type=int, default=8,
+                    help="每 N 帧做一次全图检测；其余帧只追踪。"
+                         "★ 实测调大它**几乎不提帧率**（26~29fps 之间），"
+                         "因为瓶颈是 KCF 的每目标成本、不是分割（见文件头）")
     ap.add_argument("--max-frames", type=int, default=0)
     ap.add_argument("--bench", action="store_true", help="只测帧率，不开窗口")
     ap.add_argument("--no-preview", action="store_true")
@@ -105,10 +132,20 @@ def main() -> int:
     else:
         from assemvision.sources.factory import make_source       # noqa: E402
         cam = load_config(args.camera)
-        if args.source:
-            cam.data.setdefault("capture", {})["kind"] = args.source
-        src = make_source(cam)
-        source_desc = str(src)
+        # ★ 用 make_source 的**真实签名**（cam_cfg, source, path）——
+        #   我第一版往 cam.data 里塞 "kind" 是臆造的字段，不生效。
+        src = make_source(cam, args.source, args.path)
+        try:
+            src.open()                       # ★★ 必须显式开！见 _read_frame 的说明
+            if hasattr(src, "apply_locked_controls"):
+                src.apply_locked_controls()  # 锁曝光等（与 pipeline.py 同做法）
+        except Exception as e:                                     # noqa: BLE001
+            print("  ★ 相机打开失败: %s: %s" % (type(e).__name__, e))
+            print("     排查顺序：① 相机是否被别的程序占用（关掉 app.py / 预览窗口）")
+            print("               ② 跑 python tools/probe_camera.py 确认能出图")
+            print("               ③ 换 USB 口 / 确认 dshow 后端可用")
+            return 2
+        source_desc = "%s（已 open + 锁参数）" % src.name
 
     tr_probe, api = make_tracker(args.backend)
     print("═" * 78)
@@ -119,8 +156,8 @@ def main() -> int:
     print("  检测频率      : 每 %d 帧一次全图分割（其余帧只追踪）" % tracker.detect_every)
     print("  OpenCV        : %s" % cv2.__version__)
     print("  按键          : 空格=暂停  b=方框  d=调试  q/ESC=退出")
-    print("  ★ 树莓派建议  : --backend mosse（实测 update 0.25ms，Pi 估 2ms）")
-    print("     CSRT 实测 22.7ms（Pi 估 136ms）—— 别在 Pi 上用")
+    print("  ★ 后端        : 只有 kcf 可靠 —— mosse 的 update 恒返回 False、")
+    print("                  medianflow 会崩、csrt 太慢（见文件头实测表）")
     print()
 
     def classify(feats):
@@ -137,6 +174,7 @@ def main() -> int:
     debug = False
     idx = 0
     frames = 0
+    blank = 0
     last_detect_frame = -999
     t_start = time.time()
     fps_times = []
@@ -148,7 +186,20 @@ def main() -> int:
             if not paused:
                 frame = _read_frame(src, images, idx)
                 if frame is None:
-                    break
+                    if images is not None:
+                        break                       # 图片序列：读完就结束
+                    # ★ 真机：read() 返回 None 多是**预热/偶发丢帧**，不能退出。
+                    #   连续读不到才判失败（DSHOW 开流通常要几帧才出图）。
+                    blank += 1
+                    if blank == 1:
+                        print("  ★ 相机前几帧没出图（DSHOW 预热中），继续等…")
+                    if blank > 90:
+                        print("  ★ 连续 %d 帧读不到图 -> 放弃" % blank)
+                        print("     跑 python tools/probe_camera.py 看相机是否正常")
+                        break
+                    time.sleep(0.02)
+                    continue
+                blank = 0
                 idx += 1
                 frames += 1
                 t0 = time.perf_counter()
@@ -299,26 +350,43 @@ def main() -> int:
     print("  实测结果")
     print("═" * 78)
     print("  处理帧数       : %d（%.1f 秒）" % (frames, el))
+    # ★★ 报**中位帧率**，不报平均 —— 实测踩过：
+    #   相机 DSHOW 开流要预热，前几帧很慢（一次实测均值 6.8fps、中位 31.7fps）。
+    #   均值被那几个慢帧拖垮，**看着像"只有 7fps"，其实已经贴着相机 31fps 上限**。
+    #   同理 `--max-frames` 计时也含预热，所以把前 `WARMUP` 帧单独剔掉。
+    WARMUP = 10
+    steady = fps_times[WARMUP:] if len(fps_times) > WARMUP else fps_times
+    if steady:
+        med = float(np.median(steady))
+        print("  ★ 帧率（中位）  : %.1f fps" % med)
+        print("     稳态范围     : %.1f ~ %.1f fps（剔掉前 %d 帧预热）"
+              % (min(steady), max(steady), WARMUP))
     if frames and el > 0:
-        print("  ★ 平均帧率     : %.1f fps" % (frames / el))
-    if fps_times:
-        print("  最近 60 帧中位 : %.1f fps" % float(np.median(fps_times)))
+        print("     全程均值     : %.1f fps（含预热，仅供参考）" % (frames / el))
     n_det = tracker.stats["detects"]
     n_trk = tracker.stats["track_only"]
     print("  检测帧 / 纯追踪: %d / %d" % (n_det, n_trk))
-    # ★ 耗时如实分开报告：`seg_ms` 只统计检测帧里的**全图分割**，
-    #   `trk_ms` 只统计 `PartTracker.update`。两者都在各自帧里测的，
-    #   别把它们相加当成"每帧耗时"（检测不是每帧都跑）。
-    print("  全图分割(仅检测帧): %.2f ms   追踪 update/帧: %.2f ms" % (seg_ms, trk_ms))
-    if frames and el > 0:
-        print("  实测每帧均值      : %.2f ms" % (el * 1000.0 / frames))
-        # 树莓派估算：分割按 6x，追踪 update 里 OpenCV 那部分也按 6x
-        per_frame_pi = (seg_ms * 6.0) / max(1, tracker.detect_every) + trk_ms * 6.0
-        print("  ★ 树莓派估（6x）  : 每帧约 %.0f ms -> 上限约 %.0f fps"
-              % (per_frame_pi, 1000.0 / max(1e-6, per_frame_pi)))
-        print("     其中分割被摊薄到 1/%d（每 %d 帧才跑一次全图分割）"
-              % (tracker.detect_every, tracker.detect_every))
-        print("     ★ 想要更高帧率就把 --detect-every 调大，或 --backend mosse")
+    print("  全图分割(检测帧): %.2f ms      追踪 update/帧: %.2f ms" % (seg_ms, trk_ms))
+    # ★ 每帧均摊 = 分割/检测周期 + 追踪。这是判断"能不能跟上相机"的正确指标。
+    per_frame = seg_ms / max(1, tracker.detect_every) + trk_ms
+    print("  ★ 实测每帧均摊  : %.2f ms  -> 上限 %.1f fps（相机 31 fps）"
+          % (per_frame, 1000.0 / max(1e-6, per_frame)))
+    print("     其中分割被摊薄到 1/%d（每 %d 帧才跑一次全图分割）"
+          % (tracker.detect_every, tracker.detect_every))
+    if per_frame <= 32.0:
+        print("     ✓ 够用：每帧均摊 <= 32ms，能贴住相机 31fps")
+    else:
+        print("     ★ 不够：每帧均摊 > 32ms，会掉帧 -> 把 --detect-every 调大")
+    per_frame_pi = (seg_ms * 6.0) / max(1, tracker.detect_every) + trk_ms * 6.0
+    print("  树莓派估（6x）  : 每帧约 %.0f ms -> 上限约 %.0f fps"
+          % (per_frame_pi, 1000.0 / max(1e-6, per_frame_pi)))
+    print()
+    print("  ── 后端选择（实测，别按「常见做法」选）──")
+    print("     kcf       5.5ms/目标  ★ 唯一可靠的，默认")
+    print("     mosse     0.02ms      ✗ update 恒返回 False（OpenCV 已知问题），不可用")
+    print("     medianflow 1.8ms      ✗ 会崩（lkpyramid 要求前后帧尺寸一致）")
+    print("     csrt      22.7ms      ✗ 太慢（Pi 估 136ms）")
+    print("     -> 想提帧率只能调大 --detect-every（少跟几帧），不是换后端")
     return 0
 
 
