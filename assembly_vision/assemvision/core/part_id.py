@@ -31,6 +31,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -77,6 +78,23 @@ FEATURE_WEIGHTS: Dict[str, float] = {
     "area_frac": 0.4,
 }
 
+# ── 离散量特征：必须用「整数容忍带」而不是连续区间 ────────────────
+# ★★ 为什么单列一类（真机实测踩过，见 docs/踩坑实录.md §2.30）：
+#   `holes` 是**整数计数**，不是连续量。而它在真机上对**同一个零件**
+#   会数出 0/1/2/3/4 —— 根因是金属镜面过曝把掩膜打穿、中央又露出一小块
+#   黄铜"岛"（实测底座就是这样）。
+#   而 c6 标定把区间收成宽度≈0：`[-0.00015, 0.00015]` / `[1.985, 2.015]`。
+#   后果：观测值 1 时**四个零件全部 < min_score（认不出）**；
+#   底座实测 0/1/2 时模板要 2 -> 单这一项就丢
+#   `holes 权重 2.0 / wsum 18.1 = 11%` 的分，底座从 0.77 掉到 0.65，
+#   而**轮盘拿 0.70** —— 两者贴住，`tracking.id_margin=0.12` 就不安全了。
+#   => 离散量必须容忍 ±1（底座因为过曝更严重，单独给 ±2），
+#      这样"数错一个"只是轻微扣分，而不是整条否掉。
+DISCRETE_FEATURES = frozenset({"holes"})
+
+# 容忍带的上限，纯属防御（防止配置里写个 999 把判据变成"永远满分"）
+MAX_DISCRETE_TOL = 16.0
+
 
 @dataclass
 class PartTemplate:
@@ -85,6 +103,10 @@ class PartTemplate:
     用区间而不是单点，因为：
       · 零件在槽里可以有不同的摆放角度/位置，特征的取值会有分布
       · 分割边缘有抖动
+
+    `discrete_tol`：**离散量特征**（见 `DISCRETE_FEATURES`，目前只有 `holes`）
+      的整数容忍带。取 0（默认）表示"关掉容忍带、按连续区间判"，
+      这样任何没配 tolerance 的场景行为与改动前**完全一致**。
     """
     part: str
     name: str = ""
@@ -92,6 +114,14 @@ class PartTemplate:
     weights: Dict[str, float] = field(default_factory=dict)
     # 允许"缺失特征"（比如没标定过就留空），缺失的特征不参与判分
     min_score: float = 0.55        # 低于此分判为"认不出"
+    # ★ 逐模板的离散容忍带覆盖（目前只有 holes 会用到）
+    discrete_tol: Dict[str, float] = field(default_factory=dict)
+
+    def tol_for(self, key: str) -> float:
+        """该特征的有效容忍带。非离散特征恒为 0（= 老行为）。"""
+        if key not in DISCRETE_FEATURES:
+            return 0.0
+        return float(self.discrete_tol.get(key, 0.0) or 0.0)
 
     def score(self, feats: Dict[str, float]) -> Tuple[float, Dict[str, float]]:
         """给一个特征字典打分，返回 (总分 0~1, 明细)。"""
@@ -103,7 +133,11 @@ class PartTemplate:
             if v is None or not np.isfinite(v):
                 continue
             w = float(self.weights.get(key, FEATURE_WEIGHTS.get(key, 1.0)))
-            s = _band_score(float(v), float(lo), float(hi))
+            tol = self.tol_for(key)
+            if tol > 0.0:
+                s = _band_score_discrete(float(v), float(lo), float(hi), tol)
+            else:
+                s = _band_score(float(v), float(lo), float(hi))
             detail[key] = s
             total += w * s
             wsum += w
@@ -127,6 +161,63 @@ def _band_score(v: float, lo: float, hi: float) -> float:
     return float(max(0.0, 1.0 - d / width))
 
 
+def _discrete_band(lo: float, hi: float, tol: float) -> Tuple[float, float]:
+    """把标定区间换算成"整数容忍带"：**先取整成一个整数，再各放 tol**。
+
+    ★★ 语义定成：**"这个零件的孔数是 n，允许数错 tol 个"**，其中
+      `n = round(lo) == round(hi)`；若区间跨多个整数，就取 `[round(lo), round(hi)]`
+      再各放 tol（保守，宁可多放一格）。
+
+    ★★ 为什么"跨两个整数"必须收掉：c6 的区间是 `[中值 ± pad]` 算出来的，
+      顶盖/底座的 `[1.985, 2.015]` **跨 {2, 3}**，但物理上各只有**一个**真值
+      （顶盖 2、底座 2）—— 那是 pad 太小的产物，不是"有两个可能值"。
+      如果不收，`[1.985, 2.015] + tol=1` 会变成 `[1, 4]`（接受 4 个数），
+      对零孔零件更糟：`[-0.00015, 0.00015] + tol=1` 会变成 `[-2, 2]`
+      （接受 3 个数，多放一格）。
+
+    ★★ 我在这一处**连错三次**，最后靠这张表 + `tests/test_part_id_tol.py`
+      的逐值断言才定下来（所以它必须留在注释里）：
+
+        c6 区间                    n    tol  整数带    满分接受
+        [-0.00015, 0.00015]（轮盘） 0    1    [-1, 1]    {0, 1}
+        [-0.00015, 0.00015]（立柱） 0    1    [-1, 1]    {0, 1}
+        [1.985, 2.015]（顶盖）      2    1    [1, 3]     {1, 2, 3}
+        [1.985, 2.015]（底座）      2    2    [0, 4]     {0, 1, 2, 3, 4}
+
+      对照真机实测分布（9 帧）：轮盘 {0}、立柱 {0}、顶盖 {2,3}、底座 {0,1,2,3,4}
+      —— 四类零件**各自的实测值全部被覆盖**，一个都不漏。
+    """
+    t = max(0.0, min(float(tol), MAX_DISCRETE_TOL))
+    n_lo = int(round(float(lo)))
+    n_hi = int(round(float(hi)))
+    if n_hi < n_lo:
+        n_lo, n_hi = n_hi, n_lo
+    # ★ 计数类离散量**没有负数** —— 下界夹到 0，否则零孔零件 ±1 会得到
+    #   [-1, 1]（含 -1），语义上是个不存在的取值。
+    return (max(0.0, float(n_lo) - t), float(n_hi) + t)
+
+
+def _band_score_discrete(v: float, lo: float, hi: float, tol: float) -> float:
+    """**离散量**（整数计数）的区间判分：把 [lo,hi] 扩成"整数容忍带"。
+
+    规则：`[floor(lo), ceil(hi)]` 再各放 `tol`，带内得 1、带外按距离衰减。
+      真值 0 的 `[-0.00015, 0.00015]` + tol=1 -> `[-1, 1]` -> 接受 {0, 1}
+      真值跨 {2,3} 的 `[1.985, 2.015]` + tol=1 -> `[1, 4]` -> 接受 {1,2,3,4}
+      真值跨 {2,3} 的 `[1.985, 2.015]` + tol=2 -> `[0, 5]` -> 接受 {0..5}
+
+    参数
+      v    实测值（浮点，但物理上是整数计数）
+      tol  允许数错的个数。★ **tol<=0 时直接退化成 `_band_score`**，
+           不做任何取整 —— 否则"关掉容忍带"也会悄悄改变判据行为
+           （实测后果：`_band_score_discrete(1.0, 1.985, 2.015, 0.0)` 会从
+           老的 0.0 变成 1.0，即默认路径被改了）。
+    """
+    if float(tol) <= 0.0:
+        return _band_score(float(v), float(lo), float(hi))
+    rlo, rhi = _discrete_band(lo, hi, tol)
+    return _band_score(float(v), rlo, rhi)
+
+
 class PartClassifier:
     """把一张图里的黄铜连通域逐个判定成零件种类。
 
@@ -134,11 +225,28 @@ class PartClassifier:
         clf = PartClassifier(templates)
         for blob in seg.brass_blobs:
             part, score, detail = clf.classify(blob.features)
+
+    `holes_tol` 是**策略**（不是"这个零件有几个孔"的知识）：
+      "对离散量特征，允许实测值与标定值差几个"，默认 1。
+      ★ 知识（每个零件几个孔）在 `PartTemplate.ranges` 里；
+        策略（数错了算多严重）在这里 —— 两者分开，配置才好调。
+      ★ 逐模板可以用 `PartTemplate.discrete_tol` 覆盖本值
+        （实测底座过曝最严重，观测值跨 0~4，单独给 2）。
     """
 
-    def __init__(self, templates: Sequence[PartTemplate], min_score: float = 0.55):
+    def __init__(self, templates: Sequence[PartTemplate], min_score: float = 0.55,
+                 holes_tol: float = 1.0):
         self.templates: List[PartTemplate] = list(templates)
         self.min_score = float(min_score)
+        try:
+            self.holes_tol = max(0.0, min(float(holes_tol), MAX_DISCRETE_TOL))
+        except (TypeError, ValueError):
+            self.holes_tol = 0.0
+        # ★ 把策略**注入**模板：模板自己没写 discrete_tol 的离散特征就用它。
+        #   放在这里而不是 score() 里传参，是为了不动 PartTemplate.score 的签名
+        #   （已有测试与工具都直接调 score(feats)）。
+        for t in self.templates:
+            t.discrete_tol = _merge_tol(t.discrete_tol, self.holes_tol)
 
     def classify(self, feats: Dict[str, float]):
         """返回 (part, score, detail)。
@@ -169,15 +277,58 @@ class PartClassifier:
         return out
 
 
+def _merge_tol(existing: Optional[Dict[str, float]], holes_tol: float) -> Dict[str, float]:
+    """把"分类器级"的容忍带默认值并进"模板级"的设置（模板级优先）。"""
+    out: Dict[str, float] = {}
+    for k, v in (existing or {}).items():
+        try:
+            out[str(k)] = max(0.0, min(float(v), MAX_DISCRETE_TOL))
+        except (TypeError, ValueError):
+            continue
+    for k in DISCRETE_FEATURES:
+        if k not in out:
+            out[k] = max(0.0, min(float(holes_tol), MAX_DISCRETE_TOL))
+    return out
+
+
 # ── 内置默认模板 ──────────────────────────────────────────────
-# ★ 这些是**由零件几何推算的初值**，必须用 calib/c6_part_features.py
-#   在真实画面上标定后覆盖。不要直接拿来下结论。
+# ★★ 这个函数的定位（先读清，否则会拿它当真相）：
+#   它是**没跑 c6 标定时的兜底**，判据区间是**由零件几何推算的初值**，
+#   ★ **真机上的权威模板在 `config/calibration.yaml` 的 `part_templates`**
+#     （c6 用 25 帧实测采集），运行时 `Qualifier._classifier()` 优先读它。
+#   实测踩过：`holes` 这一项这里和真实画面**相反**（见下），
+#   而"看起来像实测值"很容易让人信错。
 #
 # 推算依据（零件名义尺寸，见 workpiece.yaml 的 parts 与 radii_mm）：
-#   P1_base  底座圆盘   Ø59.3 中心有孔 -> 圆度高、实度高、有孔、不伸长
+#   P1_base  底座圆盘   Ø65 中心有孔 -> 圆度高、实度高、有孔、不伸长
 #   P2_column 立柱      细长杆 ~85x15  -> 伸长率很高、实度高、无孔
-#   P3_wheel 轮盘组件   Ø74.4 有辐条   -> 实度低（辐条间有缺口）、多孔、不伸长
-#   P4_cap   顶盖铭牌   Ø19.1         -> 小圆、无孔
+#   P3_wheel 轮盘组件   Ø75 有 8 辐条 -> 实度低（辐条间有缺口）、不伸长
+#   P4_cap   顶盖铭牌   Ø25           -> 小圆
+#
+# ★ `holes` 的取值依据（真机 9 帧 + 合成图，**两套都实测过**）：
+#     零件       真机实测      合成图实测    本函数取值
+#     轮盘 P3    0             8~9           (4, 16)    <- ★ 见下，刻意服务合成域
+#     立柱 P2    0             0             (0, 1)
+#     顶盖 P4    2~3           0             (1, 3)
+#     底座 P1    0/1/2/3/4     1             (0, 3)     <- 过曝导致跨 5 个值
+#   ★★ 轮盘为什么**保持** `(4.0, 16.0)` 不动（曾经想改成 (0,1)，实测证明是错的）：
+#     真机轮盘确实 `holes=0`，而 `(4.0,16.0)` 认不出它 —— 看着像 bug。
+#     但**本函数是合成域的兜底**（`calibration.synthetic.yaml` 没有
+#     `part_templates`，离线端到端与 test_part_id 全靠它），而合成轮盘
+#     `holes=8~9`。于是：
+#       · 改成 (0,1)  -> 合成底座与合成轮盘在 holes 上**双双满分、并列 1.000**，
+#                        `classify` 按模板顺序选 -> **底座被判成轮盘**
+#                        （实测：test_part_id 与 test_segment 立刻挂）
+#       · 保持 (4,16) -> 两域各自可用
+#     ★ 为什么会并列 1.000：合成底座（圆盘）的 elong=1.000 / solidity=0.994 /
+#       circ=0.897 / area=3244 全部落在轮盘的区间里，`holes` 是**唯一**
+#       能分开它俩的判据 —— 一放开就并列，只能靠列表顺序决胜。
+#     => 结论：**两个域的 holes 差 9 个（结构差异，不是噪声），不可能用同一个
+#        区间**。真机轮盘的 0 由运行时模板 `calibration.yaml`（c6 实测）表达；
+#        本函数保持合成域可用，并在注释里写清真机实测值。
+#     ★ 真机轮盘"靠什么与底座分开"：solidity + circularity + area_mm2 的组合
+#       + **整数容忍带**（见 DISCRETE_FEATURES）—— 而不是单靠 holes。
+#     ★ 想理解这个坑，看 docs/踩坑实录.md §2.30。
 #
 # ★ area_mm2 = 零件的**物理面积**（mm²）= 像素面积 × (mm_per_px)²。
 #   这是区分"同为圆形"的底座与顶盖的**唯一**手段，而且：
@@ -187,26 +338,30 @@ class PartClassifier:
 #     两者比值都是 0.6 左右，互相误判（实测踩过）。
 #
 #   合成图上实测的物理面积（名义值见括号）：
-#     轮盘 4378 mm²（名义 4348）    底座 3244（名义 2762）
+#     轮盘 4379 mm²（名义 4348）    底座 3244（名义 2762）
 #     立柱 2386（名义 1275，胶囊槽留了富余，所以偏大）
 #     顶盖  462（名义  287）
-#   ★ 区间下方给得比上方宽：真实画面的分割会侵蚀边缘，面积偏小的可能更大。
-#   ★ 这些是**初值**，必须用 calib/c6_part_features.py 在真实画面上标定后覆盖。
+#   ★ 真机上实测（分割会侵蚀边缘，所以偏小）：轮盘 2993 / 底座 2970 /
+#     立柱 890 / 顶盖 497 mm² —— 所以 base 的区间下方要给得宽。
 def default_templates() -> List[PartTemplate]:
     return [
         PartTemplate(
             part="P3_wheel", name="轮盘组件",
             ranges={
                 # ★ 实度：辐条之间的空隙让凸包实度低于实心圆。
-                #   注意实测（合成图、4 px/mm）轮盘 solidity=0.996 —— 因为
+                #   注意实测（合成图、4 px/mm）轮盘 solidity=0.995 —— 因为
                 #   外轮廓本身就是个完整圆，孔在内部，凸包与轮廓面积几乎相等。
                 #   所以 **solidity 区分不了轮盘与底座**，别指望它。
                 "solidity": (0.45, 1.0),
-                # ★ 轮盘的**决定性**判据：辐条之间形成 8+ 个内孔（实测 9）。
-                #   底座只有中心 1 个孔，顶盖 0 个。这条最可靠。
+                # ★★ 轮盘的**决定性**判据本来是"辐条之间形成 8+ 个内孔"——
+                #   它在**合成图**上成立（实测 8~9），在**真机上不成立**（实测 0）。
+                #   保持 (4,16) 是为了让本函数在合成域可用，理由见上面 ★★ 长注释。
+                #   ★ 真机轮盘的 holes 真值由 `calibration.yaml` 的
+                #     `part_templates.P3_wheel.ranges.holes` 表达（c6 实测）。
                 "holes": (4.0, 16.0),
-                # ★ circularity 区间要给得宽：实测轮盘 0.90（接近满圆），
-                #   早期写 (0.10, 0.45) 太窄，在 6 px/mm 下把轮盘判成了底座。
+                # ★ circularity 区间要给得宽：实测轮盘 0.90（合成图，接近满圆），
+                #   真机只有 0.40（分割缺边），早期写 (0.10, 0.45) 太窄，
+                #   在 6 px/mm 下把轮盘判成了底座。
                 "circularity": (0.10, 0.98),
                 "elongation": (1.0, 1.45),
                 "area_mm2": (2400.0, 7000.0),
@@ -216,7 +371,9 @@ def default_templates() -> List[PartTemplate]:
             part="P1_base", name="底座圆盘",
             ranges={
                 "solidity": (0.88, 1.0),
-                "holes": (0.0, 1.5),          # 中心一个孔
+                # ★ 中心一个螺纹孔 -> 实测 1；但镜面过曝会把它数成 0~4
+                #   （见 DISCRETE_FEATURES 的说明），所以区间按观测跨度给。
+                "holes": (0.0, 3.0),
                 "circularity": (0.55, 1.05),
                 "elongation": (1.0, 1.35),
                 "area_mm2": (1900.0, 3900.0),
@@ -227,9 +384,10 @@ def default_templates() -> List[PartTemplate]:
             ranges={
                 "elongation": (1.8, 8.0),     # ★ 最强判据：细长
                 "solidity": (0.80, 1.0),
-                "holes": (0.0, 1.5),
+                "holes": (0.0, 1.0),
                 "circularity": (0.05, 0.60),
                 # 真实立柱约 85x15 = 1275 mm²；合成图按 85x16 画，实测约 1400 mm²
+                # 真机实测只有 890 mm²（分割只切得到高光带）
                 "area_mm2": (400.0, 2800.0),
             },
         ),
@@ -238,9 +396,12 @@ def default_templates() -> List[PartTemplate]:
             ranges={
                 "circularity": (0.60, 1.05),
                 "solidity": (0.88, 1.0),
-                "holes": (0.0, 1.5),
+                # ★ `方案总纲 §3.3` 写的是"覆盖中心后内孔数 = 0"，
+                #   那是**装配态**（顶盖盖住轮毂孔）的说法；料盘上的顶盖
+                #   单独躺着，实测 2~3 个孔（刻字/校徽被分割成孤立块）。
+                "holes": (1.0, 3.0),
                 "elongation": (1.0, 1.30),
-                # ★ 与底座同为圆形、同样无内孔，靠物理面积区分（顶盖小一个量级）
+                # ★ 与底座同为圆形，靠物理面积区分（顶盖小一个量级）
                 "area_mm2": (150.0, 1000.0),
             },
         ),
@@ -440,14 +601,6 @@ def _part_of_slot(tpl: PartTemplate, slot_id: str) -> bool:
     """
     sid = slot_id.lower().replace("slot_", "")
     return tpl.part.lower().endswith(sid) or sid in tpl.part.lower()
-    """某个槽的物理面积（像素²），用作该槽 area_frac 的归一化分母。
-
-    ★ 用 shoelace 公式对**槽的多边形**求面积，能正确处理透视与斜置胶囊
-      （立柱槽是 91x28 @-44° 的胶囊，外接框会是它的两倍多，不能用）。
-    """
-    poly = tray_map.slot_polygon_px(slot_id, scale)
-    x = poly[:, 0]; y = poly[:, 1]
-    return float(abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2.0)
 
 
 def tray_area_px(tray_map, scale: float = 1.0) -> float:

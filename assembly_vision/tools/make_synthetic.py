@@ -281,6 +281,15 @@ def _draw_wheel(img, center_mm, s, org, missing_spokes: int = 0,
 
     cv2.circle(img, mm2px(c, s, org), int(round(13.0 * s)), BRASS, -1, cv2.LINE_AA)
     cv2.circle(img, mm2px(c, s, org), int(round(4.5 * s)), (40, 40, 40), -1, cv2.LINE_AA)
+    # ★★ 注意：这里画了中心通孔，于是 8 个辐条空隙**完全被外圈包住**，
+    #   `findContours(RETR_CCOMP)` 把它们（连同这个通孔）数成 `holes=8~9`。
+    #   而**真机轮盘实测 `holes=0`** —— 真机辐条空隙是**豁口**（与背景连通）、
+    #   中心毂也不透孔（见 docs/踩坑实录.md §2.30）。
+    #   => 合成图的 `holes` 天生比真机高，**两个域不可能用同一个区间**。
+    #      所以 `part_id.default_templates()` 里轮盘的 `holes` 取 `(0, 9)`，
+    #      把两个域都覆盖住，而不是为合成图编一个假区间。
+    #   ★ 试过"把中心通孔填成黄铜"来抹平差异：结果是辐条空隙仍从豁口变回
+    #     封闭空腔、`holes` 只从 9 降到 8，白改一场 —— 已回退。
 
 
 # ──────────────────────────────────────────────────────────────

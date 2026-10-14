@@ -64,17 +64,33 @@ class Qualifier:
                     #   而轮盘/底座仍靠 solidity 区分 —— 必须能按零件覆盖。
                     #   实测踩过：这里漏传 weights，配置里写死了也不生效。
                     w = v.get("weights")
+                    # ★★ 逐零件的**离散容忍带**：`holes` 是整数计数，真机上同一个
+                    #   零件会数出 0~4（镜面过曝把掩膜打穿）。容忍带放在
+                    #   weights 里（`holes_tol: 2`），因为它和权重一样是
+                    #   "这个零件的这个特征该信几分"的同类信息。
+                    #   依据与实测数字见 part_id.DISCRETE_FEATURES 与
+                    #   docs/踩坑实录.md §2.30。
+                    tol = {}
+                    if isinstance(w, dict) and "holes_tol" in w:
+                        try:
+                            tol["holes"] = float(w["holes_tol"])
+                        except (TypeError, ValueError):
+                            pass
+                        w = {k: x for k, x in w.items() if k != "holes_tol"}
                     tpls.append(PartTemplate(
                         part=part, name=str(v.get("name", "")),
                         ranges={k: tuple(x) for k, x in v["ranges"].items()},
+                        discrete_tol=tol,
                         weights=({k: float(x) for k, x in w.items()}
                                  if isinstance(w, dict) else {})))
         except Exception:                                    # noqa: BLE001
             tpls = None
         if not tpls:
             tpls = default_templates()
+        # ★ `holes_tol` 是**策略**（允许数错几个），默认 1；知识在模板区间里。
         self._clf = PartClassifier(tpls, min_score=float(
-            self.cfg.get("part_id.min_score", 0.55)))
+            self.cfg.get("part_id.min_score", 0.55)),
+            holes_tol=float(self.cfg.get("part_id.holes_tol", 1.0)))
         return self._clf
 
     def _tray_area_px(self, scale: float) -> float:
@@ -368,8 +384,16 @@ class Qualifier:
                     got, score, _ = clf.classify(feats)
                 sr.features["id_part"] = got or ""
                 sr.features["id_score"] = float(score or 0.0)
-                for k in ("area_mm2", "area_frac", "c_hue_mean", "c_sat_mean",
-                          "c_val_mean", "c_hue_std"):
+                # ★ `length_mm` / `short_side_mm` 必须一起带出来：
+                #   它是**权重最高的形状特征**（2.5 / 1.5，合计 4.0 of 18.1），
+                #   而且是"细长/弯曲件上唯一可信的特征"（见 part_id 的说明）。
+                #   实测踩过：`features_from_blob` 明明算了，但这里白名单没列，
+                #   于是 `SlotResult.features` 里看不到它 —— 诊断工具
+                #   （measure_features_real / measure_holes_*）都少了最关键一项。
+                #   ★ 只加"透出"、不改任何判据。
+                for k in ("area_mm2", "area_frac", "length_mm", "short_side_mm",
+                          "c_hue_mean", "c_sat_mean", "c_val_mean", "c_hue_std",
+                          "c_sat_hi_frac"):
                     if k in feats:
                         sr.features[k] = float(feats[k])
                 if got is not None and part and got != part:

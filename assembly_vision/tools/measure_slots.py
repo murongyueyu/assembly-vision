@@ -67,15 +67,33 @@ def main() -> int:
                    ref_scale=float(cal.get("tray_map.scale", 1.0)))
 
     # 分类器：优先用标定文件里的真实模板
+    # ★ 必须把**逐零件权重**与**离散容忍带 holes_tol** 一起带上，
+    #   否则这个工具用的分类器与运行时（Qualifier._classifier）不是同一个东西，
+    #   实测踩过：漏传 weights 时立柱的判据与运行时不一致。
     stored = cal.get("part_templates") or {}
-    tpls = [PartTemplate(part=p, name=str(v.get("name", "")),
-                         ranges={k: tuple(x) for k, x in v["ranges"].items()})
-            for p, v in stored.items() if isinstance(v, dict) and "ranges" in v]
+    _tpls = []
+    for p, v in stored.items():
+        if not (isinstance(v, dict) and "ranges" in v):
+            continue
+        _w = v.get("weights") if isinstance(v.get("weights"), dict) else {}
+        _tol = {}
+        if "holes_tol" in _w:
+            try:
+                _tol["holes"] = float(_w["holes_tol"])
+            except (TypeError, ValueError):
+                pass
+        _tpls.append(PartTemplate(
+            part=p, name=str(v.get("name", "")),
+            ranges={k: tuple(x) for k, x in v["ranges"].items()},
+            discrete_tol=_tol,
+            weights={k: float(x) for k, x in _w.items() if k != "holes_tol"}))
+    tpls = _tpls
     if not tpls:
         from assemvision.core.part_id import default_templates
         tpls = default_templates()
         print("★ 用内置初值模板（建议先跑 c6 标定）")
-    clf = PartClassifier(tpls, min_score=float(wp.get("part_id.min_score", 0.55)))
+    clf = PartClassifier(tpls, min_score=float(wp.get("part_id.min_score", 0.55)),
+                         holes_tol=float(wp.get("part_id.holes_tol", 1.0)))
 
     print("请把【四类零件都放回料盘的正确槽位】，保持不动。")
     input("准备好按回车开始…")

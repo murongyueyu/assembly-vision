@@ -24,7 +24,8 @@ sys.path.insert(0, ROOT)
 
 from assemvision.config import load_config                        # noqa: E402
 from assemvision.core.checks import Qualifier                     # noqa: E402
-from assemvision.core.part_id import (FEATURE_WEIGHTS, _band_score,   # noqa: E402
+from assemvision.core.part_id import (FEATURE_WEIGHTS,            # noqa: E402
+                                      _band_score, _discrete_band,
                                       default_templates)
 from assemvision.core.roi import TrayMap                          # noqa: E402
 from assemvision.core.segment import Segmenter                    # noqa: E402
@@ -43,12 +44,18 @@ def main() -> int:
     seg = Segmenter(wp)
     mmpp = tray.mm_per_px(1.0)
 
+    # ★ 模板要连**逐零件的 holes_tol** 一起读 —— 否则打印出的"实际判定"列
+    #   还是硬区间，会让人以为修复没生效（我自己先踩了一次）。
     c6 = {}
+    c6_tol = {}
     stored = cal.get("part_templates", None)
     if isinstance(stored, dict):
         for part, v in stored.items():
             if isinstance(v, dict) and "ranges" in v:
                 c6[part] = {k: tuple(x) for k, x in v["ranges"].items()}
+                w = v.get("weights") or {}
+                c6_tol[part] = float(w.get("holes_tol", 0.0) or 0.0)
+    cfg_tol = float(wp.get("part_id.holes_tol", 0.0) or 0.0)
     builtin = {t.part: dict(t.ranges) for t in default_templates()}
 
     print("═" * 88)
@@ -104,11 +111,16 @@ def main() -> int:
             print()
 
     # ── holes 的稳定性：这是最关键的一条 ──────────────────────
-    print("═" * 88)
-    print("  ★ `holes`（权重最高=2.0）在真机帧上的实测值 —— 看它稳不稳")
-    print("═" * 88)
-    print("  %-26s %-10s %-10s %-10s" % ("帧", "面积mm²", "holes", "会被 c6 区间接受?"))
-    print("  " + "-" * 60)
+    print("═" * 96)
+    print("  ★ `holes`（权重 2.0）在真机帧上的实测值 —— 看它稳不稳")
+    print("═" * 96)
+    print("  ★★ 两列要分清（2026-10 更新，见 docs/踩坑实录.md §2.30）：")
+    print("     「c6 硬区间」= 标定值本身（[1.985,2.015] 这种）；")
+    print("     「实际判定」= 运行时**真正用的整数容忍带**（底座单独 ±2）。")
+    print("     后者才是「会不会认不出」的答案 —— 只看硬区间会误判成「坏了」。")
+    print("  %-24s %-9s %-7s %-12s %s"
+          % ("帧", "面积mm²", "holes", "c6 硬区间", "实际判定（整数容忍带）"))
+    print("  " + "-" * 92)
     for name in files + ["now_raw.png", "tray_empty.png"]:
         img = imread_safe(os.path.join(ROOT, "data", "refs", name))
         if img is None:
@@ -118,16 +130,31 @@ def main() -> int:
             a = b.area_px * mmpp * mmpp
             if a < 400 or a > 8000:
                 continue
-            h = (b.features or {}).get("holes")
-            acc = []
+            h = float((b.features or {}).get("holes") or 0.0)
+            hard, real = [], []
             for part, rng in c6.items():
-                if "holes" in rng:
-                    lo, hi = rng["holes"]
-                    acc.append("%s:%s" % (part, "✓" if lo <= float(h or 0) <= hi else "✗"))
-            print("  %-26s %-10.0f %-10s %s" % (name, a, h, " ".join(acc)))
+                if "holes" not in rng:
+                    continue
+                lo, hi = rng["holes"]
+                hard.append("%s:%s" % (part.split("_")[-1],
+                                       "✓" if lo <= h <= hi else "✗"))
+                tol = c6_tol.get(part) or cfg_tol
+                if tol > 0:
+                    dlo, dhi = _discrete_band(lo, hi, tol)
+                    real.append("%s:%s[%g,%g]" % (part.split("_")[-1],
+                                                  "✓" if dlo <= h <= dhi else "✗",
+                                                  dlo, dhi))
+                else:
+                    real.append("%s:%s" % (part.split("_")[-1],
+                                           "✓" if lo <= h <= hi else "✗"))
+            print("  %-24s %-9.0f %-7.0f %-12s %s"
+                  % (name, a, h, " ".join(hard), " ".join(real)))
     print()
-    print("  ★ 判读：若同一个零件在不同帧里 holes 不一致，而 c6 区间宽度≈0，")
-    print("     那么在真机上**只要光照/角度/遮挡稍有变化就会判『认不出』**。")
+    print("  ★ 判读：")
+    print("     · 硬区间列必然出现 ✗ —— 那是**标定值本身的问题**，不是 bug 复现")
+    print("     · 实际判定列若全 ✓ -> 该观测不会再被误拒（这是本次修复的目标）")
+    print("     · 同一个零件在不同帧里 holes 不一致 = 镜面过曝造成的假孔，")
+    print("       所以 `holes` **不能**当硬约束用（详见 §2.30）")
     return 0
 
 
