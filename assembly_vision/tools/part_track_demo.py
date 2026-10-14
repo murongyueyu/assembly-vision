@@ -334,7 +334,10 @@ def main() -> int:
                 cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 60), (28, 28, 28), -1)
                 n_ok = sum(1 for t in tracks if t.visible)
                 n_occ = sum(1 for t in tracks if t.state == "occluded")
+                # ★ 「久不可见」与「已放弃」分开报 —— 两者都会让人想去看一眼，
+                #   但含义不同（前者手移开能恢复，后者已经不管了）。
                 n_lost = sum(1 for t in tracks if t.state == "lost")
+                n_gone = sum(1 for t in tracks if t.state == "gone")
                 hand_txt = ("手: 有（压在 %s）"
                             % ",".join(k.replace("slot_", "")
                                        for k, v in (hand_on or {}).items() if v)
@@ -343,8 +346,8 @@ def main() -> int:
                             else ("手: 有" if (show_hand and hand_box is not None)
                                   else ("手: 无" if show_hand else "手: 关")))
                 cv2.putText(canvas,
-                            "零件 %d（可用 %d / 遮挡 %d / 丢失 %d）  |  %s"
-                            % (len(tracks), n_ok, n_occ, n_lost, hand_txt),
+                            "零件 %d（可用 %d / 遮挡 %d / 久不可见 %d / 放弃 %d）  |  %s"
+                            % (len(tracks), n_ok, n_occ, n_lost, n_gone, hand_txt),
                             (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (230, 230, 230), 1,
                             cv2.LINE_AA)
                 cv2.putText(canvas,

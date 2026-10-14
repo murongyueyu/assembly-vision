@@ -166,6 +166,51 @@ def main() -> int:
           "形状已失真（aspect=5，像细杆）时不该换成 P_ROD —— "
           "实测就发生过「轮盘被遮一半 -> 认出 P_column」")
 
+    print("\n== 完全被遮住算「遮挡」，不算「丢失」（用户明确要求）==")
+    print("   用户原话：被全部遮挡应算遮挡 ——「我没有动底座应该算作遮挡」；")
+    print("   只有长时间什么都看不见，才算可能被拿走。")
+    print("   ★ 实测踩过：原来 12 帧（0.4 秒）就判 lost，手搭上去半秒就报「丢失」。")
+    tr4 = PartTracker({"backend": "kcf", "detect_every_n": 1, "min_area_px": 100,
+                       "max_area_px": 100000, "max_occluded_frames": 20,
+                       "max_lost_frames": 40})
+    tr4.update(frame, [mk_blob(320, 240, 4000.0)], detect=True,
+               classify=lambda f: ("P_KEEP", 0.9))
+    check(len(tr4.tracks) == 1, "应先建立 1 条轨迹")
+    # 喂 10 帧"什么都看不到"（blobs 为空 = 完全被手挡住）
+    seen_states = []
+    for i in range(10):
+        tr4.update(frame, [], detect=True)
+        seen_states.append(tr4.tracks[0].state if tr4.tracks else "PRUNED")
+    print("   连续 %d 帧完全不可见 -> 状态: %s" % (len(seen_states),
+                                                 sorted(set(seen_states))))
+    check(all(s == "occluded" for s in seen_states),
+          "完全被遮住（还不算久）必须报 occluded，不能报 lost（实测 %s）"
+          % sorted(set(seen_states)))
+    check(len(tr4.tracks) == 1, "occluded 状态绝不能把轨迹删掉（删了就找不回来了）")
+    check(tr4.tracks[0].part_id == "P_KEEP", "被完全遮住时身份必须保留")
+
+    # 继续遮到超过 max_occluded(20) -> 升级为 lost，但**仍然不删**
+    for i in range(15):
+        tr4.update(frame, [], detect=True)
+    st = tr4.tracks[0].state if tr4.tracks else "PRUNED"
+    print("   遮到 %d 帧 -> 状态 %s（应 lost，但仍保留）" % (10 + 15, st))
+    check(st == "lost", "超过 max_occluded_frames 才升级为 lost（实测 %s）" % st)
+    check(len(tr4.tracks) == 1, "lost 状态**仍不删** —— 手移开露出来要能恢复")
+
+    # 手移开：零件重新可见 -> 应能恢复
+    tr4.update(frame, [mk_blob(320, 240, 4000.0)], detect=True,
+               classify=lambda f: ("P_KEEP", 0.9))
+    check(tr4.tracks and tr4.tracks[0].state == "detected",
+          "手移开后必须恢复为 detected（实测 %s）"
+          % (tr4.tracks[0].state if tr4.tracks else "PRUNED"))
+    check(tr4.tracks[0].part_id == "P_KEEP", "恢复后身份应仍在")
+
+    # 再遮到超过 max_lost(40) -> gone，此时才允许清掉
+    for i in range(45):
+        tr4.update(frame, [], detect=True)
+    gone_ok = (not tr4.tracks) or tr4.tracks[0].state in ("lost", "gone")
+    check(gone_ok, "超过 max_lost_frames 之后才允许清理")
+
     print("\n== IoU 与 ROI 工具 ==")
     check(abs(_iou((0, 0, 10, 10), (0, 0, 10, 10)) - 1.0) < 1e-6, "同框 IoU=1")
     check(_iou((0, 0, 10, 10), (100, 100, 10, 10)) == 0.0, "不重叠 IoU=0")

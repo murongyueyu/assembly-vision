@@ -173,10 +173,22 @@ class TrackState:
         return self.state in ("detected", "tracked")
 
     def label(self) -> str:
+        """界面上显示的文字。
+
+        ★★ 三档要**分得清**（用户明确要求）：
+            occluded  零件还在原位，只是被挡（含**完全被挡**）
+            lost      久到可疑，但**还没删**，手移开能恢复
+            gone      很久都看不见，已放弃
+          实测踩过：原来"被完全挡住 0.4 秒"就报 lost，与"真被拿走"分不开。
+        """
         if self.state == "occluded":
+            if self.visible_ratio <= 0.02:
+                return "完全被挡 %d帧" % self.lost_frames
             return "遮挡 %d%%" % int(round(100 * (1.0 - self.visible_ratio)))
         if self.state == "lost":
-            return "丢失 %d 帧" % self.lost_frames
+            return "久不可见 %d帧" % self.lost_frames
+        if self.state == "gone":
+            return "已放弃"
         name = self.part_id or "?"
         return "%s %.2f" % (name, self.id_score) if self.id_score else name
 
@@ -195,7 +207,20 @@ class PartTracker:
         c = dict(cfg or {})
         self.backend = str(c.get("backend", "kcf"))
         self.detect_every = int(c.get("detect_every_n", 5))
-        self.max_lost = int(c.get("max_lost_frames", 12))
+        # ── 遮挡 / 丢失 的**时长阈值**（用户明确要求区分这两者）──
+        #   ★★ 语义（用户原话）：
+        #     「被全部遮挡应该算遮挡还是丢失。但很显然我没有动底座应该算作遮挡。
+        #       只有当遮挡物全部移开之后或者手，如果屏幕里面没有任何该零件的一小部分
+        #       才应该算作丢失。」
+        #     -> **完全被遮住仍算 `occluded`**；`lost` 表示"可能真被拿走了"，
+        #        必须**持续很久看不见**才成立。
+        #   ★ 实测踩过：原来只用 `max_lost_frames=12`（约 0.4 秒）就判 lost，
+        #     于是**手搭在零件上超过半秒就报"丢失"，哪怕零件一动没动**。
+        #   两个阈值分工：
+        #     max_occluded_frames  追踪失败但仍认为"在，只是被挡" -> 150 帧 ≈ 5 秒
+        #     max_lost_frames      再久才升级为"可能被拿走"        -> 300 帧 ≈ 10 秒
+        self.max_occluded = int(c.get("max_occluded_frames", 150))
+        self.max_lost = int(c.get("max_lost_frames", 300))
         self.min_area_px = float(c.get("min_area_px", 400))
         self.max_area_px = float(c.get("max_area_px", 8000))
         self.iou_match = float(c.get("iou_match", 0.15))
@@ -381,12 +406,27 @@ class PartTracker:
                 #     **不要**在 `ok=True` 时清零：追踪器在完全遮挡时也可能报 ok，
                 #     那样计数永远涨不上去，`state` 就降不下来。
                 t.visible_ratio = 0.0
-                t.state = "occluded" if t.lost_frames <= self.max_lost else "lost"
+                # ★★ 「完全被遮住」应当算 **occluded**，不是 lost（用户明确要求）：
+                #   零件还在原位、只是被挡；只有**长时间**什么都看不见，
+                #   才值得怀疑"是不是真被拿走了"。
+                #   实测踩过：原来 12 帧（0.4 秒）就判 lost，手搭上去半秒就报"丢失"。
+                if t.lost_frames <= self.max_occluded:
+                    t.state = "occluded"
+                elif t.lost_frames <= self.max_lost:
+                    t.state = "lost"          # 久到可疑，但**先不删**（还能恢复）
+                else:
+                    t.state = "gone"          # 超过 max_lost -> 允许 _prune 清掉
 
     def _prune(self) -> None:
+        """只在 `gone`（远超过 `max_lost`）时才真删轨迹。
+
+        ★ 为什么不删 `lost`：`lost` 只是"久到可疑"，零件可能还在原位被挡着；
+          删了它，`_last_pose` 缓存与界面上的"它应该在哪"就都没了 ——
+          而手一移开、零件露出来时**本该能立刻恢复**（`_adopt` 会重新关联上）。
+        """
         keep = []
         for t in self.tracks:
-            if t.state == "lost" and t.lost_frames > self.max_lost:
+            if t.state == "gone":
                 self._trackers.pop(id(t), None)
                 self._kf.pop(id(t), None)
                 continue
@@ -454,8 +494,9 @@ class PartTracker:
         """
         COLOR = {"detected": (80, 230, 80),      # 绿：正常
                  "tracked": (80, 220, 240),      # 黄：跟得住但没重判
-                 "occluded": (0, 165, 255),      # 橙：被遮（身份冻结）
-                 "lost": (90, 90, 220)}          # 红：丢了
+                 "occluded": (0, 165, 255),      # 橙：被遮（含**完全被遮**，身份冻结）
+                 "lost": (60, 120, 255),         # 橙红：久不可见，但还留着（手移开能恢复）
+                 "gone": (90, 90, 220)}          # 红：已放弃
         for t in self.tracks:
             col = COLOR.get(t.state, (200, 200, 200))
             if t.contour is not None and len(t.contour) >= 3:
