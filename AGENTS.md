@@ -605,12 +605,12 @@ cv2.VideoCapture(0, cv2.CAP_DSHOW) -> isOpened() = True
 | 辐条只判"少"不判"多" | `if spk.count < spk.required` | `spk.ok` 用 `==`，需判多时要用 ok |
 | `wheel` 谓词门槛是 4 不是 8 | `out["wheel"] = spk.count >= 4` | 换到"辐条单独成步"的流程时要改成 8 |
 | 齐套性不查外圈/轮毂 | `ring_coverage`/`hub_coverage` 算了但没比阈值 | 缺件可能漏判 |
-| c4/c5 基线没人读 | `slots.*` 特征、`assembly.ring_coverage` 运行时不读取 | 合格性目前只判覆盖率，不判完整性 |
+| c4/c5 基线没人读 | `slots.*` 特征运行时不读取 → 合格性只判覆盖率，不判完整性 | `assembly.spoke_peak_count` **已接**（P0-1）；`ring/hub/cap_coverage` **刻意不接**（连缺顶盖都还有 0.874，没区分度，见 6.5） |
 
 ### 2.18 ★★ 数辐条：**不能把半径带切成几份投票**（真机"装好了却判缺辐条"）
 
 **症状**（真机 `app.py --windowed`）：轮盘明明完整装好、8 根辐条清晰可见、
-界面显示"装配流程全部完成 4/4"，但 -->
+界面显示"装配流程全部完成 4/4"，但实际报的是：
 
 ```
 辐条峰数 0/8        齐套性: NG, 缺失 辐条 5/8
@@ -690,7 +690,9 @@ select=uniform(新)  -> count=8  抖动=6.2°  峰=[6.2, 57.2, 99, 135, 177, 218
 视 觉/                          ← 工作区根
 ├── AGENTS.md                   ← 本文件
 ├── VERSION.md                  ← 版本与变更记录
-├── docs/对话存档_*.md          ← 历史决策与实测数据
+├── docs/对话存档_2026_真机联调.md  ← 需求梳理 → 首次真机实测
+├── docs/对话存档_2026_P0清理.md    ← ★ 本轮：四处真 bug（含可复用判据）
+├── docs/标定操作手册_c1_c2.md      ← c1/c2 逐步操作手册
 ├── 方案总纲_v2(2).docx          ← 初版方案（6 类零件口径，已作废，留档）
 ├── 方案总纲_v3_4类零件.docx      ← ★ 当前方案基线（4 类零件）
 └── assembly_vision/            ← 代码
@@ -737,8 +739,11 @@ assembly_vision/
 │   ├── live_preview.py         早期预览（仍可用；新用法走 preview.py）
 │   ├── ui_preview.py           离屏渲染界面预览图（不需要显示器）
 │   └── record.py               录真实素材
-├── tests/                      _common / test_features / test_segment /
-│                               test_polar / test_fsm / test_part_id
+├── tests/                      _common / make_synthetic / run_all
+│                               test_features / test_segment / test_polar /
+│                               test_fsm / test_part_id / test_tray_pose /
+│                               test_work_roi / test_assembly / test_ui_renderer
+│                               ★ 共 9 个模块，登记在 run_all.py 的 MODULES
 └── data/                       synthetic / synthetic_seq / ui_preview / probe / refs / videos
 ```
 
@@ -755,7 +760,7 @@ cd assembly_vision
 # ── 离线（不需要相机）────────────────────────────
 python tools/make_synthetic.py --out data/synthetic --seq data/synthetic_seq \
         --calib config/calibration.synthetic.yaml
-python tests/run_all.py                       # 5 个模块，应全绿
+python tests/run_all.py                       # 9 个模块，应全绿
 python app.py --source images --path data/synthetic_seq \
         --calibration config/calibration.synthetic.yaml --no-ui --max-frames 200
 python tools/ui_preview.py --renderer qt --out data/ui_preview
@@ -769,9 +774,10 @@ python tools/record.py --seconds 60 --out data/videos/real1.mp4
 python calib/c1_measure_fov.py --distance-mm 360      # ★ 已跑完：GSD 0.868
 python calib/c2_stereo.py --cols 9 --rows 6 --square 19   # ★ 已跑完：B=126mm
 python calib/c3_tray_homography.py --manual   # ★ 已跑完（自动识别角点，顺序无关）
-python calib/c4_slot_baseline.py --frames 20  # ⬜ 待做
-python calib/c5_assembly_baseline.py --frames 20   # ⬜ 待做
-python calib/c6_part_features.py              # ⬜ 待做：零件特征标定
+python calib/c4_slot_baseline.py --frames 20  # ★ 已跑完：四槽各 20/20
+python calib/c5_assembly_baseline.py --frames 20   # ★ 已跑完：辐条众数 8
+python calib/c6_part_features.py              # ★ 已跑完：4 类零件模板
+python tools/preview.py --guide assembly      # ★ 统一预览（ROI+分割+过曝报警）
 python app.py --windowed                      # 正式跑（窗口模式方便调试）
 ```
 
@@ -791,7 +797,9 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 
 ## 5. 当前状态与待办
 
-见 `VERSION.md` 的「待办」一节。要点：
+> ★ **单一事实来源**：优先级看 **§6.5**，交接结论看 **§7**，
+> 本节只列**已经做到的事实**（带实测数字）。
+> `VERSION.md` 的「待办」一节是摘要，以本文件为准。
 
 - ✅ 代码离线全绿（**9 个测试模块**）；4 类零件/4 工序口径已对齐
 - ✅ **相机参数已定**：`1280×480`（单眼 640×480）、后端 dshow、31 fps；
@@ -809,7 +817,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 - ✅ **料盘位姿自动补偿已实现**（见 2.8）：零件星座（≥2 件，残差 0.2mm）
   + **料盘轮廓兜底**（零件全被拿走时也能定位，`pose_src=outline`）
   + **角度闸门**（`max_theta_deg=25`，挡住"标称过期时硬凑出 48° 荒谬旋转"）
-- ✅ **工位全局 ROI 已实现**（见 2.11）：木桌不再被误判成黄铜
+- ✅ **工位全局 ROI 已实现**（见 2.12）：木桌不再被误判成黄铜
 - ✅ **c4 完成**（四槽各 **20/20** 样本、被拒 0 帧）：
   `wheel 0.639±0.004 / column 0.132±0.004 / cap 0.584±0.008 / base 0.520±0.004`
 - ✅ **槽位标称中心已实测确认**（`tools/measure_slots.py`）：
@@ -835,7 +843,13 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
   画面上有 ROI / 绿圈提示该放哪 / 黄铜与金属掩膜叠加 / 覆盖率与识别结果 /
   **过曝报警**。`--no-preview` 可关掉。
 - ⬜ 真实画面上四类零件的**色域特征**是否参与识别**未验证**
-- ⬜ c4/c5 产出的基线**尚未接入** `checks.py`，合格性/齐套性目前只判覆盖率
+- ✅ **c5 基线已接入 `checks.py`**（P0-1，见 §6.5）：接的是
+  `assembly.spoke_peak_count`（辐条数 vs 基线，容差 2）。
+  ★ **另外三个（`ring_coverage` / `hub_coverage` / `cap_coverage`）是刻意不接的** ——
+  实测「连缺顶盖都还有 cap 0.874」，**几乎没有区分度**，接了等于没判。
+  详见 §6.5 的 P0-1。
+- ⬜ c4 产出的 `slots.*` 特征区间**运行时不读取** —— 合格性只判覆盖率，不判完整性
+  （仍然是真的缺口，但优先级低：实测四槽覆盖率区分度够用）
 - ⬜ 未在树莓派上跑过任何一次；树莓派上 SGBM 耗时需实测
 
 ---
@@ -979,3 +993,57 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 - **中文字符串里不要嵌套半角引号**（`"…"某槽…""`），Python 会报 `SyntaxError`。
   用中文引号 `「」` 或 `『』`。本项目已因这个踩过多次。
 - 提交前更新 `VERSION.md` 的变更记录。
+---
+
+
+## 7. 交接状态（每次收尾更新这一节）
+
+> 这一节回答"**现在能不能用、下一步该干什么**"，是接手者的第一落点。
+> 细节在 §2（踩过的坑）、§6.5（优先级）；这里只放**结论**。
+
+### 7.1 现在能用到什么程度
+
+| 环节 | 状态 | 依据 |
+|---|---|---|
+| 离线回归 | ✅ **9/9 全绿** | `python tests/run_all.py` |
+| 端到端（合成序列） | ✅ 4 步全过 | `app.py --no-ui --max-frames 120` |
+| **真机窗口模式** | ✅ **能跑** | `app.py --windowed` 实跑 90 帧、退出码 0（原来必崩，见 §6.5「另修 2」） |
+| 标定链 c1~c6 | ✅ **全部完成** | 见 §5 |
+| **零件识别** | ✅ **用户认可** | 「这个色域分割零件我还是比较满意」 |
+| 4 工序流程判断 | 🔶 逻辑齐、真机未逐步走完 | 见 §7.3 |
+| 树莓派 | ⬜ **一次都没跑过** | 见 §7.3 |
+
+### 7.2 这轮（rev.3e/3f）修掉的真 bug
+
+都是**真机或空跑暴露出来的**，不是重构：
+
+1. **`hub_coverage` 恒为 `nan`** —— c5 里 `rings.append(a.hub_coverage)` 复制粘贴漏改，
+   三个覆盖率**全部错位**。（教训：看到 nan 先数列表里有几个元素）
+2. **装配位 `pose` 不一致** —— `check_assembly` 用标称坐标、`work_roi_mask` 跟位姿，
+   同一装配位两处算出不同的圈（料盘挪 8.8mm 时差 10px）。
+3. **`app.py --windowed` 一启动连崩两次** —— `actions` 参数 + `frames_drawn` 未初始化。
+   ★ 根因是**那条路径从没被任何测试覆盖**。
+4. **"装好了却判缺辐条"** —— `count_spokes` 把半径带切 3 份投票取小，
+   球头只落在最内侧 1.9px 的子带 → 数成 5 根。改为按**角度均匀度**挑带（§2.18）。
+
+### 7.3 下一步（按建议顺序，都可独立进行）
+
+| 顺序 | 事项 | 谁做 | 为什么是这个顺序 |
+|---|---|---|---|
+| 1 | **真机重跑 `app.py --windowed`**，看轮盘装好后辐条是否稳定 **8/8**、齐套性是否 **OK** | 你 | 刚修完辐条判据，**必须真机确认**；这是唯一挡着"能用"的一步 |
+| 2 | **真机摆件走完 4 工序**，记录每步的判定 | 你 | 流程判断只在合成序列上验过 |
+| 3 | **定 P0-2 的方案**（深度基线 0.92mm 是修还是废） | 你定，我做 | 见 §6.5 P0-2；**不影响前两步** |
+| 4 | 树莓派首次部署（**SGBM 耗时必须实测**） | 你 | 见 §6.5 P0-5 |
+| 5 | 再考虑 P1「开放位置」 | 一起 | 见 §6.5 P1-1，**已实测数据齐备，随时可开工** |
+
+### 7.4 收尾时要做的事（约定）
+
+1. 更新本文件 §7 与 §5
+2. 更新 `VERSION.md`：版本表 + 新增 `rev.X` 段 + **重写「待办」一节**
+3. 把本轮对话补进 `docs/对话存档_*.md`（**追加，不要覆盖**）
+4. 跑 `python tests/run_all.py`（9 个模块）+ 端到端 + **`--windowed` 实跑**
+5. `git commit`（提交信息写清"为什么"，不只是"改了什么"）
+
+> ★ 历史决策的完整过程在 `docs/`：
+> `对话存档_2026_真机联调.md`（需求梳理 → 首次真机实测）、
+> `对话存档_2026_P0清理.md`（**本轮**：四处真 bug 与可复用判据）。
