@@ -290,6 +290,15 @@ class PartTracker:
         self.occluded_ratio = float(c.get("occluded_ratio", 0.55))
         self.full_ratio = float(c.get("full_ratio", 0.80))
         self.area_rate = float(c.get("area_ref_rate", 0.15))
+        # ★★ `id_margin`：换标签的分数余量。**2026-10 修**：
+        #   它原来只是 `TrackState` 的 dataclass 默认值（`:180`），
+        #   `PartTracker.__init__` **从不读配置** —— 也就是说
+        #   `workpiece.yaml` 里写的 `tracking.id_margin: 0.12` **完全不生效**。
+        #   而 `workpiece.yaml` 与 `tests/test_part_id_tol.py` 都**拿它当依据**
+        #   （「底座 0.65 vs 轮盘 0.70 贴住，id_margin=0.12 就不安全了」）——
+        #   配置与代码脱节，调配置没用。
+        #   现在读进来并**下发到每条轨迹**（见 `_detect` 建新轨迹处）。
+        self.id_margin = float(c.get("id_margin", 0.12))
         # ★ KCF 的耗时是**每目标固定成本**（实测 5.5ms/目标，4 目标 35ms/帧），
         #   与整帧尺寸无关。曾试过「裁剪出小图再跑 KCF」，实测**只快 14% 但
         #   静止漂移从 2.76px 崩到 131px**（裁剪窗滑动会逼着反复 init，
@@ -408,6 +417,9 @@ class PartTracker:
                            centroid=(float(b.centroid[0]), float(b.centroid[1])),
                            last_bbox=bb,
                            last_centroid=(float(b.centroid[0]), float(b.centroid[1])),
+                           # ★ 把配置里的 `tracking.id_margin` 下发到轨迹上
+                           #   （不传的话会用 dataclass 默认值，配置就白写了）
+                           id_margin=self.id_margin,
                            state="detected")
             # ★★ 新建轨迹就是"第一次真的看到它" —— 必须置 `ever_seen`。
             #   实测踩过：只在这里漏了，于是 `ever_seen` 恒为 False，

@@ -413,9 +413,16 @@ def main() -> int:
                                 b = min(cand, key=lambda z: float(np.hypot(
                                     z.centroid[0] - t.centroid[0],
                                     z.centroid[1] - t.centroid[1])))
-                                # 太远就别要（追踪框漂了）
+                                # ★★ 太远就别要（追踪框漂了）。
+                                #   这个闸门原来**硬编码 40 px**，与
+                                #   `tracking.dist_match_px` 重复却没读配置 ——
+                                #   违反「阈值不要硬编码在算法里，一律走配置」。
+                                #   ★ 2026-10 换 D435 后 GSD 从 0.8623 变 0.7287 mm/px，
+                                #     40 px 的物理含义从 34.5mm 缩到 29.1mm；
+                                #     现在统一读 `tracker.dist_match`（配置里已定 60 px = 43.7mm）。
+                                _gate = float(getattr(tracker, "dist_match", 40.0))
                                 if float(np.hypot(b.centroid[0] - t.centroid[0],
-                                                  b.centroid[1] - t.centroid[1])) > 40:
+                                                  b.centroid[1] - t.centroid[1])) > _gate:
                                     continue
                                 t.contour = b.contour
                                 t.area_px = float(b.area_px)
