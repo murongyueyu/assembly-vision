@@ -69,7 +69,7 @@ class SegResult:
     #   于是被 brass 的 `h_max=45` 整条挡掉 —— 辐条一个都数不出来。
     #   实测同一帧：brass 掩膜在 28mm 处只有 8 峰但角度抖 33°（凑出来的），
     #   而 metal 掩膜在 30~35mm 带 **8 峰、角度抖仅 5.9°**（真的）。
-    #   见 AGENTS.md 2.13。
+    #   见 docs/踩坑实录.md §2.13。
     metal_mask: Optional[np.ndarray] = None
     glove_mask: Optional[np.ndarray] = None
     brass_blobs: List[Blob] = field(default_factory=list)

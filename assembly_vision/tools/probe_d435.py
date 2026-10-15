@@ -38,7 +38,7 @@ from assemvision.imgio import imwrite_safe                          # noqa: E402
 from assemvision.sources.d435 import (RealSenseSource, import_rs,    # noqa: E402
                                       sdk_available, usb_is3)
 
-# 本机实测过的模式（★ 不是猜的：见 VERSION.md 的 D435 基线）
+# 本机实测过的模式（★ 不是猜的：见 docs/现状与交接.md 的 D435 基线）
 DEFAULT_MODES: List[Tuple[int, int]] = [(640, 480), (848, 480), (1280, 720)]
 DEFAULT_FPS: List[int] = [30]
 

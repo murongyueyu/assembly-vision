@@ -34,7 +34,7 @@ FEATS = ("area_px", "circularity", "solidity", "aspect", "elongation",
          "straightness", "end_width_ratio", "holes", "rect_w", "rect_h",
          # ★ 物理量：length_mm / short_side_mm 是**对细长弯曲件唯一可信的特征**
          #   （由轮廓两端点决定，不受"只切到高光带"影响）。
-         #   见 AGENTS.md 2.10。c6 生成模板时也用了它们，c4 采集必须一并收，
+         #   见 docs/踩坑实录.md §2.10。c6 生成模板时也用了它们，c4 采集必须一并收，
          #   否则基线和模板对不上，排查时看不出零件到底长什么样。
          "area_mm2", "length_mm", "short_side_mm")
 

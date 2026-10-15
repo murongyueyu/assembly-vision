@@ -2,7 +2,7 @@
 r"""Verify the glove fix: the hand in the user's screenshot must now be detected.
 
 ASCII-only on every line containing quotes, because this session has hit the
-"Chinese string + ASCII quote" SyntaxError six times (see AGENTS.md section 6).
+"Chinese string + ASCII quote" SyntaxError six times (see AGENTS.md §3（改代码时的约定）).
 """
 import os
 import sys

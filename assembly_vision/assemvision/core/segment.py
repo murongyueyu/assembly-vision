@@ -27,7 +27,7 @@ class Segmenter:
         seg = wp_cfg.get("segment", {}) or {}
         self.brass = dict(seg.get("brass", {}) or {})
         self.glove = dict(seg.get("glove", {}) or {})
-        # ★ 金属掩膜（不靠色相）：见 `_metal_mask()` 的说明与 AGENTS.md 2.13
+        # ★ 金属掩膜（不靠色相）：见 `_metal_mask()` 的说明与 docs/踩坑实录.md §2.13
         self.metal = dict(seg.get("metal", {}) or {})
         self.background = str(seg.get("background", "black"))
 
@@ -39,7 +39,7 @@ class Segmenter:
 
         ★ work_roi（工位全局 ROI）：
           传入一个与 bgr 同尺寸的 0/255 掩膜时，**黄铜只在掩膜内检测**。
-          这是对付"桌面/墙面被当成黄铜"的正解（见 AGENTS.md 2.2）：
+          这是对付"桌面/墙面被当成黄铜"的正解（见 docs/踩坑实录.md §2.2）：
           实测踩过 —— 木桌的 H/S 与黄铜重叠，画面顶部的木桌整块被涂成黄铜，
           产生 13269mm² 的假连通域（真零件最大才 3281mm²）。
 
@@ -64,7 +64,7 @@ class Segmenter:
         res = SegResult(ts=ts, scale=scale, brass_mask=brass_mask, glove_mask=glove_mask)
 
         # ── 金属掩膜：不靠色相，只判"亮 + 不是绿垫" ──────────────
-        # ★ 为什么单独做一条通路（c5 实测踩过，见 AGENTS.md 2.13）：
+        # ★ 为什么单独做一条通路（c5 实测踩过，见 docs/踩坑实录.md §2.13）：
         #   装配体上的球头只有 Ø5mm，在 0.86mm/px 下只有 6 像素宽。
         #   边缘与绿垫抗锯齿混色后色相从黄铜的 H=30 跳到 **H=59**
         #   （被绿垫染成淡绿），于是被 brass 的 `h_max=45` 整条挡掉。

@@ -41,7 +41,7 @@ def sweep_band(mask, center_px, mmpp: float, required: int = 8,
                r_lo_mm: float = 8.0, r_hi_mm: float = 40.0) -> dict:
     """扫优数辐条的环带：找一个「峰数 == required **且角度均匀** 且对比度最大」的半径区间。
 
-    ★★ 为什么必须判"角度均匀"（实测踩过，见 AGENTS.md 2.13）：
+    ★★ 为什么必须判"角度均匀"（实测踩过，见 docs/踩坑实录.md §2.13）：
       只看"峰数 == 8"会选出**凑出来的 8 个峰**。实测：
         brass 掩膜 28mm 带 -> 8 峰，但间隔 38/37/43/91/23/10/22/96°（抖动 33°）
         metal 掩膜 30~35mm -> 8 峰，间隔 52/41/36/42/43/43/48/56°（抖动 5.9°）
@@ -254,7 +254,7 @@ def main() -> int:
         # ★ 用工位 ROI 分割（黄铜只在"料盘 + 装配位"外扩范围内检测）。
         #   实测踩过：木桌的 HSV 与黄铜重叠，不限制范围时整块木桌被判成黄铜，
         #   产生 13269mm² 的假连通域（真零件最大 3281mm²），
-        #   会把"轮盘槽里有没有前景"这条判断带偏。见 AGENTS.md 2.12。
+        #   会把"轮盘槽里有没有前景"这条判断带偏。见 docs/踩坑实录.md §2.12。
         res, _p, _s, _i = q.segment_with_roi(seg, frame, scale=f.scale)
         blob = q._blob_in(res, tray.slot_polygon_px("slot_wheel", f.scale))
         if blob is not None:
@@ -421,7 +421,7 @@ def main() -> int:
                         if h < 5.0:
                             print("   ★★ 高度 <5mm 可疑：轮盘顶面物理上应在台面上方 30~40mm。")
                             print("      说明拟合平面贴住了被测面 -> 立柱高度判据**永远不触发**。")
-                            print("      见 AGENTS.md P0-2；这条基线暂不可当有效判据用。")
+                            print("      见 docs/现状与交接.md 的 P0-2；这条基线暂不可当有效判据用。")
                     if h is not None:
                         print(" 轮盘区域高度基线 = %.1f mm" % h)
                         # ★ 两处都写：checks.py 读的是 assembly.baseline.wheel_height_mm，

@@ -171,7 +171,7 @@ def main() -> int:
               % (max(e_t), float(np.mean(e_t))))
     print("  ③ 至少 2 件才能定旋转；1 件只能定平移；0 件 ok=False（绝不瞎猜）")
     print("  ④ 转角 > %.0f° 会被闸门挡住 —— 这是**有意的**保护" % gate)
-    print("     （标称过期时会硬凑出 48° 荒谬旋转，且残差还很小，见 AGENTS.md §2.8）")
+    print("     （标称过期时会硬凑出 48° 荒谬旋转，且残差还很小，见 docs/踩坑实录.md §2.8）")
     return 0
 
 
