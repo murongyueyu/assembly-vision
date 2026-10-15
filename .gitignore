@@ -28,7 +28,15 @@ stereo_spliced.jpg
 out.mp4
 
 # ── 编辑器 / 系统 ────────────────────────────────────────────
-.vscode/
+# ★ 这里**不能写 `.vscode/`**（整目录忽略）—— git 的规则是"父目录被忽略时，
+#   里面的 `!` 例外一律不生效"，那样 launch.json 就永远加不进来（实测踩过）。
+#   ⇒ 改成"忽略目录里的内容、单独放行 launch.json"。
+#   ★ launch.json 必须入库：它是"怎么跑这些工具"的唯一说明书，
+#     里面钉了必须用的解释器（yolov11 环境）、integratedTerminal（OpenCV 窗口必须）
+#     与 PYTHONIOENCODING=utf-8（防 GBK 假崩，实录 2.41）。
+#     少了它，接手的人会用自己的解释器跑，然后遇到一堆"跑不起来"。
+.vscode/*
+!.vscode/launch.json
 .idea/
 *.swp
 *~

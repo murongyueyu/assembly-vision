@@ -1,0 +1,157 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "★ 实况调试台（实时画面 + 键盘调相机 + 掩膜叠加）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\ai_测试工具\\live_site_debug.py",
+      "cwd": "${workspaceFolder}\\ai_测试工具",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "① 抓工位帧（相机 → 原图 + 掩膜叠加图）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\ai_测试工具\\capture_site_frame.py",
+      "args": [
+        "--tag",
+        "after_lock"
+      ],
+      "cwd": "${workspaceFolder}\\ai_测试工具",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "② 内参 + 相机控件（★ 最高优先：把控件固化进 camera.yaml）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\ai_测试工具\\d435_intrinsics_check.py",
+      "args": [
+        "--distance-mm",
+        "289",
+        "--modes",
+        "640x480,1280x720"
+      ],
+      "cwd": "${workspaceFolder}\\ai_测试工具",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "③ 分割色域对账（黄铜 / 绿幕 / metal 余量）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\ai_测试工具\\seg_gamut_report.py",
+      "cwd": "${workspaceFolder}\\ai_测试工具",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "④ D435 逐模式帧率 / 过曝 / 存样张",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\assembly_vision\\tools\\probe_d435.py",
+      "args": [
+        "--seconds",
+        "3",
+        "--distance-mm",
+        "289",
+        "--save-dir",
+        "${workspaceFolder}\\ai_测试工具\\工位帧\\样张"
+      ],
+      "cwd": "${workspaceFolder}\\assembly_vision",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "⑤ 实时预览（ROI + 分割 + 覆盖率 + 识别 + 过曝报警）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\assembly_vision\\tools\\preview.py",
+      "cwd": "${workspaceFolder}\\assembly_vision",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "⑥ 零件检测实时演示（轮廓 + 追踪 + 遮挡）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\assembly_vision\\tools\\part_track_demo.py",
+      "cwd": "${workspaceFolder}\\assembly_vision",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "⑦ 离线回归（13 个模块，不需要相机）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\assembly_vision\\tests\\run_all.py",
+      "cwd": "${workspaceFolder}\\assembly_vision",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "⑧ ★ 开流诊断（列全部 profile + 逐个试开）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\ai_测试工具\\d435_stream_diag.py",
+      "args": [
+        "--distance-mm",
+        "440"
+      ],
+      "cwd": "${workspaceFolder}\\ai_测试工具",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    {
+      "name": "⑨ ★ 白平衡/曝光扫描（找最佳色域）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\ai_测试工具\\sweep_camera_controls.py",
+      "cwd": "${workspaceFolder}\\ai_测试工具",
+      "python": "D:\\miniconda\\envs\\yolov11\\python.exe",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  ]
+}

@@ -13,9 +13,9 @@
 |---|---|
 | 代码版本 | `assembly_vision 0.1.0`（`assemvision/__init__.py`） |
 | 文档修订 | **rev.3m** — 文档结构重排（规则 / 事实 / 坑 / 命令 / 版本 分离） |
-| 功能修订 | **rev.3n** — ★★ 尺寸闸门 + `work_roi_mode`（木桌假阳性，P1-1 实现要点 1~3） |
+| 功能修订 | **rev.3o** — ★★ **D435 工位口落地**：相机控件固化 + 分割/追踪阈值按工位重定 |
 | 方案基线 | `方案总纲_v3_4类零件.docx`（取代 `_v2(2)`） |
-| 代码状态 | ✅ 离线回归 **13/13**；✅ D435 已接进工程（`source: d435`）；✅ 木桌假阳性已离线对账；<br>⬜ 标定链 c3~c6 **仍是 HBV 口径，必须重跑**；⬜ 树莓派未部署 |
+| 代码状态 | ✅ 离线回归 **13/13**；✅ D435 工位**已标定出可用的相机控件与阈值**（识别准确）；<br>⬜ 标定链 **c3~c6 仍未重跑**（还是 HBV 口径）；⬜ 树莓派未部署 |
 
 ---
 
@@ -23,9 +23,10 @@
 
 | rev | 一句话 | 详见 |
 |---|---|---|
-| **rev.3n** | ★★ **尺寸闸门落地**：`segment.max_diam_mm: 120`（等效直径超限的连通域整块剔除）+ `work_roi_mode: work\|full` + `Segmenter.segment()` 收 `mm_per_px` + `metal_mask` 用已过滤 brass 连通域外扩 6mm 裁一刀；新增 `tests/test_size_gate.py` 与 `tools/verify_size_gate.py`（真机帧对账：超大块 **200.8~204.6mm** vs 文档的 201mm，真零件一个没掉）。★ 两条顺序铁律与三个判据坑见实录 **2.42** | [详录](docs/版本历史_详录.md) |
-| **rev.3m** | ★ **文档重排**：`AGENTS.md` 只留规则（≤20KB）；事实→`现状与交接.md`；命令→`架构与命令.md`；长版本段→`版本历史_详录.md`；坑索引并入 `踩坑实录.md` §2.1 | [详录](docs/版本历史_详录.md) |
-| **rev.3l** | ★★ **D435 接进工程**（`sources/d435.py` + factory + camera.yaml；真机 640x480@30 = 30.0fps）；纠正 640×480 的 GSD（0.795 是外推，**实测 0.596**）；修掉 GBK 控制台下回归"假崩" | [详录](docs/版本历史_详录.md) |
+| **rev.3o** | ★★ **D435 工位口落地**（本轮）：① `camera.yaml` 的 `realsense.controls` 从 `{}` 填成 **13 项实测值**（关 AE+AWB、`exposure: 126`、`white_balance: 6300`、`contrast: 50`、保留手调的 `gamma: 300`/`sharpness: 100`）—— 为什么：这些值原来只活在驱动里，工程不复现、`--reset` 一次就冲掉，而且**AE/AWB 开着时两次抓帧色域差一个数量级**；② `segment.brass.v_min` 80→**90**（治"顶盖/立柱边缘闪烁"）+ `s_min` 50→**30**；③ `segment.max_diam_mm` 120→**100**（D435 上木桌假黄铜只有 Ø37mm、比零件还小，尺寸闸门已挡不住它，改成"绝对尺寸上限"）；④ `tracking` 三闸门按新 GSD **0.7287 mm/px** 重算（`max_area_px` 8000→**10000**、`dist_match_px` 40→**60**）；⑤ 修两处"配置与代码脱节"：`tracking.id_margin` **原来完全不生效**、`part_track_demo.py` 里硬编码的 40px 距离闸；⑥ 新增 **`ai_测试工具/`**（AI 工具区，10 个脚本）+ VSCode 10 条运行配置 | [详录](docs/版本历史_详录.md) · [工位实测记录](ai_测试工具/工位帧/工位实测记录.md) |
+| rev.3n | ★★ **尺寸闸门落地**：`segment.max_diam_mm: 120`（等效直径超限的连通块整块剔除）+ `work_roi_mode: work\|full` + `Segmenter.segment()` 收 `mm_per_px` + `metal_mask` 用已过滤 brass 连通域裁一刀；新增 `tests/test_size_gate.py` 与 `tools/verify_size_gate.py`。★ 两条顺序铁律与三个判据坑见实录 **2.42** | [详录](docs/版本历史_详录.md) |
+| rev.3m | ★ **文档重排**：`AGENTS.md` 只留规则（≤20KB）；事实→`现状与交接.md`；命令→`架构与命令.md`；长版本段→`版本历史_详录.md`；坑索引并入 `踩坑实录.md` §2.1 | [详录](docs/版本历史_详录.md) |
+| rev.3l | ★★ **D435 接进工程**（`sources/d435.py` + factory + camera.yaml；真机 640x480@30 = 30.0fps）；纠正 640×480 的 GSD（0.795 是外推，**实测 0.596**）；修掉 GBK 控制台下回归"假崩" | [详录](docs/版本历史_详录.md) |
 | rev.3k | 纠正「D435 只能 26.4fps」（那是测量开销：实测 30.0fps，60fps 也能开）；记录追踪算法选型需求 | 同上 |
 | rev.3j | ★★ 硬件换机 HBV-1714-2 → **Intel RealSense D435**：接入层打通（USB 3.2）+ 树莓派可行性论证 | 同上 |
 | rev.3i | 零件分割/识别/追踪收尾；★ **确立单模块铁律（AGENTS §0）**；新增任务卡机制 | 同上 |
@@ -37,6 +38,22 @@
 | rev.3 | 标定链 c1/c2/c3 完成；料盘几何与 4 个槽位写进 `workpiece.yaml`；装配位定在料盘左侧 | 同上 |
 | rev.2 | **4 类零件口径**（取代 6 类）+ 真实工位实测（绿幕 / 蓝手套 / SGBM / 分辨率） | 同上 |
 | rev.1 | 通读方案与代码、修工作区 Windows 权限、记录 7 处口径与实现问题 | 同上 |
+
+---
+
+## 本轮（rev.3o）改了哪些文件
+
+| 文件 | 改了什么 |
+|---|---|
+| `config/camera.yaml` | `controls: {}` → **13 项实测值**（关 AE+AWB）；整段依据重写（含"WB 走过 4600 的弯路"与最终 6300 的来历） |
+| `config/workpiece.yaml` | `brass.s_min` 50→30、**`v_min` 80→90**、`max_diam_mm` 120→100、`tracking.max_area_px` 8000→10000、`dist_match_px` 40→60；`glove` 加"会误检绿幕、待双层手套重定"的 ⚠️ 说明；`work_roi_mode` 加"**不切 full**"的新依据；过期 GSD 注释一并更正 |
+| `core/part_tracker.py` | ★ `tracking.id_margin` **真的从配置读并下发到每条轨迹**（原来配置项完全不生效） |
+| `tools/part_track_demo.py` | 硬编码的 40px 距离闸改读 **`tracker.dist_match`** |
+| `tests/test_size_gate.py` | 把「<0.8×上限」这个**没依据的系数**换成「上限 ≥ 实测最大零件 ×1.25」 |
+| `tools/probe_d435.py` | 加 `--save-dir`（受限进程写不进 `data/probe`） |
+| **新增 `ai_测试工具/`** | AI 自己的工具区（10 个脚本 + 工位帧资料）；**`用户存档/` 归还给用户**（AI 加的 6 个 `d435_*.py` 已移出） |
+| **新增 `.vscode/launch.json`** | 10 条运行/调试配置（实况台、抓帧、内参、色域、开流诊断、WB 扫描、回归…） |
+| **新增 `移植方案_零件分割识别追踪_到D435.md`** | 移植方案与风险清单 |
 
 > ★ 写日志的规矩：**一行一句话，写清"为什么"**；数字与决策细节写进
 > `docs/版本历史_详录.md` 或 `docs/对话存档_*.md`，**别往本文件堆**。
