@@ -1,15 +1,63 @@
 # 相机与采集参数。所有"必须实测确认"的项都标了 ★。
 
 # ── 图像来源 ────────────────────────────────────────────────
-#   uvc    真实双目相机
+#   d435   ★ Intel RealSense D435（2026-10 换机后的正式相机；走 pyrealsense2）
+#   uvc    旧相机 HBV-1714-2（走 cv2.VideoCapture + dshow，留档可回退）
 #   video  单个视频文件（离线调试；若视频是左右拼接的就设 mode）
 #   images 图片目录（离线调试）
-source: uvc
+source: d435
 
-device: 0
+device: 0                     # uvc 专用（D435 走 SDK，不用索引；多台用 realsense.serial）
 path: ""                      # source=video/images 时用
 
+# ── Intel RealSense D435（source: d435）──────────────────────
+# ★★ 两条硬约束，都是实测出来的（docs/踩坑实录.md §2.30 / §2.31）：
+#   ① **必须走 pyrealsense2** —— cv2.VideoCapture 按索引枚举不到 D435；
+#   ② **必须插 USB 3 口** —— USB 2.1 链路上连 424x240@6 都拿不到一帧
+#      （不是带宽不够，是链路根本不工作）。开流时会读 usb_type_descriptor 自检，
+#      不是 3.x 会直接大声报警，别去调分辨率。
+realsense:
+  # ★★ 2026-10 真机实测（`python tools/probe_d435.py`，相机对着桌面）：
+  #   ┌─────────────┬────────┬────────┬──────────┬───────────────┬───────┐
+  #   │ 模式         │ 实测fps│ fx     │ GSD@360mm│ 覆盖@360mm     │ 过曝   │
+  #   ├─────────────┼────────┼────────┼──────────┼───────────────┼───────┤
+  #   │ 640x480@30  │  30.0  │ 603.8  │  0.596   │ 382 x 286 mm  │ 1.60% │
+  #   │ 1280x720@30 │  30.0  │ 905.7  │  0.397   │ 509 x 286 mm  │ 1.20% │
+  #   └─────────────┴────────┴────────┴──────────┴───────────────┴───────┘
+  # ★★ 纠正一处推算错误：早先文档写「640x480 -> GSD 0.795」是**拿 720p 的内参
+  #   等比外推**得来的，**实测是 0.596**。D435 的 640x480 是**裁切模式**
+  #   （水平 FOV 55.9°，比 720p 的 70.5° 窄），两个模式的内参不是一回事 ——
+  #   **每换一个分辨率都要重新读内参、重跑 c1/c3**，不能按像素数等比换算。
+  # ★ 选哪个模式**仍未最终定**，两条路的实测依据：
+  #     640x480  视野窄（382mm）但每帧像素少 3 倍 —— 先按它换机，与 HBV 的 0.8623 同量级
+  #     1280x720 视野宽（509mm）且 GSD 好 1.5 倍，帧率一样（30/60 都能开）
+  #   ⇒ 到工位先量「料盘 + 装配位」要占多宽：超过 382mm 就必须用 1280x720。
+  width: 640
+  height: 480
+  fps: 30                     # ★ 实测纯读帧 30.0fps；60fps 也真的能开（规格表没列全）
+  serial: ""                  # 多台相机时按序列号选（本机 D435 = 262322070302）
+  timeout_ms: 1000            # 等一帧的上限；掉线时好让上层快点发现
+  open_retries: 3             # ★ 刚插拔会抛 Mutex_TotalFailure，重试即可（实录 §2.31）
+  retry_wait_s: 1.5
+  # ★ 相机选项。**工位标定值还没有，所以先留空** = 用相机自己的自动曝光
+  #   （画面能看，但 HSV 阈值会随光照漂）。
+  #   ★ 实测（对着桌面、自动曝光）：过曝 **1.20~1.60%**，已超工程 0.5% 的报警线
+  #     —— 到工位必须重扫曝光，判据是「过曝 ≈0%」。
+  #   在工位跑 用户存档/d435_site_report.py，把过曝调到 ≈0% 后再照下面填：
+  #     controls:
+  #       enable_auto_exposure: 0      # ★ 必须先关自动，否则下面的值白给
+  #       exposure: 850                # ★ 量纲约 1~10000 —— 不是 DSHOW 的 -6.0！
+  #       enable_auto_white_balance: 0
+  #       white_balance: 4600
+  #       gain: 16
+  controls: {}
+
 capture:
+  # ★★ 本节是 **HBV-1714-2（source: uvc）口径**。换成 D435 后：
+  #   · 分辨率/帧率改由上面的 `realsense:` 决定（这里的 width/height/fps 不再生效）；
+  #   · backend / fourcc / mode / left_index / decoder 都是 UVC 专用，D435 用不到；
+  #   · **仍然生效**的是 warmup_frames（pipeline 读它做预热）。
+  #   留着是为了"换回 HBV 时不用重新查一遍"。
   # ★ 后端：Windows 必须 dshow。实测本机 OpenCV 4.12：
   #     VideoCapture(0, CAP_V4L2)  -> isOpened()=False   （V4L2 是 Linux 专用）
   #     VideoCapture(0, CAP_DSHOW) -> isOpened()=True
@@ -46,11 +94,12 @@ capture:
   # ★ 这也印证了 predict.py 一直用 1280x480 是对的。
   # ★ 另外 1280x960 / 2560x960 的两个"高分辨率"模式，实测都不是真高分辨率
   #   （2560x960 是数字放大；1280x960 虽非放大但视场窄到放不下工件）。
-  width: 1280                 # ★ 1280x480 = 左右眼各 640x480（side_by_side）
-  height: 480
+  width: 1280                 # ★ HBV 专用：1280x480 = 左右眼各 640x480（side_by_side）
+  height: 480                 #   D435 的分辨率写在上面 `realsense.width/height`
   # ★ 低帧率下"连续 N 帧"的去抖会变得很迟滞，所以这里写实测帧率：
   #   pipeline 见到 <10fps 会自动把去抖切成按时间（Debouncer 的 hold_s）。
-  frame_rate_hint: 31
+  #   ★ D435 实测 30.0fps（60fps 也能开）—— 这个数只在 <10 时才起作用。
+  frame_rate_hint: 30
   fps: 30
   mode: side_by_side          # side_by_side（左右并排）| top_bottom（上下堆叠）
   left_index: 0               # 0 = 左眼在左/上；1 = 左眼在右/下
@@ -58,6 +107,8 @@ capture:
   decoder: full               # full | reduced2
 
 # ── 开机自检要写入并校验的相机控件 ──────────────────────────
+# ★★ 本节**只对 source: uvc（HBV）生效**（见 uvc_stereo.apply_locked_controls）。
+#   D435 的控件在 `realsense.controls` —— 两边**量纲不同，值不能互抄**。
 # ★ Linux：用 v4l2-ctl --list-ctrls 核对控件名再照抄。
 # ★ Windows：走 cv2.VideoCapture.set()。实测本机驱动对 AUTO_EXPOSURE / AUTO_WB
 #   返回 False（等于说"我不支持用这个属性控制"），所以 Windows 上**必须手工**
@@ -88,6 +139,8 @@ locked_controls:
   #     但只要曝光正确，白平衡实测是正常的（白参考 R/B = 0.95）。
 exposure_windows:
   # ★ 采集/标定脚本会自动应用这组值（见 uvc_stereo.apply_locked_controls）
+  # ★★ 同样**只对 source: uvc 生效**；D435 的曝光用 rs.option.exposure（约 1~10000），
+  #    下面这些 DSHOW 负数**抄过去会把画面弄成全黑/全白**。
   #
   # ★★ 从 -5.0 改到 -6.0（实测踩过，后果极其隐蔽）：
   #   曝光过高时**不是"少切一点"，而是整条判据链静默失效**：
@@ -132,7 +185,14 @@ video:
 
 # ── 低频深度 ────────────────────────────────────────────────
 depth:
-  enabled: true
+  # ★★ 换 D435 后**先关掉**（2026-10）：
+  #   · D435 的深度由**相机固件**用出厂标定算好（比 SGBM 又快又准），
+  #     但工程里的 depth.py 是"拿左右两张彩色图跑 SGBM"的口径 —— 两者不是一回事；
+  #   · 本模块（相机接入层）只给彩色，right=None，所以 T5 会一直请求全分辨率帧
+  #     却永远等不到右眼，纯粹白跑。
+  #   ⇒ 把 D435 的深度接进 core/depth.py 属 **B 模块**，须另开对话。
+  #     在那之前这里保持 false；等接好了再打开。
+  enabled: false
   every_n_frames: 30          # 1 Hz 左右
   # ★ 匹配器：实测本工位必须用 sgbm。StereoBM 在料盘区只有 9% 有效像素、
   #   视差散布 75 px（纯噪声），会被下面的 min_valid_ratio 闸门整帧丢掉。

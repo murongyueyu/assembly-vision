@@ -44,6 +44,28 @@ CANDIDATE_MODES: List[Tuple[int, int]] = [
 
 MIN_USABLE_FPS = 10.0        # 低于这个帧率就没法做实时去抖（去抖要连续 2~6 帧）
 
+# camera.yaml 里这些 source 值都表示"换成 D435 了"
+REALSENSE_SOURCES = ("d435", "d435i", "realsense", "rs")
+
+
+def guard_not_realsense(src_name: str) -> bool:
+    """camera.yaml 指向 D435 时拦下本工具。返回 True = 已拦下（调用方 return 2）。
+
+    ★ 为什么要拦：本工具是 **UVC 相机（HBV-1714-2）专用**的 —— 它用
+      `cv2.VideoCapture(索引)` 开设备，而 D435 **不被 OpenCV 枚举**
+      （见 docs/踩坑实录.md §2.30）。硬跑只会把每个候选模式都试一遍、
+      每个都报"打不开"，让人误以为相机坏了。
+    """
+    name = str(src_name or "").strip().lower()
+    if name not in REALSENSE_SOURCES:
+        return False
+    print("★ camera.yaml 的 source = %s（Intel RealSense D435）——" % name)
+    print("  本工具是 UVC 相机（HBV-1714-2）专用：它按索引开设备，")
+    print("  而 D435 不被 OpenCV 枚举（见 docs/踩坑实录.md §2.30）。")
+    print("  请改用：  python tools/probe_d435.py")
+    print("  （要探 HBV：先把 camera.yaml 的 source 改回 uvc）")
+    return True
+
 
 def parse_modes(text: str) -> List[Tuple[int, int]]:
     out: List[Tuple[int, int]] = []
@@ -228,6 +250,10 @@ def main() -> int:
         dev = cam.get("device", 0)
         cap_mode = str(cam.get("capture.mode", "side_by_side"))
         left_index = int(cam.get("capture.left_index", 0))
+        # ★ 换机后 camera.yaml 的 source 可能是 D435 —— 那台不是 UVC 相机，
+        #   本工具永远打不开它。别让它白跑一遍再报错（见 guard_not_realsense）。
+        if guard_not_realsense(str(cam.get("source", "uvc"))):
+            return 2
     except Exception as e:                                    # noqa: BLE001
         print("[probe] 读 camera.yaml 失败（用默认值继续）:", e)
     if args.device is not None:

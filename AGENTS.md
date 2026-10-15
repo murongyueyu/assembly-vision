@@ -1,13 +1,13 @@
-﻿# AGENTS.md — 双目装配流程检查系统
+# AGENTS.md — 双目装配流程检查系统
 
 > 本文件是给**后续接手的 AI 代理 / 开发者**看的项目说明。
 > 目标：让你在不读完整段历史对话的情况下，也能安全地改这个项目。
 > 配套文件：`VERSION.md`（版本与变更）、**`docs/踩坑实录.md`（§2 详录，改代码前必读）**、`docs/对话存档_*.md`（历史决策过程）。
 >
 > ★★ **2026-10 现状：相机已从 HBV-1714-2 换成 Intel RealSense D435。**
-> 接入层已在 PC 上打通（USB 3.2 / 640x480@30 实测 **30.0fps**，且 **60fps 模式实际可开**），
-> 但**工程里的标定（c1~c6）与阈值全部是按 HBV 标出来的，对 D435 无效**。
-> 换机必做清单见 `VERSION.md` 的 `rev.3j`；踩坑见实录 **2.30~2.37**。
+> **采集层已接进工程**（`source: d435` → `sources/d435.py`，实测 640x480@30 = **30.0fps**，
+> 见 `VERSION.md` 的 `rev.3l`），但**标定（c3~c6）与阈值全部是按 HBV 标出来的，对 D435 无效**。
+> 换机必做清单见 §6.5 **P0-0**；踩坑见实录 **2.30~2.41**。
 
 ---
 
@@ -19,7 +19,7 @@
 
 | 模块 | 代码落点 | 状态 |
 |---|---|---|
-| **A. 零件分割 / 识别 / 追踪** | `core/segment.py`、`core/features.py`、`core/part_id.py`、`core/part_tracker.py`、`tools/part_track_demo.py` | 主体可用，剩 S-1~S-4 |
+| **A. 零件分割 / 识别 / 追踪** | `core/segment.py`、`core/features.py`、`core/part_id.py`、`core/part_tracker.py`、`tools/part_track_demo.py` | 主体可用，剩 **S-2~S-4**（S-1 `holes` 容忍带**已做**） |
 | **B. 深度检测** | `core/depth.py`、`calib/c5_assembly_baseline.py` | 有已知缺陷（P0-2） |
 | **C. 料盘位姿 / 槽位** | `core/roi.py`、`core/pose_check.py`、`calib/c3`、`calib/c4` | 已完成 |
 | **D. 合格性 / 齐套性判据** | `core/checks.py` | 已完成（P0-1） |
@@ -80,7 +80,9 @@
 | 基线 `spoke_peak_count` / 容差 | **8** / **2** | §2.19 §6.5 |
 | 位姿角度闸门 | `max_theta_deg` **25°** | §2.8 |
 | **D435 链路速率（★ 换机后必看）** | `usb_type_descriptor` 必须是 **`3.2`**；`2.1` 时**一帧都拿不到** | 实录 2.31 |
-| **D435 GSD（360mm 处）** | 640×480 → **0.795 mm/px**；1280×720 → **0.397 mm/px**（覆盖均 509mm） | 实录 2.34 |
+| **D435 GSD（360mm 处）** | ★ **实测（不是外推）**：640×480 → **0.596 mm/px**（fx=603.8，视野仅 382mm 宽）；1280×720 → **0.397 mm/px**（fx=905.7，509mm 宽） | 实录 2.38 |
+| **D435 内参随模式变** | 640×480 是**裁切模式**（FOV 55.9°），与 720p（70.5°）**不是一回事** —— 换分辨率必须重读内参、重跑 c1/c3 | 实录 2.38 |
+| **受限进程打不开 RealSense** | 沙箱（Low 完整性）里报 `Mutex_TotalFailure`/`No device connected`，**普通终端同一命令正常** → 是权限不是相机 | 实录 2.39 |
 | **D435 帧率上限** | 彩色/深度/红外在 640×480 都能 **59.9fps**；**彩色+深度同时 60fps → 64.5fps**。★ 30fps 是脚本自己设的，不是相机限制 | 实录 2.37 |
 
 ### 2.1 索引表（症状 -> 判据/对策 -> 详见）
@@ -124,6 +126,10 @@
 | **换机后「木桌被当黄铜」照样复现** | 对准桌面实测：黄铜 **86048px = 全屏 28.0%**、最大块 Ø328px，木桌整块进掩膜；**换相机不解决"颜色不可分"**，解法仍是 work_roi + 尺寸闸门 | 实录 2.35 |
 | **中文路径 `cv2.imwrite` 静默失败（又踩一次）** | 打印「已保存」但文件不存在；★ **"知道有这个坑"不等于"不会踩"** —— 新脚本必须走 `imgio.imread_safe/imwrite_safe`，且打印要报**成功/失败**而不是无脑说「已保存」 | 实录 2.36 |
 | **★★ 「D435 只能 26.4fps」是测量开销，不是相机上限** | 判据：**多个带宽差 4 倍的流给出同一个数 -> 先怀疑测量**。那版脚本每帧都在做 np 统计+存图；纯读帧重测为 **30.0fps**。★ 且 **60fps 模式实际能开**（彩色/深度/红外都是 59.9，彩色+深度同时 **64.5**）—— `rs-enumerate-devices` 的 profile 列表**列不全** | 实录 2.37 |
+| **★★ D435 的 640×480 是裁切模式** | 内参**随模式变**：640×480 fx=**603.8**（FOV 55.9°）、720p fx=**905.7**（70.5°）-> **别按像素数外推 GSD**；换分辨率必须重读内参 + 重跑 c1/c3 | 实录 2.38 |
+| **★★ 受限（Low 完整性）进程打不开 RealSense** | 沙箱里报 `Mutex_TotalFailure` / `No device connected`，**同一命令在普通终端正常** -> 是权限不是相机；`pnputil /enum-devices /connected` 能看到设备 Status: Started 即可排除硬件 | 实录 2.39 |
+| **★★ 子目录缺 Low 标签 -> 受限进程写不进去** | 判据：**根目录能写、子目录被拒**，且 DACL **明明有 Allow** -> 是**完整性标签**（no-write-up），补 ACL 没用；写盘类工具（make_synthetic / c3~c6 / probe --save）要跑在不受限进程里 | 实录 2.40 |
+| **★ 离线回归在 GBK 控制台下假崩** | 输出里的 `✓`/`²` GBK 打不出 -> `UnicodeEncodeError` -> 三个模块**假失败**；`run_all.py` 已改 `errors="replace"` | 实录 2.41 |
 
 ---
 
@@ -138,7 +144,9 @@
 ├── docs/对话存档_2026_真机联调.md  ← 需求梳理 → 首次真机实测
 ├── docs/对话存档_2026_P0清理.md    ← 四处真 bug（含可复用判据）
 ├── docs/对话存档_2026_零件分割.md  ← 零件实时检测/追踪/遮挡
-├── docs/对话存档_2026_D435换机.md  ← ★★ **本轮：HBV → D435 换机 + 树莓派可行性论证**
+├── docs/对话存档_2026_D435换机.md  ← HBV → D435 换机 + 树莓派可行性论证
+├── docs/对话存档_2026_D435接入工程.md ← ★★ **本轮：D435 接进工程（采集层）+ 三处纠错**
+├── 任务卡_D435落地标定.md      ← ★ 下一轮的任务卡（架工位 → 曝光 → 色域 → c3~c6）
 ├── docs/标定操作手册_c1_c2.md      ← c1/c2 逐步操作手册
 ├── 方案总纲_v2(2).docx          ← 初版方案（6 类零件口径，已作废，留档）
 ├── 方案总纲_v3_4类零件.docx      ← ★ 当前方案基线（4 类零件）
@@ -152,7 +160,7 @@
 │   ├── d435_fps_ceiling.py     ★ 彩色帧率上限（阻塞+回调双测法，证明 60fps 可开）
 │   ├── d435_depth_fps.py       ★ 深度/红外/彩色+深度同时的帧率上限
 │   └── probe_realsense.py / probe_cameras.py   早期探针（留档）
-└── assembly_vision/            ← 代码（★ 换机后尚未改，仍是 HBV 口径）
+└── assembly_vision/            ← 代码（★ 已换 D435 源；标定/阈值仍是 HBV 口径）
 ```
 
 ```
@@ -168,7 +176,8 @@ assembly_vision/
 │   ├── config.py               YAML/JSON 配置加载（YAML 缺失自动退回同名 .json）
 │   ├── imgio.py                ★ 兼容中文路径的图片读写（np.fromfile + imdecode）
 │   ├── pipeline.py             线程编排 + UIState 组装 + 去抖方式选择
-│   ├── sources/                base / video_file / uvc_stereo / factory
+│   ├── sources/                base / video_file / uvc_stereo / **d435** / factory
+│   │                             ★ d435.py = RealSense D435（走 pyrealsense2，**必须 USB 3**）
 │   ├── core/                   纯算法，只吃 numpy 与数据类
 │   │   ├── segment.py          黄铜分割（S 上限挡绿幕）+ 蓝手套分割（V 下限）
 │   │   ├── features.py         旋转不变形状特征（圆度/凸包实度/内孔数/弯曲/两端宽度比）
@@ -190,7 +199,9 @@ assembly_vision/
 │   ├── preview.py              ★ **统一预览入口**：ROI + 分割叠加 + 覆盖率 +
 │   │                             识别结果 + 过曝报警。`--guide assembly` 绿圈高亮
 │   ├── make_synthetic.py       合成图 / 装配序列 / 合成标定
-│   ├── probe_camera.py         ★ 探相机能力（分辨率/帧率/是否真双目）
+│   ├── probe_camera.py         ★ 探相机能力（**UVC 相机专用**；遇到 D435 会被拦下并指路）
+│   ├── probe_d435.py           ★★ **D435 自检**：设备信息 + 逐模式帧率/GSD/覆盖/过曝 +
+│   │                             存样张；`--reset` 硬件复位。走工程自己的 RealSenseSource
 │   ├── tune_slots.py           ★ 实时调覆盖率（槽位几何/阈值/摆放 一起看）
 │   ├── measure_tray.py         空料盘拍网格图，用于测槽位几何
 │   ├── measure_slots.py        ★ 实测槽位中心（重跑 c3 后必须跑）
@@ -212,11 +223,12 @@ assembly_vision/
 │   ├── ui_preview.py           离屏渲染界面预览图（不需要显示器）
 │   └── record.py               录真实素材
 ├── tests/                      _common / make_synthetic / run_all
-│                               test_features / test_segment / test_polar /
-│                               test_fsm / test_part_id / test_part_id_tol / test_tray_pose /
-│                               test_work_roi / test_assembly / test_ui_renderer /
-│                               test_tracker
-│                               ★ 共 **11** 个模块，登记在 run_all.py 的 MODULES
+│                               test_features / test_segment / **test_d435_source** /
+│                               test_polar / test_fsm / test_part_id / test_part_id_tol /
+│                               test_tray_pose / test_work_roi / test_assembly /
+│                               test_ui_renderer / test_tracker
+│                               ★ 共 **12** 个模块，登记在 run_all.py 的 MODULES
+│                               ★ test_d435_source = **假 SDK 的构造级契约测试**（不需要相机）
 └── data/                       synthetic / synthetic_seq / ui_preview / probe / refs / videos
 ```
 
@@ -233,14 +245,17 @@ cd assembly_vision
 # ── 离线（不需要相机）────────────────────────────
 python tools/make_synthetic.py --out data/synthetic --seq data/synthetic_seq \
         --calib config/calibration.synthetic.yaml
-python tests/run_all.py                       # 11 个模块，应全绿
+python tests/run_all.py                       # 12 个模块，应全绿
+                                              # ★ 默认 GBK 控制台也全绿（run_all 已兜住编码，见 2.41）
 python app.py --source images --path data/synthetic_seq \
         --calibration config/calibration.synthetic.yaml --no-ui --max-frames 200
 python tools/ui_preview.py --renderer qt --out data/ui_preview
 
 # ── 真机（必须用 yolo 环境的 python，见本节末）────────
 PY='D:\miniconda\envs\yolov11\python.exe'
-python tools/probe_camera.py                  # ★ 先跑这个，确认相机能力
+python tools/probe_d435.py                    # ★★ D435 先跑这个：设备/帧率/GSD/过曝 一次看全
+python tools/probe_d435.py --reset            # 打不开/busy 时硬件复位（复位≠刷固件）
+python tools/probe_camera.py                  # 旧 UVC 相机（HBV）专用；遇到 D435 会拦下
 python tools/tune_slots.py                    # ★ 实时调覆盖率（摆零件时用）
 python tools/measure_tray.py                  # 空料盘拍网格图，测槽位几何
 python tools/record.py --seconds 60 --out data/videos/real1.mp4
@@ -284,7 +299,7 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 > 本节只列**已经做到的事实**（带实测数字）。
 > `VERSION.md` 的「待办」一节是摘要，以本文件为准。
 
-- ✅ 代码离线全绿（**11 个测试模块**）；4 类零件/4 工序口径已对齐
+- ✅ 代码离线全绿（**12 个测试模块**）；4 类零件/4 工序口径已对齐
 - ✅ **相机参数已定**：`1280×480`（单眼 640×480）、后端 dshow、31 fps；
   **曝光 `-6.0`**（原 -5.0，因过曝会让判据链静默失效而改，见 2.14）
 - ✅ **c1 完成**：GSD **0.8680 mm/px**，全画幅覆盖 **555×417 mm**
@@ -366,29 +381,21 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
   （仍然是真的缺口，但优先级低：实测四槽覆盖率区分度够用）
 - ⬜ 未在树莓派上跑过任何一次；树莓派上 SGBM 耗时需实测
 
-### ★★ 2026-10 rev.3j：相机换成 D435（本轮）
+### ★★ 2026-10：相机换成 D435（rev.3j 打通接入层 → rev.3l 接进工程）
 
-> ★ **本轮没有改动 `assembly_vision/` 里任何一个文件** —— 全部产出在 `用户存档/`。
-> 下面的事实是**用 `用户存档/` 的独立脚本**实测出来的。
+> ★ 全过程与实测数字见 `VERSION.md` 的 `rev.3j`/`rev.3l` 与
+> `docs/对话存档_2026_D435换机.md`、`docs/对话存档_2026_D435接入工程.md`；
+> 踩坑见实录 **2.30~2.41**。这里只留结论。
 
-- ✅ **D435 接入层已在 PC 上打通**：走 `pyrealsense2` 2.59.1，**USB 3.2**，
-  **纯读帧 640x480@30 = 30.0fps**，且 **60fps 模式实际可开**（彩色+深度同时 64.5fps）
-- ✅ **固件已升级** 5.15.1.55 → **5.17.3.10**
-- ✅ **出厂内参已读出**：彩色 fx=905.74@720p、FOV 70.5°x43.4°、畸变系数全 0；
-  深度 fx=644.48。→ **c2 双目标定不再需要**（深度由固件算）
-- ✅ **过曝直接达标**：对桌面实测过曝 **0.00~0.10%**、V 均值 **112.7**（不用先调曝光）
-- ✅ **绿幕色相 H≈87~88**（HBV 是 83）→ 漂移 4~5°，**未进危险区**，但 `s_max` 边界需重定
-- ★★ **「木桌被当黄铜」原话复现**：黄铜 86048px = 全屏 **28.0%**、最大块 Ø328px，
-  叠加图证实木桌整块进掩膜（连笔记本绿贴纸也进）→ **换相机不解决这个问题**，
-  必须靠 work_roi + 尺寸闸门（`max_diam_mm`）
-- ⬜ **工位相机尚未架设**（现在对着桌面），所以色域/几何的**正式**数字还没量
-- ⬜ **`camera.yaml` / `sources/` 仍是 HBV 口径** —— 换机落地属 A/B/C 模块，须另开对话
-- ⬜ **D435 上树莓派的可行性已论证**（见 `docs/对话存档_2026_D435换机.md`）：
-  `pyrealsense2` **有 aarch64 wheel**（cp39/cp310/cp312，manylinux2014）；
-  ★ **收益巨大**：深度由相机固件算，**Pi 上不用跑 SGBM**，直接消掉 P0-5 那个瓶颈；
-  ★ **新瓶颈变成 KCF 的每目标成本**（PC 4 件≈32ms），Pi 4B 上需实测
-- ✅ **顺手修掉一个真 bug**：三个新脚本用了裸 `cv2.imwrite`，在中文路径下**静默失败**
-  （报"已保存"但文件不存在）→ 已全部改走 `imgio.imwrite_safe`（实录 2.36）
+- ✅ **接入层**：`pyrealsense2` 2.59.1 / **USB 3.2** / 固件 **5.17.3.10**；
+  纯读帧 640x480@30 = **30.0fps**（★ 60fps 也能开）；**c2 双目标定不再需要**（深度由固件算）
+- ✅ **已接进工程**（rev.3l）：`source: d435` + `sources/d435.py`；真机 `app.py --no-ui`
+  跑完 90 帧**退出码 0**、`part_track_demo --bench` 每帧均摊 **2.56ms**
+- ⬜ **标定链 c3~c6 仍是 HBV 口径，必须重跑**；且相机要**架到工位**（现在对着桌面）
+- ★★ **「木桌被当黄铜」换机后照样复现**（黄铜 86048px = 全屏 28.0%）：
+  **换相机不解决「颜色不可分」**，解法仍是 work_roi + 尺寸闸门
+- ★ **上树莓派可行**：`pyrealsense2` 有 aarch64 wheel；深度由固件算 → **Pi 不用跑 SGBM**；
+  ★ 新瓶颈变成 **KCF 的每目标成本**，Pi 4B 上必须实测
 
 ---
 
@@ -413,18 +420,28 @@ python app.py --windowed                      # 正式跑（窗口模式方便�
 | 4 | ★ **解决「木桌被当黄铜」**：`work_roi_mode: work\|full` + `segment.max_diam_mm`（建议 **120**） | 一起 | 3 |
 | 5 | 重跑 **c3** 料盘单应 → 新 GSD 与槽位像素坐标；再跑 `tools/measure_slots.py` | 你 | 4 |
 | 6 | 重跑 **c4 / c5 / c6** 基线 | 你 | 5 |
-| 7 | 写 `assemvision/sources/d435.py` + `factory.py` 分支 + `camera.yaml` 换源 | 一起 | 6；**★ 属 A/B/C 模块，须另开对话（单模块铁律）** |
+| 7 | ~~写 `sources/d435.py` + `factory.py` 分支 + `camera.yaml` 换源~~ | 一起 | ✅ **已完成（rev.3l）** —— 真机 30.0fps、app.py 90 帧退出码 0 |
 | — | ★ **c2 双目标定不用重跑**：D435 深度由固件用出厂标定算好 | — | — |
 
-★ 顺手要定的一件事：**正式用 640×480 还是 1280×720**。
-实测两者帧率一样（都能 30fps，也都能开 60fps），720p 的 GSD 好一倍（**0.397 vs 0.795 mm/px**），
-球头 Ø5mm 从 6px 变 12px（直接关系辐条计数）—— 但算法每帧多算 3 倍像素。
+★★ **依赖顺序其实是反的（rev.3l 已确认）**：第 2~6 步**全都要经 `make_source(camera.yaml)` 取图**，
+所以「写源」不是收尾、而是**它们的前置** —— 源没接进工程，c3~c6 一步都跑不了
+（只能拿 `--source images` 喂离线帧绕）。rev.3l 已把它做掉。
+
+★ 顺手要定的一件事：**正式用 640×480 还是 1280×720**。实测帧率一样（30/60 都能开）：
+
+| 模式 | fx | GSD@360mm | 覆盖@360mm | 说明 |
+|---|---|---|---|---|
+| 640×480 | 603.8 | **0.596** | 382×286 mm | 视野窄，像素少 3 倍（当前默认） |
+| 1280×720 | 905.7 | **0.397** | 509×286 mm | 视野宽、GSD 好 1.5 倍，球头 Ø5mm 从 6px 变 12px |
+
+★ 注意 640×480 是**裁切模式**（FOV 55.9° vs 70.5°）—— 到工位先量
+「料盘 + 装配位」要占多宽：**超过 382mm 就只能用 1280×720**（实录 2.38）。
 
 > ★ **先做 P0-0 再做下面的 P0-1~P0-5** —— 换机是前提，其余都是在旧基线上的收尾。
 
 | # | 事项 | 状态 |
 |---|---|---|
-| P0-1 | **c5 结果接线** | ✅ **已完成**（只接了有区分度的那一条）<br>新增 `checks.spoke_vs_baseline(count, baseline, slack)` 纯函数 + 真机基线比较。<br>容差 `check.spokes.baseline_slack: 2`，依据 c5 实测 `[8,8,8,8,6,6,7,8,8,6,8,8]`（完整在位就是 6~8）。<br>★ **刻意没接 ring/hub/cap 覆盖率**：实测（合成图各种缺件组合）ring 0.994、hub 0.880~0.998、cap 0.874~1.000 —— **连缺顶盖都还有 0.874，几乎没有区分度**；真机上 c5 三个数全是 ~1.0。拿它们当阈值等于没判。<br>★ 代价（已写进配置注释）：真少 2 根（数出 6）**不会**被发现 —— 不误报优先。<br>新增 `tests/test_assembly.py`；后又加 `tests/test_tracker.py`（现共 **11 个模块**）。 |
+| P0-1 | **c5 结果接线** | ✅ **已完成**（只接了有区分度的那一条）<br>新增 `checks.spoke_vs_baseline(count, baseline, slack)` 纯函数 + 真机基线比较。<br>容差 `check.spokes.baseline_slack: 2`，依据 c5 实测 `[8,8,8,8,6,6,7,8,8,6,8,8]`（完整在位就是 6~8）。<br>★ **刻意没接 ring/hub/cap 覆盖率**：实测（合成图各种缺件组合）ring 0.994、hub 0.880~0.998、cap 0.874~1.000 —— **连缺顶盖都还有 0.874，几乎没有区分度**；真机上 c5 三个数全是 ~1.0。拿它们当阈值等于没判。<br>★ 代价（已写进配置注释）：真少 2 根（数出 6）**不会**被发现 —— 不误报优先。<br>新增 `tests/test_assembly.py`；后又加 `tests/test_tracker.py`、`tests/test_d435_source.py`（现共 **12 个模块**）。 |
 | P0-2 | **`wheel_height_mm` 存疑** | ⬜ c5 报 **0.92mm**，而轮盘顶面物理上应在台面上方 30~40mm。单位没错（`compute` 返回 mm），所以是**拟合平面贴住了被测面** → `\|实测−基线\| > 15mm` 这条立柱判据**永远不触发**（静默失效）。<br>c5 已加**平面自检**（打 a/b/c、斜度、平面Z范围 vs 实测范围、高度/视差跨度占比），**低于 5mm 会明确报警**。待定：改 `fit_plane` 的拟合范围（排除料盘/台面），或明确写清深度判据不可用。 |
 | P0-3 | ~~`hub_coverage` 为 nan~~ | ✅ **已修（根因是复制粘贴漏改，与算法无关）**<br>`c5` 里写成 `rings.append(a.hub_coverage)` → rings 收的是 hub 的值、hubs 永远空 → 打印的 `1.000` 其实是**轮毂**的值、`nan` 是空列表均值，**三个数全错位**。<br>★ 教训：`_disc_coverage` 构造 8 种异常输入都**不返回 nan**（最差 0.0）—— 看到 nan 先数"列表里到底有几个元素"，别先怀疑算法。 |
 | P0-4 | 真机全流程联调 | 🔶 **部分完成** —— `app.py --windowed` 原来**一启动就连崩两次**，已修（见下「另修 2」），现在实跑 90 帧**退出码 0、无任何错误**。<br>⬜ 剩下要**你在真机上摆件走一遍 4 工序**，看判据有没有误报。 |
@@ -602,7 +619,7 @@ MOSSE 的 `update` **恒返回 False（实测 40/40 全丢）**。
 > 两个变量一起动就说不清是谁的问题。
 
 > ★★ **最后提醒**：换机（D435）之后**必须重跑这套对比** ——
-> 分辨率、GSD、帧率上限都变了（640×480 可 30 或 **60fps**，GSD 0.795 或 0.397），
+> 分辨率、GSD、帧率上限都变了（640×480 可 30 或 **60fps**，GSD **0.596** 或 0.397 —— ★ 实测值，别用旧的外推值），
 > 追踪算法的相对优劣**可能跟着变**。别把 HBV 时代的结论直接搬过来。
 
 ### P2 —— 低优先
@@ -621,8 +638,8 @@ MOSSE 的 `update` **恒返回 False（实测 40/40 全丢）**。
 - **中文注释**，风格与现有代码一致；关键处用 `★` 标出"必须实测确认"的项。
 - 改 `config/*.yaml` 时**保留 `★` 注释并更新依据**，不要让注释与值脱节。
 - 阈值/尺寸**不要硬编码在算法里**，一律走配置。
-- 加新功能后**必须跑 `python tests/run_all.py`** 确认 **11 个测试模块**仍全绿
-  （`test_features` / `test_segment` / `test_polar` / `test_fsm` /
+- 加新功能后**必须跑 `python tests/run_all.py`** 确认 **12 个测试模块**仍全绿
+  （`test_features` / `test_segment` / **`test_d435_source`** / `test_polar` / `test_fsm` /
   `test_part_id` / `test_part_id_tol` / `test_tray_pose` / `test_work_roi` /
   `test_assembly` / `test_ui_renderer` / `test_tracker`）。
   新功能要**配套加测试**并登记到 `tests/run_all.py` 的 `MODULES`。
@@ -661,9 +678,9 @@ MOSSE 的 `update` **恒返回 False（实测 40/40 全丢）**。
 
 | 环节 | 状态 | 依据 |
 |---|---|---|
-| **相机（D435）** | ✅ **PC 上能出图**：USB 3.2 / 640x480@30 → **30.0fps**（★ **60fps 也能开**） | `用户存档/d435_*` 系列脚本，见实录 2.30~2.34 / 2.37 |
-| **相机（D435）→ 工程** | ⬜ **还没接进去**：`sources/` 与 `camera.yaml` 仍是 HBV 口径 | 见 §6.5 **P0-0** |
-| 离线回归 | ✅ **11/11 全绿** | `python tests/run_all.py`（★ 未受换机影响，因为没改工程） |
+| **相机（D435）** | ✅ USB 3.2 / 640x480@30 → **30.0fps**（★ **60fps 也能开**）；fx=603.8、GSD 0.596 | `tools/probe_d435.py`，实录 2.34 / 2.37 / 2.38 |
+| **相机（D435）→ 工程** | ✅ **已接进去**（`source: d435`）：`app.py --no-ui` 真机跑 90 帧退出码 0；`part_track_demo --bench` 每帧均摊 2.56ms | rev.3l；见 §6.5 **P0-0 第 7 步** |
+| 离线回归 | ✅ **12/12 全绿** | `python tests/run_all.py`（★ 默认 GBK 控制台也全绿了，见实录 2.41） |
 | 端到端（合成序列） | ✅ 4 步全过 | `app.py --no-ui --max-frames 120` |
 | **真机窗口模式** | ✅ **能跑**（★ 但那是 **HBV** 时代的结论） | `app.py --windowed` 实跑 90 帧、退出码 0 |
 | 标定链 c1~c6 | ✅ 全部完成 —— **但全部基于 HBV，对 D435 无效** | 见 §5 |
@@ -678,7 +695,10 @@ MOSSE 的 `update` **恒返回 False（实测 40/40 全丢）**。
    而 c6 把区间收成 `轮盘/立柱 [-0.0002, 0.0002]`、`顶盖/底座 [1.985, 2.015]`。
    **`holes=1` 时四个零件全部 < min_score（认不出）**，受控实验已证实。
    ★ 刻意改法（受控实验有效、真机 12/12 不损失）：**放宽到容忍 ±1**。
-   **尚未改** —— 因为端到端测不出收益（那 12 个样本恰好没踩到空档），属**防御性**修改。
+   ✅ **已改**（提交 `735925d`）：`part_id.holes_tol: 1`、底座 `2`，新增
+   `tests/test_part_id_tol.py` 与诊断工具 `tools/measure_holes_gap.py`。
+   ★ 那个提交自己列的收尾项里，**`docs/踩坑实录.md` §2.30 至今没写**
+   （而 8 处代码注释都在引用它；§2.30 这个号已被 D435 占用）—— 接手时补一篇新号即可。
 2. **`visible_ratio` 类的"参考值自我拉低"** —— 见实录 2.20 的 bug 1，
    PartTracker 里已修；但**同类写法在别处出现都要警惕**。
 3. **木桌仍在画面上方**（y 0~204）—— 现在靠工位 ROI + 尺寸闸门挡。
@@ -714,9 +734,9 @@ MOSSE 的 `update` **恒返回 False（实测 40/40 全丢）**。
 
 | 顺序 | 事项 | 谁做 | 为什么是这个顺序 |
 |---|---|---|---|
-| **0** | ★★ **D435 换机落地**：架相机 → 曝光 → 色域 → 木桌假阳性 → c3 → c4/c5/c6 | 一起 | 见 §6.5 **P0-0**；**这是现在唯一的 P0** |
+| **0** | ★★ **D435 换机落地**：✅ 写源（rev.3l）→ 架相机 → 曝光 → 色域 → 木桌假阳性 → c3 → c4/c5/c6 | 一起 | 见 §6.5 **P0-0**；**这是现在唯一的 P0**。★ 写源已做完，剩下都要**相机架到工位** |
 | 1 | **真机跑 `python tools/part_track_demo.py`**：看轮廓是否贴合、遮挡时行为是否正确、帧率多少 | 你 | **零件检测是项目基础**（用户明确）；换机后要重跑确认 |
-| 2 | 决定是否**放宽 `holes` 区间**（容忍 ±1） | 你定，我做 | 见 §7.1b 弱点 1；防御性修改，受控实验有效、真机不损失 |
+| 2 | ~~决定是否放宽 `holes` 区间~~ ✅ **已改**（`holes_tol: 1`/底座 2）；⬜ 补一篇 holes 的踩坑实录 + 跑任务卡 §4 的六条验收 | 一起 | 见 §7.1b 弱点 1；★ 真机验收要等相机架到工位 |
 | 3 | **真机重跑 `app.py --windowed`**，看轮盘装好后辐条是否稳定 **8/8**、齐套性是否 **OK** | 你 | 刚修完辐条判据，**必须真机确认** |
 | 4 | **真机摆件走完 4 工序**，记录每步的判定 | 你 | 流程判断只在合成序列上验过 |
 | 5 | **定 P0-2 的方案**（深度基线 0.92mm 是修还是废） | 你定，我做 | 见 §6.5 P0-2；★ **换 D435 后这条要重新评估** —— 深度不再由 SGBM 算，量纲与噪声特性都变了 |
@@ -733,11 +753,13 @@ MOSSE 的 `update` **恒返回 False（实测 40/40 全丢）**。
    ★ 新的坑写进 `docs/踩坑实录.md`（详录），并在 §2 的索引表加一行 ——
    **别把详录直接堆回 `AGENTS.md`**：它超 65536 字节会被截断，
    尾部（§6 约定、§7 交接）反而看不见了
-4. 跑 `python tests/run_all.py`（**11 个模块**）+ 端到端 + **`--windowed` 实跑**
+4. 跑 `python tests/run_all.py`（**12 个模块**）+ 端到端 + **`--windowed` 实跑**
+   ★ 写盘类工具（make_synthetic / c3~c6 / probe --save）要在**不受限**的进程里跑（实录 2.40）
 5. `git commit`（提交信息写清"为什么"，不只是"改了什么"）
 
 > ★ 历史决策的完整过程在 `docs/`：
 > `对话存档_2026_真机联调.md`（需求梳理 → 首次真机实测）、
 > `对话存档_2026_P0清理.md`（四处真 bug 与可复用判据）、
 > `对话存档_2026_零件分割.md`（零件实时检测/追踪/遮挡）、
-> **`对话存档_2026_D435换机.md`（★ 本轮：HBV → D435 换机 + 树莓派可行性论证）**。
+> `对话存档_2026_D435换机.md`（HBV → D435 换机 + 树莓派可行性论证）、
+> **`对话存档_2026_D435接入工程.md`（★ 本轮：D435 接进工程 + 三处文档纠错）**。
