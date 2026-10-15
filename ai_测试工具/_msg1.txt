@@ -1,0 +1,23 @@
+D435 工位：把相机控件固化进 camera.yaml（原来 AE/AWB 都还开着）
+
+为什么必须做：这些控件值原来只活在驱动里 —— 工程不复现、probe_d435.py --reset
+一次就冲掉；而且读出来的那一刻 enable_auto_exposure 与 enable_auto_white_balance
+都还是 1（相机在跑自己的自动策略），导致「同一台相机、同一条工位，两次抓帧的色域
+差一个数量级」（绿幕 H 81 到 90、零件 H 29 到 3、brass 掩膜 3994px 到 15px）
+—— 分割时有时无。
+
+关键教训：在自动策略还开着的时候采阈值，采到的数字没有意义。
+
+最终值（用户目视调参 + 逐项扫出来的）：
+  enable_auto_exposure: 0 / exposure: 126 / gain: 28
+  enable_auto_white_balance: 0 / white_balance: 6300
+  brightness: -13 / contrast: 50 / gamma: 300 / saturation: 60 / sharpness: 100
+  hue: 0 / backlight_compensation: 0 / power_line_frequency: 3
+
+走过一段弯路（已写进注释，避免下一个人再走）：按 AWB 关掉那一刻的「读数」锁成
+4600 之后色域反而更差（brass 掩膜只剩 58px）—— 因为 AWB 是连续估计的，
+读数不等于它真正在用的值。后用 sweep_camera_controls.py 扫了一遍，
+最终以「用户目视 + 实测识别准确」为准定为 6300。
+
+工作距离 440mm(+-3mm)、料盘 160mm(+-1mm) 推出 GSD 0.7287 mm/px。
+详见 ai_测试工具/工位帧/工位实测记录.md 第 4、5.7 节 与 docs/踩坑实录.md 2.43。

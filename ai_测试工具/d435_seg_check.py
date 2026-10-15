@@ -29,7 +29,7 @@
 
 用法（必须用 yolov11 环境的 python）：
     PY="D:\\miniconda\\envs\\yolov11\\python.exe"
-    & $PY "D:\\university resource\\大三上\\视觉\\用户存档\\d435_seg_check.py"
+    & $PY "D:\\university resource\\大三上\\视觉\\ai_测试工具\\d435_seg_check.py"
     & $PY ... --width 640 --height 480 --fps 30          # 出图更稳（USB2 下 30fps 只有这个分辨率）
     & $PY ... --crop 40 60 560 420                       # 只判工位区域（见下）
     & $PY ... --roi                                      # 打开工程的 work_roi 闸门（会因旧标定而错位）

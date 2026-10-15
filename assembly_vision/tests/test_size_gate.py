@@ -223,7 +223,17 @@ def main() -> int:
     d_max_real = max(_diam_mm(b.area_px, mmpp) for b in r_base.brass_blobs)
     print("   真零件最大块等效直径 %.0fmm，上限 %.0fmm（余量 %.2f 倍）"
           % (d_max_real, maxd, maxd / max(1e-6, d_max_real)))
-    check(d_max_real < 0.8 * maxd, "真零件最大块离上限还有余量（<0.8×%.0fmm）" % maxd)
+    # ★★ 判据从「< 0.8×上限」改成 **「≥1.25 倍余量」**（2026-10）：
+    #   原来的 0.8 是个**没依据的系数**，它的效果是"上限必须比零件大 25%"——
+    #   但写成 0.8×maxd 之后，**上限越大反而越容易通过**，而闸门本身又在变松，
+    #   两边一起动，这条断言就说不清在守什么了。
+    #   现在直接写成它的本意：**上限至少是实测最大零件的 1.25 倍**。
+    #   依据：实测最大零件是**轮盘 Ø74.4mm**（`make_synthetic.py` 的 c3 正交化测量
+    #   + 零件名义尺寸交叉吻合）。1.25 倍 ⇒ 下限 Ø93 —— 合成图的轮盘正好 Ø75，
+    #   所以上限必须 ≥94 才过；`workpiece.yaml` 取 **100**。
+    check(d_max_real * 1.25 <= maxd,
+          "上限应≥实测最大零件的 1.25 倍（%.0f×1.25=%.0f ≤ %.0fmm）"
+          % (d_max_real, d_max_real * 1.25, maxd))
     r_area = float((r_base.brass_mask > 0).sum())
     r_ref_area = float((r_ref.brass_mask > 0).sum())
     print("   料盘区前景像素: 不带闸门 %.0f   带闸门 %.0f" % (r_ref_area, r_area))

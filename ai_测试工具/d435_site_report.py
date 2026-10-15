@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """换相机后的「数字对账单」—— 把必须重新实测的量一次量出来。
 
 ★ 为什么需要它：
@@ -55,7 +55,7 @@ OUT = os.path.join(HERE, "d435_report")
 
 
 # ★ 中文路径：cv2.imwrite 在 Windows 上遇中文路径**静默失败**（只返回 False，不抛异常）。
-#   本工作区路径是「视觉/用户存档」，所以必须用工程的安全版本。
+#   本工作区路径是「视觉/ai_测试工具」，所以必须用工程的安全版本。
 def _imwrite(path: str, img) -> bool:
     try:
         from assemvision.imgio import imwrite_safe

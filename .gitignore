@@ -70,3 +70,6 @@ desktop.ini
 !assembly_vision/data/refs/now_raw.png
 !assembly_vision/data/refs/slot_check.png
 !assembly_vision/data/refs/tray_empty.png
+
+# ── 写配置时的备份（live_site_debug.py 按 w 会生成）──────────────
+*.bak

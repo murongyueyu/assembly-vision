@@ -1,0 +1,36 @@
+加 AI 工具区 ai_测试工具/ + VSCode 配置；用户存档归还用户
+
+背景：用户明确「用户存档是用户自己操作的区域，你要放测试文件及产物新建一个文件夹」，
+并追加「之前 ai 放在用户存档里的东西也都移走」。
+
+做法（按 git 跟踪状态判断，不靠印象）：
+  用户存档/ 里**被 git 跟踪的 21 个文件一律不动**（最早提交是
+  c48d459「加相机连通性测试脚本 predict.py（用户提供）」）；
+  只把 **git 里从没出现过的 6 个 d435_*.py**（AI 换机期加的）移进 ai_测试工具/。
+
+新增的可复用工具（本轮写的）：
+  live_site_debug.py        实况调试台：实时画面 + 掩膜/轮廓 + HUD，
+                            键盘直调相机控件与分割阈值（f 切模式、w 写配置）
+  capture_site_frame.py     抓一帧定格：帧尺寸/内参/色域/分割结果 + 存原图与叠加图
+  d435_intrinsics_check.py  出厂内参 + 逐模式 GSD/覆盖 + 当前所有相机控件值
+  seg_gamut_report.py       分割色域对账（黄铜/绿幕/手套 + metal 掩膜余量）
+  sweep_camera_controls.py  白平衡/曝光扫描（含 AWB 对照组），排序给推荐
+  d435_stream_diag.py       开流诊断：逐传感器列全部 profile + 逐个试开
+
+工程侧两处小改：
+  tools/probe_d435.py   加 --save-dir（受限进程写不进 data/probe，实录 2.40）
+  tests/test_size_gate.py  把「<0.8*上限」这个没依据的系数换成
+                            「上限 >= 实测最大零件 *1.25」
+
+新增 .vscode/launch.json（10 条）：实况台 / 抓帧 / 内参 / 色域 / 帧率 / 预览 /
+追踪演示 / 回归 / 开流诊断 / WB 扫描。已钉好解释器、integratedTerminal
+（OpenCV 窗口必须）、PYTHONIOENCODING=utf-8（防 GBK 崩，实录 2.41）。
+
+资料留存：ai_测试工具/工位帧/（原图 4 张 / 分析叠加图 10 张 / 白平衡扫描 14 张 /
+调参对比 5 张 / 工位实测记录.md）。一次性诊断脚本用完即删，但量出来的图与数字全部留下。
+
+另修一个隐患：live_site_debug.py 的 save_to_config 原来只写「传感器读到的键」，
+按一次 w 会把配置里没读到的 3 项（hue / backlight_compensation /
+power_line_frequency）挤出文件，配置在 13 项与 10 项之间来回变。
+现在把「配置里已有但没读到」的键一并带上，并按行替换 controls:
+那一段（yaml.safe_load + safe_dump 会清空全部注释，实测 ★ 81->81 不变）。

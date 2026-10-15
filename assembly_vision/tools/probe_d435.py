@@ -153,6 +153,13 @@ def main() -> int:
                     help="算 GSD 用的工作距离（与 c1 一致，默认 360）")
     ap.add_argument("--reset", action="store_true", help="先做硬件复位再自检")
     ap.add_argument("--no-save", action="store_true", help="不保存样张")
+    # ★ 为什么加这个开关（2026-10）：`data/probe` 是**工程目录**，
+    #   在受限（低完整性）进程里写不进去（实录 §2.40：子目录缺 Low 标签，
+    #   补 ACL 也没用）。而工作区根目录 / `用户存档\` 是可写的。
+    #   不给这个参数时**行为完全不变**（仍写 `data/probe`）。
+    ap.add_argument("--save-dir", default="",
+                    help="样张输出目录（默认 assembly_vision/data/probe）。"
+                         "★ 受限进程里请指到工作区根或 用户存档\\，否则写盘会失败")
     args = ap.parse_args()
 
     print("=" * 78)
@@ -179,9 +186,11 @@ def main() -> int:
     # 相机自己说支持哪些模式 —— 列出来是为了**对照**（★ 它列不全，见实录 §2.37）
     list_supported()
 
-    out_dir = os.path.join(ROOT, "data", "probe")
+    out_dir = (os.path.abspath(args.save_dir) if args.save_dir
+               else os.path.join(ROOT, "data", "probe"))
     if not args.no_save:
         os.makedirs(out_dir, exist_ok=True)
+        print(" 样张输出目录：%s" % out_dir)
 
     results = []
     for (w, h) in modes:
