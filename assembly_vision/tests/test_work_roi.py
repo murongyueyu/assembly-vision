@@ -101,10 +101,13 @@ def main() -> int:
           "料盘外 60mm 的四周都在 ROI 外（%d/%d）" % (n_out, n_checked))
 
     print("== 场景 4：ROI 真的能挡掉画面别处的假黄铜 ==")
+    # ★ mm_per_px 现在必须传（2026-10 新增尺寸闸门）：尺度唯一来源 = TrayMap。
+    #   不传的话闸门**静默关闭** —— 场景 4 就会测成"ROI 与闸门都没生效"。
+    mmpp = tray.mm_per_px(1.0)
     # ★★ 候选点必须同时满足两条，否则测不出效果：
     #     ① 在 ROI 外
     #     ② **不带 ROI 时那里真的会被切成黄铜**（否则前后都是 0，看着像没生效）
-    base = seg.segment(img, scale=1.0)
+    base = seg.segment(img, scale=1.0, mm_per_px=mmpp)
     out_zone = (roi == 0)
     k = 30
     cands = []
@@ -125,8 +128,8 @@ def main() -> int:
     fake = img.copy()
     for (cx, cy) in pat:
         fake[cy - k // 2:cy + k // 2, cx - k // 2:cx + k // 2] = BRASS_BGR
-    res_no = seg.segment(fake, scale=1.0)
-    res_roi = seg.segment(fake, scale=1.0, work_roi=roi)
+    res_no = seg.segment(fake, scale=1.0, mm_per_px=mmpp)
+    res_roi = seg.segment(fake, scale=1.0, work_roi=roi, mm_per_px=mmpp)
     # 先确认假黄铜"不带 ROI 时确实被切出来了"，否则这个测试是空转
     n_seen = sum(1 for (cx, cy) in pat if res_no.brass_mask[cy, cx] > 0)
     check(n_seen == len(pat),
@@ -143,8 +146,8 @@ def main() -> int:
 
     print("== 场景 5：ROI 不能误伤料盘内的零件 ==")
     # 料盘内的黄铜必须**不受 ROI 影响**（这是"不误伤"的核心保证）
-    a_in_no = int(base.brass_mask[:].sum())
-    a_in_roi = int(seg.segment(img, scale=1.0, work_roi=roi).brass_mask.sum())
+    a_in_no = int(base.brass_mask.sum())
+    a_in_roi = int(seg.segment(img, scale=1.0, work_roi=roi, mm_per_px=mmpp).brass_mask.sum())
     print("   原图前景: 不带 ROI %d   带 ROI %d" % (a_in_no, a_in_roi))
     check(abs(a_in_no - a_in_roi) <= 0.02 * max(1, a_in_no),
           "料盘内的零件没被 ROI 削掉（差异 ≤2%）")

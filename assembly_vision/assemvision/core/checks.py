@@ -173,17 +173,21 @@ class Qualifier:
         """
         if margin_mm is None:
             margin_mm = float(self.cfg.get("segment.work_roi_margin_mm", 25.0))
+        # ★★ 尺寸闸门的尺度来源（唯一）：`TrayMap.mm_per_px(scale)`。
+        #   两遍分割都要传 —— 否则尺寸闸门静默关闭，
+        #   而"关闭"和"开着但没东西可挡"在结果上完全一样，排查时看不出来。
+        mmpp = self.tray.mm_per_px(scale)
         # ① 几何 ROI（不依赖位姿）粗分
         roi0 = None
         if margin_mm > 0:
             roi0 = self.work_roi_mask(bgr.shape, scale, pose=None, margin_mm=margin_mm)
-        seg = segmenter.segment(bgr, scale=scale, work_roi=roi0)
+        seg = segmenter.segment(bgr, scale=scale, work_roi=roi0, mm_per_px=mmpp)
         pose, src, ident = self.pose_estimate(seg, scale, bgr=bgr, prev_pose=prev_pose)
         # ② 用位姿再算一次 ROI，重新分割（ROI 更贴合实际料盘位置）
         if margin_mm > 0 and pose is not None and getattr(pose, "ok", False):
             roi1 = self.work_roi_mask(bgr.shape, scale, pose=pose, margin_mm=margin_mm)
             if roi1 is not None:
-                seg2 = segmenter.segment(bgr, scale=scale, work_roi=roi1)
+                seg2 = segmenter.segment(bgr, scale=scale, work_roi=roi1, mm_per_px=mmpp)
                 # 只有"分割结果没变差"才采用第二遍（防止 ROI 反而把零件切掉）
                 s1 = int((seg.brass_mask > 0).sum())
                 s2 = int((seg2.brass_mask > 0).sum())

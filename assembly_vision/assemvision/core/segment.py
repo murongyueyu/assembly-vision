@@ -30,11 +30,19 @@ class Segmenter:
         # ★ 金属掩膜（不靠色相）：见 `_metal_mask()` 的说明与 docs/踩坑实录.md §2.13
         self.metal = dict(seg.get("metal", {}) or {})
         self.background = str(seg.get("background", "black"))
+        # ★★ 尺寸闸门 + ROI 模式（`work_roi_mode`）：见 `_size_gate()` 的说明
+        #   与 docs/现状与交接.md 的 P1-1。两项都是**换 D435 之后补的** ——
+        #   换相机不解决"木桌的色相与黄铜重叠"，只能靠几何。
+        self.max_diam_mm = seg.get("max_diam_mm", 120.0)
+        self.work_roi_mode = str(seg.get("work_roi_mode", "work")).strip().lower()
+        # ★ 用已过滤的 brass 连通域裁 metal 掩膜时的外扩量（默认 6mm）
+        self.metal_keep_margin_mm = float(seg.get("metal_keep_margin_mm", 6.0))
 
     # ── 对外主入口 ────────────────────────────────────────────
     def segment(self, bgr: np.ndarray, ts: float = 0.0, scale: float = 1.0,
                 want_features: bool = True,
-                work_roi: Optional[np.ndarray] = None) -> SegResult:
+                work_roi: Optional[np.ndarray] = None,
+                mm_per_px: Optional[float] = None) -> SegResult:
         """分割。
 
         ★ work_roi（工位全局 ROI）：
@@ -49,17 +57,59 @@ class Segmenter:
 
           ROI 由调用方算（`Qualifier.work_roi_mask()`），因为它要知道料盘单应
           和装配位；`core/` 不去猜这些。
+
+        ★★ mm_per_px（每像素多少毫米，GSD）：
+          给定时启用**尺寸闸门**（`segment.max_diam_mm`）：等效直径超过上限的
+          黄铜连通域**整块剔除**。这是 P1-1「开放位置」的前提（见 `_size_gate()`），
+          因为色相挡不住木桌，尺寸能挡（木桌 Ø201mm vs 真零件最大 Ø64.5mm）。
+          **不给就完全退回旧行为**（老调用方与合成图测试不受影响）。
+          ★ 尺度来源必须唯一 = `TrayMap.mm_per_px(scale)`，`core/` 不去猜。
         """
         t0 = time.time()
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
 
+        # ★★ `work_roi_mode: full` = **不用位置挡，改用尺寸挡**（P1-1「开放位置」）。
+        #   ★ 为什么这个开关在 Segmenter 里、而不是让 `work_roi_mask()` 返回全白：
+        #     `part_track_demo.py` 还拿同一张 ROImask 做**内缩后的"新轨迹准入"**
+        #     判断（`_in_inset_roi`，见实录 §2.28）。若掩膜在全图模式下变成全白，
+        #     那道闸门会静默失效 —— 料盘外的噪声又能变成幻影轨迹。
+        #     所以：**掩膜照旧算（几何事实不变），"用不用它"由这里决定。**
+        use_work_roi = (self.work_roi_mode != "full")
+        # ★ 尺寸闸门只在给了 mm_per_px 时生效（没给 = 无法判尺寸 = 静默关闭）
+        max_diam = None
+        if mm_per_px is not None:
+            try:
+                max_diam = float(self.max_diam_mm)
+            except (TypeError, ValueError):
+                max_diam = None
+        gate_on = bool(max_diam and max_diam > 0)
+
+        # ★★ 尺寸闸门必须量「**闭运算之前**」的连通域（顺序铁律 1/2）：
+        #   `morph_close` 会把**相距 1~2px 的东西连成一块**。木桌就贴在零件旁边
+        #   （真机上木桌下沿 y=204 比料盘上沿 y=187 还低），一旦先闭运算再量尺寸，
+        #   得到的是"木桌 + 贴着它的零件"这一整块 —— 整块超限 -> **连真零件一起剔掉**。
+        #   实测（tests/test_size_gate.py 场景 4）：先闭运算时四个零件只剩 2 个。
+        #   所以顺序是：**色域 -> 退化版连通域量尺寸 -> 用 keep 掩膜裁 -> 再闭运算**。
+        #   `raw_brass` 只是"用来量尺寸的骨架"，不做开/闭运算，也不输出给任何调用方。
+        raw_brass = self._mask(hsv, self.brass, morph=False)
         brass_mask = self._mask(hsv, self.brass)
         glove_mask = self._mask(hsv, self.glove)
-        if work_roi is not None:
-            if work_roi.shape[:2] != brass_mask.shape[:2]:
-                work_roi = cv2.resize(work_roi, (brass_mask.shape[1], brass_mask.shape[0]),
-                                      interpolation=cv2.INTER_NEAREST)
-            brass_mask = cv2.bitwise_and(brass_mask, work_roi)
+        roi_m = work_roi
+        if roi_m is not None and use_work_roi:
+            if roi_m.shape[:2] != brass_mask.shape[:2]:
+                roi_m = cv2.resize(roi_m, (brass_mask.shape[1], brass_mask.shape[0]),
+                                   interpolation=cv2.INTER_NEAREST)
+            brass_mask = cv2.bitwise_and(brass_mask, roi_m)
+            raw_brass = cv2.bitwise_and(raw_brass, roi_m)
+        # ★★ 尺寸闸门在**金属掩膜之前**（顺序铁律 2/2，见 `_metal_mask` 的说明）：
+        #   否则木桌照样进 metal 掩膜（实测占比曾达 99.9%）。
+        #   ★ 量的是 `raw_brass`，裁的是 `brass_mask` —— 两者像素集合一样，
+        #     只差形态学；用 raw 量就不会被"闭运算连出来的大块"骗到。
+        keep_mask = (self._size_gate(raw_brass, mm_per_px, max_diam)
+                     if gate_on else np.ones_like(brass_mask))
+        n_drop = int(np.count_nonzero((brass_mask > 0) & (keep_mask == 0)))
+        if n_drop:
+            brass_mask = cv2.bitwise_and(brass_mask, keep_mask)
 
         res = SegResult(ts=ts, scale=scale, brass_mask=brass_mask, glove_mask=glove_mask)
 
@@ -76,7 +126,16 @@ class Segmenter:
         #
         #   ★ 判据必须同时有 V 下限：木桌也是"非绿"，光看非绿会把桌子算进来。
         #     `v_min` 挡住暗部；同时外层还有 work_roi 兜着（位置即身份）。
-        res.metal_mask = self._metal_mask(hsv, work_roi)
+        #
+        # ★★ 必须**传 keep_mask**（P1-1 的实现要点 3，2026-10 补）：
+        #   尺寸闸门已经剔掉的连通域（木桌、笔记本那种 Ø200mm+ 的块），
+        #   在 metal 掩膜里**必须同样剔掉** —— 否则工作 ROI 一放开
+        #   （`work_roi_mode: full`）它们就整块变成"金属"，
+        #   实测木桌区 metal 占比曾达 **99.9%**，辐条扫优整个失效。
+        #   `keep_mask=None` 时行为与改动前完全一致（老调用方不受影响）。
+        res.metal_mask = self._metal_mask(hsv, roi_m,
+                                         keep_mask=(keep_mask if gate_on else None),
+                                         mm_per_px=mm_per_px)
 
         # 手套：取最大连通域，套面积与长宽比闸门（滤掉蓝色噪声与屏幕反光）
         blobs_g = self._blobs(glove_mask, min_area_px=float(self.glove.get("min_area_px", 3000)))
@@ -108,6 +167,17 @@ class Segmenter:
 
         res.detail = {"seg_ms": (time.time() - t0) * 1000.0}
 
+        # ── 尺寸闸门遥测 ──────────────────────────────────────────
+        # ★ 为什么要把闸门记进 detail：它是**静默**的 ——
+        #   木桌被剔掉时界面与日志都不会有任何异样，
+        #   而一旦它误伤真零件（例如阈值配小了），表现同样是"什么都没有"。
+        #   所以把"剔了多少像素 / 阈值是多少 / 当时开没开"都记下来。
+        res.detail["size_gate"] = {"on": bool(gate_on),
+                                  "max_diam_mm": (None if max_diam is None else float(max_diam)),
+                                  "mm_per_px": (None if mm_per_px is None else float(mm_per_px)),
+                                  "dropped_px": int(n_drop)}
+        res.detail["work_roi_mode"] = self.work_roi_mode
+
         # ── 过曝自检 ──────────────────────────────────────────────
         # ★★ 为什么必须查这个（c5 实测踩过）：过曝的后果**不是"少切一点"，
         #   而是整条判据链静默失效** ——
@@ -124,7 +194,48 @@ class Segmenter:
         return res
 
     # ── 内部工具 ──────────────────────────────────────────────
-    def _mask(self, hsv: np.ndarray, spec: Dict[str, float]) -> np.ndarray:
+    def _size_gate(self, mask: np.ndarray, mm_per_px: Optional[float],
+                   max_diam_mm: Optional[float]) -> np.ndarray:
+        """★ 尺寸闸门：**等效直径**超过上限的连通域整块剔除。
+
+        为什么是这个判据（P1-1，实测数字见 `docs/现状与交接.md`）：
+            木桌（全图分割）31795mm² = 等效直径 **201mm**，而且**色相挡不住**
+            （木桌 H=19、S=122 与黄铜重叠，换 D435 后照样复现：黄铜 86048px
+            = 全屏 28.0%）；真零件最大只有 3300mm²（轮盘 Ø64.5）。
+            两者差 **2.7 倍**，用"等效直径"一刀切很干净 ——
+            取 100~150mm 都能挡掉木桌而不误伤任何真零件。
+
+        ★ 为什么用「等效直径 2·√(面积/π)」而不是外接框最大边：
+          真零件之间**外接框尺寸很接近**（轮盘槽 Ø75、底座槽 Ø65），
+          而外接框量的是"分割到的像素范围"，比等效直径更吃锯齿/残缺。
+          等效直径直接对应"这块有多大"，与"零件清单里最大的是谁"可比。
+
+        ★ 阈值来源：`segment.max_diam_mm`。**必须在配置里**，不要硬编码。
+        ★ 代价（明确记下）：等效直径是**整块**的 —— 若某个合法零件与木桌
+          被 `morph_close` 连成了一块，整块会被剔掉（零件也跟着丢）。
+          实测木桌在 `morph_close=5` 下不会被连起来，所以这个代价目前不触发。
+        """
+        if mm_per_px is None or not max_diam_mm or max_diam_mm <= 0:
+            return np.ones_like(mask)
+        try:
+            mmpp = float(mm_per_px)
+        except (TypeError, ValueError):
+            return np.ones_like(mask)
+        if mmpp <= 0:
+            return np.ones_like(mask)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+        keep = np.ones_like(mask)
+        for i in range(1, int(n)):
+            a = float(stats[i, cv2.CC_STAT_AREA])
+            if a <= 0:
+                continue
+            diam_mm = 2.0 * float(np.sqrt(a / np.pi)) * mmpp
+            if diam_mm > float(max_diam_mm):
+                keep[labels == i] = 0
+        return keep
+
+    def _mask(self, hsv: np.ndarray, spec: Dict[str, float],
+              morph: bool = True) -> np.ndarray:
         """按 HSV 区间取掩膜。
 
         ★ 上限必须齐全：h_max / s_max / v_max 都要能配。
@@ -132,12 +243,18 @@ class Segmenter:
           绿幕 S≈255、色相 H≈83，而黄铜 S 中值只有 87，
           靠「饱和度上限 s_max」挡绿幕比调 h_max 稳得多（见 README 第六节）。
           这里默认值保持 255/179，所以老配置的行为完全不变。
+
+        ★ morph=False：跳过开/闭运算，只做纯色域分割。**只给尺寸闸门量尺寸用** ——
+          `morph_close` 会把相距 1~2px 的块连成一块，用它量尺寸会把
+          "木桌 + 贴着它的真零件"当成一整块，于是连零件一起剔掉（实测踩过）。
         """
         lo = np.array([int(spec.get("h_min", 0)), int(spec.get("s_min", 0)),
                        int(spec.get("v_min", 0))], dtype=np.uint8)
         hi = np.array([int(spec.get("h_max", 179)), int(spec.get("s_max", 255)),
                        int(spec.get("v_max", 255))], dtype=np.uint8)
         m = cv2.inRange(hsv, lo, hi)
+        if not morph:
+            return m
 
         ko = int(spec.get("morph_open", 3))
         kc = int(spec.get("morph_close", 5))
@@ -151,7 +268,9 @@ class Segmenter:
         return m
 
     def _metal_mask(self, hsv: np.ndarray,
-                    work_roi: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+                    work_roi: Optional[np.ndarray] = None,
+                    keep_mask: Optional[np.ndarray] = None,
+                    mm_per_px: Optional[float] = None) -> Optional[np.ndarray]:
         """金属掩膜：**不靠色相**，判据 = 亮 + 不是绿垫。
 
         配置（`segment.metal`，全部有默认值，老配置行为不变）：
@@ -166,6 +285,18 @@ class Segmenter:
 
         ★ 为什么不能用"非绿"直接当金属：木桌/皮肤也是非绿。
           所以必须配 V 下限，并且调用方应传 work_roi（位置即身份）。
+
+        ★★ keep_mask（可选，P1-1 的实现要点 3）：
+          给定时，只保留「已通过尺寸闸门的 brass 连通域**外扩若干 mm**」内的金属。
+          - 为什么是**外扩**而不是直接用 brass 掩膜：球头 Ø5mm 会**伸出**零件轮廓
+            （顶盖/轮盘的黄铜轮廓之外还有一圈球头），不外扩就会被裁掉。
+            外扩量 = `segment.metal_keep_margin_mm`（默认 6mm，来自 P1-1 备忘录）。
+          - 为什么必须裁：木桌是"亮 + 不是绿"（H=19、S=122、V=210），
+            只靠 `s_max=100` 只能把它的 metal 占比从 99.9% 压到 15.2%，
+            **压不到 0**；ROI 一放开它就会污染辐条扫优。
+          - ★ 尺度来源仍然是**唯一的那一个** `mm_per_px`（调用方从
+            `TrayMap.mm_per_px()` 取）—— 本函数只做"mm → 像素核大小"的换算，
+            不自己猜尺度。不传 `mm_per_px` 时**完全不裁**（老行为）。
         """
         m_cfg = dict(self.metal)
         if not bool(m_cfg.get("enabled", True)):
@@ -200,6 +331,25 @@ class Segmenter:
                 work_roi = cv2.resize(work_roi, (m.shape[1], m.shape[0]),
                                       interpolation=cv2.INTER_NEAREST)
             m = cv2.bitwise_and(m, work_roi)
+        # ★★ 用已通过尺寸闸门的 brass 连通域**外扩**后裁一刀（P1-1 要点 3）。
+        #   闭运算就是"外扩"：核半径 = metal_keep_margin_mm / mm_per_px。
+        #   ★ 只在**给了 mm_per_px 且给了 keep_mask** 时裁 —— 老调用方（不给尺度）
+        #     行为完全不变。
+        if keep_mask is not None and mm_per_px is not None:
+            try:
+                mmpp = float(mm_per_px)
+            except (TypeError, ValueError):
+                mmpp = 0.0
+            if mmpp > 0 and float(self.metal_keep_margin_mm) > 0:
+                r = int(round(float(self.metal_keep_margin_mm) / mmpp))
+                if r > 0:
+                    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+                    grown = cv2.morphologyEx(
+                        ((keep_mask > 0).astype(np.uint8)) * 255, cv2.MORPH_CLOSE, k)
+                    if grown.shape[:2] != m.shape[:2]:
+                        grown = cv2.resize(grown, (m.shape[1], m.shape[0]),
+                                           interpolation=cv2.INTER_NEAREST)
+                    m = cv2.bitwise_and(m, grown)
         return m
 
     @staticmethod

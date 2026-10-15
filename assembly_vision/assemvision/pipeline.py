@@ -215,7 +215,11 @@ class Pipeline:
             with self.sh.lock:
                 if self._work_roi is not None and self._work_roi.shape[:2] == f.left.shape[:2]:
                     roi = self._work_roi
-            seg = self.segmenter.segment(f.left, ts=f.ts, scale=f.scale, work_roi=roi)
+            # ★★ mm_per_px 必须传（2026-10 补）：它是**尺寸闸门**的尺度来源，
+            #   也是"尺度唯一来源 = TrayMap.mm_per_px()"这条铁律的落点 ——
+            #   `core/` 不去猜尺度，只接受调用方给的数（含 scale）。
+            seg = self.segmenter.segment(f.left, ts=f.ts, scale=f.scale, work_roi=roi,
+                                         mm_per_px=self.tray.mm_per_px(f.scale))
             seg.hand_on = glove_hits(seg.glove_mask,
                                      self.tray.slot_polygons_px(f.scale))
             with self.sh.lock:
@@ -345,7 +349,9 @@ class Pipeline:
     def _run_inspection(self, full: np.ndarray, scale: float) -> None:
         """用一帧全分辨率图跑齐套性检查。★ 必须在锁外调用。"""
         seg_full = self.segmenter.segment(full, ts=time.time(), scale=1.0,
-                                         want_features=False)
+                                         want_features=False,
+                                         # ★ mm_per_px 同理（尺寸闸门 + metal 掩膜裁剪）
+                                         mm_per_px=self.tray.mm_per_px(1.0))
         with self.sh.lock:
             wh = self.sh.wheel_height_mm
         # ★ 同样要传 pose（理由见 assembly_flags 那处注释）

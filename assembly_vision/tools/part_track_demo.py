@@ -308,8 +308,7 @@ def main() -> int:
                                           pose=getattr(seg, "_last_pose", None),
                                           margin_mm=float(wp.get("segment.work_roi_margin_mm",
                                                                  25.0)))
-                    res = seg.segment(frame, scale=1.0, work_roi=roi)
-                    # ★★ 传给追踪器的块必须**限在工位内**（内缩后）。
+                    res = seg.segment(frame, scale=1.0, work_roi=roi, mm_per_px=mmpp)
                     # ★★ 传给追踪器的块必须**限在工位内**（内缩后）。
                     #   不能只靠 allow_new 拦：先前这里传的是**外扩 25mm** 的 ROI 块，
                     #   料盘边沿外那条噪声依然能进来（实测 now_raw.png 里
@@ -337,7 +336,7 @@ def main() -> int:
                 gap = max(1, min(full_search_every, 10) if searching else full_search_every)
                 if (res is not None and frames - last_full_search >= gap):
                     last_full_search = frames
-                    r_full = seg.segment(frame, scale=1.0)      # ★ 不带 work_roi = 全图
+                    r_full = seg.segment(frame, scale=1.0, mm_per_px=mmpp)  # ★ 不带 work_roi = 全图
                     # ★★ 判丢只需要"**哪些零件 id 在画面里可见**"，
                     #   所以**直接对全图分割出的块做识别**就行 ——
                     #   不要跑 `check_slots`（那要算覆盖率+特征+逐槽判定，
@@ -403,7 +402,7 @@ def main() -> int:
                             m = np.zeros(frame.shape[:2], np.uint8)
                             x0, y0, x1, y1 = box
                             m[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = 255
-                            r2 = seg.segment(frame, scale=1.0, work_roi=m)
+                            r2 = seg.segment(frame, scale=1.0, work_roi=m, mm_per_px=mmpp)
                             cand = [b for b in r2.brass_blobs
                                     if tracker.min_area_px <= b.area_px <= tracker.max_area_px]
                             if cand:

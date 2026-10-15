@@ -30,7 +30,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 MODULES = ["test_features", "test_segment", "test_d435_source", "test_polar",
            "test_fsm", "test_part_id", "test_part_id_tol", "test_tray_pose",
-           "test_work_roi", "test_assembly", "test_ui_renderer", "test_tracker"]
+           "test_work_roi", "test_size_gate", "test_assembly", "test_ui_renderer",
+           "test_tracker"]
 
 
 def main() -> int:
