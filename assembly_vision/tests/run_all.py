@@ -31,15 +31,18 @@ for _stream in (sys.stdout, sys.stderr):
 MODULES = ["test_features", "test_segment", "test_d435_source", "test_polar",
            "test_fsm", "test_part_id", "test_part_id_tol", "test_tray_pose",
            "test_work_roi", "test_size_gate", "test_assembly", "test_ui_renderer",
-           "test_tracker", "test_tracking_e2e"]
-# ★★ `test_tracking_e2e` 与 `test_tracker` 的分工（2026-10 新增）：
-#     `test_tracker`      —— core 的**单元**覆盖（遮挡三档 / 身份余量 / 形状冻结 /
+           "test_tracker", "test_tracking_e2e", "test_tracking_roi"]
+# ★ 三个追踪相关模块的分工（2026-10）：
+#     `test_tracker`       —— core 的**单元**覆盖（遮挡三档 / 身份余量 / 形状冻结 /
 #                            判丢 / 防幽灵 / 最优认领 / 拿走放回），用自造 Blob，很快。
-#     `test_tracking_e2e` —— **端到端**：在合成序列上真跑「分割 -> 追踪 -> 打分」，
+#     `test_tracking_e2e`  —— **端到端**：合成序列上真跑「分割 -> 追踪 -> 打分」，
 #                            出覆盖率 / 中心误差 / 幽灵 / 漏跟，并**断言
 #                            `tools/part_track_demo.py` 与 core 共用同一套状态机**。
-#   为什么补后者：`part_track_demo.py` 原来自己写了一遍状态机（与 core 不一致），
-#   而 `test_tracker` 只测 core —— 那条路**从来没有自动测试**。
+#     `test_tracking_roi`  —— **料盘挪动**：纯几何性质测试（算术推，不需图片），
+#                            钉住「标称单应的平移过期也不影响 work_roi」这条性质。
+#   为什么补后两个：`part_track_demo.py` 原来① 自己写了一遍状态机（与 core 不一致）、
+#   ② ROI 恒用标称坐标（料盘一挪就全灭，实测黄铜只覆盖 0.5%）——
+#   而这两条路**都没有任何自动测试**。
 
 
 def main() -> int:

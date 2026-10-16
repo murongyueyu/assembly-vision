@@ -39,6 +39,13 @@ class Qualifier:
         self.r_cap = float(r.get("cap", 9.55))
         self.r_outer = float(r.get("outer", 37.2))
         self.r_plug = float(r.get("center_plug", 6.0))    # 判立柱用的中心小圆半径
+        # ★ 位姿缓存：`_last_pose` 是"上次成功估出的料盘位姿"，
+        #   `_last_outline` 是"上次料盘轮廓检测结果"。
+        #   ★★ 必须在这里显式初始化 —— 下面多处用 `getattr(self, "_last_pose", None)`
+        #     读它，靠"属性不存在"当默认值是能跑，但**属性清单就不完整了**，
+        #     接手的人看不出到底有哪些状态。显式写出来更稳。
+        self._last_pose = None
+        self._last_outline = None
 
     # ══════════════════════════════════════════════════════════
     # 要求① 单画面料盘逐位核验
@@ -159,6 +166,66 @@ class Qualifier:
             nominal_angle_deg=float(cfg.get("nominal_angle_deg", det.angle_deg)),
             use_scale=bool(cfg.get("use_scale", False)))
         return det, pose
+
+    def detect_outline_pose(self, bgr, scale: float = 1.0):
+        """只用**料盘自身轮廓**估位姿（不看零件）。返回 (pose, det)。
+
+        ★★ 为什么这条比"零件星座"更适合当 ROI 的来源（2026-10 实测定）：
+          `segment_with_roi()` 的第一遍用的是**标称几何 ROI** —— 而标称 ROI 来自
+          `calibration.yaml` 的料盘单应，**那是一张静态照片的位置**。
+          料盘一挪（本次实测挪了 **(258, 58) px = (222, 50) mm**），标称 ROI 就
+          整个框到空地上去了：实测**黄铜只覆盖 0.5%、4 个零件一个都不在里面**
+          ⇒ 第一遍切不到零件 ⇒ 零件星座估不出位姿 ⇒ 「两遍分割」永远停在第一遍。
+          **这是个死结：ROI 需要位姿，位姿需要零件，零件需要 ROI。**
+
+          而料盘轮廓**不依赖零件、也不依赖 ROI**（可以在全图上直接跑），
+          所以它能把这个死结打断。
+
+        ★★ 而且它**天然免疫 c3 单应的平移过期**（推导 + 实测都证实）：
+              pose.tx = (检测到的料盘中心 - 标称中心) × mm_per_px   ← 含标称中心
+              roi     = tray.mm_to_px(pose.apply(料盘四角))         ← 又用标称单应投回
+            ⇒ **标称中心被抵消**，最终 ROI 只由【检测到的料盘中心】决定。
+            实测：料盘挪了 258px，标称 ROI 覆盖 0.5% / 零件 0/4，
+                 轮廓 ROI 覆盖 **85.8%** / 零件 **4/4**。
+            ⇒ **不需要重跑 c3 就能容忍料盘挪动**（但 GSD 与槽位坐标仍要 c3 才准）。
+        """
+        got = self._pose_from_outline(bgr, scale)
+        if got is None:
+            return None, None
+        det, pose = got
+        self._last_outline = det
+        if pose is not None and getattr(pose, "ok", False):
+            self._last_pose = pose
+        return pose, det
+
+    def tracking_roi(self, bgr, scale: float = 1.0, detect: bool = True):
+        """**给实时追踪用的工位 ROI** —— 料盘挪了也要跟得上。返回 (roi, pose, src)。
+
+        降级链（与 `pose_estimate` 一致，但**不要求先能切到零件**）：
+            料盘轮廓（detect=True 时重算） > 上次已知位姿 > 标称坐标
+
+        ★ 与 `segment_with_roi()` 的分工：
+          `segment_with_roi()` 是**判定链**用的两遍分割（它第一遍就依赖标称 ROI，
+          所以料盘挪远了会失效）；本方法只解决"**ROI 该在哪**"这一件事，
+          且第一依据就是料盘轮廓，因此不受标称 ROI 失效的影响。
+          ★ 真机实测：本方法在料盘挪 222mm 后仍能 4/4 圈住零件。
+        """
+        pose = None
+        src = "nominal"
+        if detect:
+            try:
+                p2, _det = self.detect_outline_pose(bgr, scale)
+            except Exception:                                # noqa: BLE001
+                p2 = None
+            if p2 is not None and getattr(p2, "ok", False):
+                pose, src = p2, "outline"
+        if pose is None:
+            prev = getattr(self, "_last_pose", None)
+            if prev is not None and getattr(prev, "ok", False):
+                pose, src = prev, "cached"
+        margin = float(self.cfg.get("segment.work_roi_margin_mm", 25.0))
+        roi = self.work_roi_mask(bgr.shape, scale, pose=pose, margin_mm=margin)
+        return roi, pose, src
 
     def segment_with_roi(self, segmenter, bgr, scale: float = 1.0,
                          prev_pose=None, margin_mm: Optional[float] = None):

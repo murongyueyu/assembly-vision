@@ -13,9 +13,9 @@
 |---|---|
 | 代码版本 | `assembly_vision 0.1.0`（`assemvision/__init__.py`） |
 | 文档修订 | **rev.3m** — 文档结构重排（规则 / 事实 / 坑 / 命令 / 版本 分离） |
-| 功能修订 | **rev.3p** — ★★ **零件追踪端到端验收**：修两处真 bug + 新增量化验收工具与自动测试（**14 个模块**） |
+| 功能修订 | **rev.3q** — ★★ **料盘挪动后识别全灭的修复**：ROI 改为跟料盘走 + 定性三个根因（**15 个模块**） |
 | 方案基线 | `方案总纲_v3_4类零件.docx`（取代 `_v2(2)`） |
-| 代码状态 | ✅ 离线回归 **14/14**；✅ D435 工位**已标定出可用的相机控件与阈值**（识别准确）；<br>✅ 零件追踪**离线指标达标**（合成序列：覆盖 100%、中心误差 0.88px、零身份切换）；<br>⬜ 追踪**真机素材还没跑**（需要录一段）；⬜ 标定链 **c3~c6 仍未重跑**；⬜ 树莓派未部署 |
+| 代码状态 | ✅ 离线回归 **15/15**；✅ D435 工位相机控件与分割阈值已定（识别准确）；<br>✅ 零件追踪**离线指标达标**（合成序列：覆盖 100%、中心误差 0.88px、零身份切换）；<br>✅ **`work_roi` 能跟料盘挪动**（实测料盘挪 222mm 仍 4/4 圈住零件）；<br>⬜ **料盘挪远后识别仍不准** —— 需重跑 **c3**（GSD 偏 1.25×）与 **c6**（色域模板因锁 6300K 已全部作废）；<br>⬜ 追踪真机素材还没跑；⬜ 树莓派未部署 |
 
 ---
 
@@ -23,8 +23,9 @@
 
 | rev | 一句话 | 详见 |
 |---|---|---|
-| **rev.3p** | ★★ **零件追踪端到端验收**（本轮）：① 修**真 bug 1** —— `tools/part_track_demo.py` 在非检测帧**自己又写了一遍状态机**，与 `core/part_tracker.py` 的 `_adopt` 不一致（没更新 `area_ref`、直接赋 `part_id` **绕过** `apply_id`/`reid_ok`、没走形状对称闸、没重置若干计数器）⇒ 把状态机抽成 `PartTracker.absorb()`，**两条路共用**；② 修**真 bug 2** —— 实时链路喂给分类器的特征**缺了全部色域特征**（权重合计 3.2/18.1）与 `area_frac`，而 c6 标定/`checks.py` 走的是完整特征 ⇒ 新增 `part_id.classify_features()` 作为**唯一入口**，四个调用点全部改走它；③ 新增 `tools/measure_tracking_e2e.py`（**真素材/真机量化验收**：覆盖 / 中心误差 / 幽灵 / 漏跟 / 身份切换 / 耗时，支持多后端与多抽帧间隔对比 —— 这是 P1-2 追踪算法选型的**尺子**）；④ 新增 `tests/test_tracking_e2e.py`（端到端自动验收，进 `run_all.py` ⇒ **14 个模块**），并**断言 demo 与 core 共用同一套状态机**；⑤ 离线实测：合成序列覆盖 **100%**、中心误差中位 **0.88px（0.76mm）**、身份切换 **0 次**、漏跟 **0** | [详录](docs/版本历史_详录.md) |
-| **rev.3o** | ★★ **D435 工位口落地**（本轮）：① `camera.yaml` 的 `realsense.controls` 从 `{}` 填成 **13 项实测值**（关 AE+AWB、`exposure: 126`、`white_balance: 6300`、`contrast: 50`、保留手调的 `gamma: 300`/`sharpness: 100`）—— 为什么：这些值原来只活在驱动里，工程不复现、`--reset` 一次就冲掉，而且**AE/AWB 开着时两次抓帧色域差一个数量级**；② `segment.brass.v_min` 80→**90**（治"顶盖/立柱边缘闪烁"）+ `s_min` 50→**30**；③ `segment.max_diam_mm` 120→**100**（D435 上木桌假黄铜只有 Ø37mm、比零件还小，尺寸闸门已挡不住它，改成"绝对尺寸上限"）；④ `tracking` 三闸门按新 GSD **0.7287 mm/px** 重算（`max_area_px` 8000→**10000**、`dist_match_px` 40→**60**）；⑤ 修两处"配置与代码脱节"：`tracking.id_margin` **原来完全不生效**、`part_track_demo.py` 里硬编码的 40px 距离闸；⑥ 新增 **`ai_测试工具/`**（AI 工具区，10 个脚本）+ VSCode 10 条运行配置 | [详录](docs/版本历史_详录.md) · [工位实测记录](ai_测试工具/工位帧/工位实测记录.md) |
+| **rev.3q** | ★★ **料盘挪动后「一个零件都识别不到」**（本轮，**三个根因叠加**）：① **真 bug** —— `part_track_demo.py` 写 `pose=getattr(seg, "_last_pose", None)`，而 `seg` 是 `Segmenter`、**永远没这个属性** ⇒ pose 恒为 None ⇒ ROI 一直用**静态标称坐标**（"位姿修正"从来没生效过）—— 料盘挪 222mm 后实测**黄铜只覆盖 0.5%、4 个零件全在 ROI 外**。修法：新增 `Qualifier.tracking_roi()`（降级链 = **料盘自身轮廓 > 上次位姿 > 标称**）⇒ 实测料盘挪 222mm 仍 **4/4** 圈住零件；② **改白平衡让色域模板全部作废** —— 锁 6300K 后立柱 `c_hue_mean` 从模板 33.7~34.6 变实测 **19.0**，色域与尺度无关 ⇒ 必须重跑 **c6**；③ **GSD 偏 1.25×** —— 料盘边长实测 232.3px vs 标称 185.6px（轮盘 Ø88.8 vs 真实 Ø74.4 ⇒ 1.19，两个独立估计吻合）⇒ 物理量全部越界 ⇒ 必须重跑 **c3**。④ 新增 `tests/test_tracking_roi.py`（**纯几何性质**测试）⇒ **15 个模块** | [实录 2.44](docs/踩坑实录.md) |
+| **rev.3p** | ★★ **零件追踪端到端验收**：① 修**真 bug 1** —— `part_track_demo.py` 在非检测帧**自己又写了一遍状态机**，与 core 的 `_adopt` 不一致（没更新 `area_ref`、直接赋 `part_id` **绕过** `apply_id`/`reid_ok`、没走形状对称闸、没重置计数器）⇒ 抽成 `PartTracker.absorb()`，**两条路共用**；② 修**真 bug 2** —— 实时链路喂给分类器的特征**缺了全部色域特征**（权重 3.2/18.1）⇒ 新增 `part_id.classify_features()` 作**唯一入口**；③ 新增 `tools/measure_tracking_e2e.py`（**多后端 × 多抽帧间隔**的量化验收 —— P1-2 的尺子）；④ 新增 `tests/test_tracking_e2e.py`；⑤ 离线实测：覆盖 **100%**、中心误差中位 **0.88px**、身份切换 **0** | [详录](docs/版本历史_详录.md) |
+| **rev.3o** | ★★ **D435 工位口落地**：① `camera.yaml` 的 `controls` 从 `{}` 填成 **13 项实测值**（关 AE+AWB、`exposure 126`、`white_balance 6300`）—— 这些值原来只活在驱动里，且**AE/AWB 开着时两次抓帧色域差一个数量级**；② `brass.v_min` 80→**90**（治"边缘闪烁"）+ `s_min` 50→**30**；③ `max_diam_mm` 120→**100**；④ `tracking` 三闸门按新 GSD **0.7287** 重算；⑤ 修两处"配置与代码脱节"；⑥ 新增 **`ai_测试工具/`** + VSCode 10 条配置 | [工位实测记录](ai_测试工具/工位帧/工位实测记录.md) |
 | rev.3n | ★★ **尺寸闸门落地**：`segment.max_diam_mm: 120`（等效直径超限的连通块整块剔除）+ `work_roi_mode: work\|full` + `Segmenter.segment()` 收 `mm_per_px` + `metal_mask` 用已过滤 brass 连通域裁一刀；新增 `tests/test_size_gate.py` 与 `tools/verify_size_gate.py`。★ 两条顺序铁律与三个判据坑见实录 **2.42** | [详录](docs/版本历史_详录.md) |
 | rev.3m | ★ **文档重排**：`AGENTS.md` 只留规则（≤20KB）；事实→`现状与交接.md`；命令→`架构与命令.md`；长版本段→`版本历史_详录.md`；坑索引并入 `踩坑实录.md` §2.1 | [详录](docs/版本历史_详录.md) |
 | rev.3l | ★★ **D435 接进工程**（`sources/d435.py` + factory + camera.yaml；真机 640x480@30 = 30.0fps）；纠正 640×480 的 GSD（0.795 是外推，**实测 0.596**）；修掉 GBK 控制台下回归"假崩" | [详录](docs/版本历史_详录.md) |
@@ -42,19 +43,21 @@
 
 ---
 
-## 本轮（rev.3o）改了哪些文件
+## 近几轮改了哪些文件（rev.3o~3q）
 
 | 文件 | 改了什么 |
 |---|---|
-| `config/camera.yaml` | `controls: {}` → **13 项实测值**（关 AE+AWB）；整段依据重写（含"WB 走过 4600 的弯路"与最终 6300 的来历） |
-| `config/workpiece.yaml` | `brass.s_min` 50→30、**`v_min` 80→90**、`max_diam_mm` 120→100、`tracking.max_area_px` 8000→10000、`dist_match_px` 40→60；`glove` 加"会误检绿幕、待双层手套重定"的 ⚠️ 说明；`work_roi_mode` 加"**不切 full**"的新依据；过期 GSD 注释一并更正 |
-| `core/part_tracker.py` | ★ `tracking.id_margin` **真的从配置读并下发到每条轨迹**（原来配置项完全不生效） |
-| `tools/part_track_demo.py` | 硬编码的 40px 距离闸改读 **`tracker.dist_match`** |
-| `tests/test_size_gate.py` | 把「<0.8×上限」这个**没依据的系数**换成「上限 ≥ 实测最大零件 ×1.25」 |
-| `tools/probe_d435.py` | 加 `--save-dir`（受限进程写不进 `data/probe`） |
-| **新增 `ai_测试工具/`** | AI 自己的工具区（10 个脚本 + 工位帧资料）；**`用户存档/` 归还给用户**（AI 加的 6 个 `d435_*.py` 已移出） |
-| **新增 `.vscode/launch.json`** | 10 条运行/调试配置（实况台、抓帧、内参、色域、开流诊断、WB 扫描、回归…） |
-| **新增 `移植方案_零件分割识别追踪_到D435.md`** | 移植方案与风险清单 |
+| `config/camera.yaml` | `controls: {}` → **13 项实测值**（关 AE+AWB、WB 6300）；整段依据重写 |
+| `config/workpiece.yaml` | `brass.s_min` 50→30、**`v_min` 80→90**、`max_diam_mm` 120→100、`max_area_px` 8000→10000、`dist_match_px` 40→60 |
+| `core/part_tracker.py` | ★ `id_margin` **真的从配置读并下发**（原来完全不生效）；状态机抽成公开的 **`absorb()`** |
+| `core/part_id.py` | 新增 **`classify_features()`** —— 分类器特征的**唯一入口**（补回被实时链路扔掉的 6 个色域特征） |
+| `core/checks.py` | 新增 **`Qualifier.tracking_roi()` / `detect_outline_pose()`** —— ROI 跟料盘走（料盘挪动也能检测） |
+| `tools/part_track_demo.py` | 距离闸改读配置；非检测帧改走 `absorb()`；**ROI 改走 `tracking_roi()`** |
+| **新增** `tools/measure_tracking_e2e.py` | 追踪**量化验收**（多后端 × 多抽帧间隔；P1-2 的尺子） |
+| **新增** `tests/test_tracking_e2e.py` `test_tracking_roi.py` | 端到端验收 + 料盘挪动的**几何性质**测试（**15 个模块**） |
+| **新增 `ai_测试工具/`** | AI 工具区（实况调试台等 10 个脚本 + 工位帧资料）；**`用户存档/` 归还给用户** |
+| **新增 `.vscode/launch.json`** | 10 条运行配置（钉了解释器 / `integratedTerminal` / UTF-8） |
+| **新增** `移植方案_零件分割识别追踪_到D435.md` | 移植方案与风险清单 |
 
 > ★ 写日志的规矩：**一行一句话，写清"为什么"**；数字与决策细节写进
-> `docs/版本历史_详录.md` 或 `docs/对话存档_*.md`，**别往本文件堆**。
+> `docs/版本历史_详录.md`、`docs/踩坑实录.md` 或 `docs/对话存档_*.md`，**别往本文件堆**。

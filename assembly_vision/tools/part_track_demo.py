@@ -222,6 +222,9 @@ def main() -> int:
     #   实测：work_roi 只占画面 24.8%，而**四个真零件全在里面**。
     #   ★ 用 --allow-new-anywhere 可关掉这道闸（例如以后要支持「开放位置」）。
     _roi_cache = {}
+    # ★ 最近一次算出的料盘位姿 + 它的来源（"outline" / "cached" / "nominal"）。
+    #   检测帧上更新；`_ensure_roi` 用它把"新轨迹只准建在工位内"那道闸也对齐料盘。
+    _roi_state = {"pose": None, "src": "nominal"}
     if args.allow_new_anywhere:
         def _allow_new(_b):
             return True
@@ -238,11 +241,19 @@ def main() -> int:
             return float(_sc) >= float(args.new_track_min_score)
 
     def _ensure_roi(_h, _w):
-        """确保内缩 ROI 已算好（两个谓词共用同一份缓存）。"""
+        """确保内缩 ROI 已算好（两个谓词共用同一份缓存）。
+
+        ★★ 这里也必须**跟着料盘位姿走**：它决定"新轨迹只准建在工位内"。
+          用标称 ROI 的话，料盘一挪，零件就全在"工位外"⇒ 一个轨迹都建不起来
+          （症状与识别失败长得一样，但根因在防幽灵这道闸上）。
+        ★ 检测帧上会重算位姿，所以这里取 `_roi_state` 里最近一次的结果；
+          没跑过检测帧（工具刚启动）时退回标称坐标。
+        """
         key = (_h, _w)
         m = _roi_cache.get(key)
         if m is None:
             m = q.work_roi_mask(frame.shape, 1.0,
+                                pose=_roi_state.get("pose"),
                                 margin_mm=float(wp.get("segment.work_roi_margin_mm", 25.0)))
             ins = int(args.allow_new_inset_px)
             if ins > 0:
@@ -324,11 +335,23 @@ def main() -> int:
                 if need_detect:
                     last_detect_frame = frames
                     ts = time.perf_counter()
-                    # ★ 只在检测帧跑全图分割；用 work_roi 挡木桌
-                    roi = q.work_roi_mask(frame.shape, 1.0,
-                                          pose=getattr(seg, "_last_pose", None),
-                                          margin_mm=float(wp.get("segment.work_roi_margin_mm",
-                                                                 25.0)))
+                    # ★★ ROI 必须**跟着料盘走** —— 见 `Qualifier.tracking_roi()` 的说明。
+                    #   ★ 原来这里写的是 `pose=getattr(seg, "_last_pose", None)`，
+                    #     而 `seg` 是 `Segmenter` —— **它永远不会设置 `_last_pose`**，
+                    #     所以那个 pose **恒为 None**，"位姿修正"从来没生效过。
+                    #     实测后果（料盘挪了 222mm）：标称 ROI 黄铜覆盖 **0.5%**、
+                    #     4 个零件**一个都不在 ROI 里** ⇒ 一个都识别不到。
+                    #   ★ 现在改走 `tracking_roi()`：**第一依据是料盘自身轮廓**
+                    #     （不依赖零件、也不依赖标称 ROI），实测料盘挪 222mm 后
+                    #     仍能圈住 **4/4** 个零件。
+                    roi, _roi_pose, _roi_src = q.tracking_roi(frame, 1.0, detect=True)
+                    # ★★ 位姿变了就得把 ROI 缓存作废 —— 否则 `_ensure_roi` 会一直
+                    #   用旧料盘位置算出来的内缩 ROI，"新轨迹只准建在工位内"那道闸
+                    #   又会把料盘挪动后的零件全挡在外面。
+                    if _roi_state.get("src") != _roi_src or _roi_state.get("pose") is not _roi_pose:
+                        _roi_cache.clear()
+                    _roi_state["pose"] = _roi_pose
+                    _roi_state["src"] = _roi_src
                     res = seg.segment(frame, scale=1.0, work_roi=roi, mm_per_px=mmpp)
                     # ★★ 传给追踪器的块必须**限在工位内**（内缩后）。
                     #   不能只靠 allow_new 拦：先前这里传的是**外扩 25mm** 的 ROI 块，
