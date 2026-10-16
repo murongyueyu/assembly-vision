@@ -8,7 +8,9 @@
         49,
         82
       ],
-      "occluded": false
+      "occluded": false,
+      "mask": "000021_mask_0.png",
+      "mask_sha256": "a922b0bbd97ef62f1bb9894d9028435c55035c36adc2982fe240db848d170c6f"
     }
   ],
   "work_roi": null,

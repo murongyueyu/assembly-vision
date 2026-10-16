@@ -8,7 +8,9 @@
         104,
         105
       ],
-      "occluded": false
+      "occluded": false,
+      "mask": "000025_mask_0.png",
+      "mask_sha256": "9ed15f24eccce3c2e3ddd7f880aef822994ee98cbb1856efaa2ef56a200062d4"
     }
   ],
   "work_roi": null,
