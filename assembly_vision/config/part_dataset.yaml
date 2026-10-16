@@ -26,6 +26,9 @@ experiment:
   min_score: 0.55
   min_margin: 0.05             # ★ 实验拒识余量，防止并列由模板顺序决定
   holes_tol: 1.0
+  # 用户确认：顶盖小孔在当前清晰度下不可靠，两面同类，不用孔数区分身份。
+  ignored_features_by_part:
+    P4_cap: [holes]
   min_samples_per_class: 8
   lower_percentile: 5
   upper_percentile: 95

@@ -77,6 +77,20 @@ def contains(box, roi):
     return rx <= x + w / 2 < rx + rw and ry <= y + h / 2 < ry + rh
 
 
+def mask_iou_score(truth, predicted, scope):
+    """外轮廓标注仅比较填孔后的轮廓；与完整金属掩膜指标分开。"""
+    if scope not in ("full_mask", "outer_silhouette"):
+        raise ValueError("未知掩膜标注范围：%s" % scope)
+    masks = [np.uint8(truth > 0) * 255, np.uint8(predicted > 0) * 255]
+    if scope == "outer_silhouette":
+        for mask in masks:
+            contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(mask, contours, -1, 255, -1)
+    union = np.count_nonzero((masks[0] > 0) | (masks[1] > 0))
+    overlap = np.count_nonzero((masks[0] > 0) & (masks[1] > 0))
+    return float(overlap / union) if union else 0.0
+
+
 def evaluate(args):
     policy, wp = load_config(str(args.policy)), load_config(str(args.workpiece))
     samples = load_samples(args.dataset, args.split, include_clips=args.clips)
@@ -182,10 +196,9 @@ def evaluate(args):
             if ti in by_truth:
                 cv2.drawContours(proposed, [blobs[by_truth[ti]].contour], -1, 255, -1)
                 proposed = cv2.bitwise_and(proposed, mask)
-            union = int(np.count_nonzero((gt > 0) | (proposed > 0)))
-            overlap = int(np.count_nonzero((gt > 0) & (proposed > 0)))
+            mask_scope = obj.get("mask_scope", "full_mask")
             mask_scores.append(dict(image=str(sample["path"]), part=obj["part"], static=static,
-                                    iou=overlap / union if union else 0.0))
+                                    mask_scope=mask_scope, iou=mask_iou_score(gt, proposed, mask_scope)))
         timing = dict(seg_ms=(after_seg - start) * 1000,
                       features_classify_ms=(after_class - after_seg) * 1000,
                       total_ms=(after_class - start) * 1000)
@@ -241,6 +254,10 @@ def evaluate(args):
                   latency["total_ms"]["median"], latency["total_ms"]["p95"]), "",
               "原始预测、混淆矩阵、人工掩膜 IoU 与来源记录见 report.json；全部原图叠加结果见 visuals/。", "",
               "当前实验不会修改正式配置。静态验收必须另查遮挡比例、每类样本量、掩膜数量与手套误报。"]
+    for mask_scope, label in [("full_mask", "完整金属掩膜（含孔洞）"), ("outer_silhouette", "外轮廓（内部孔洞不评测）")]:
+        values = [r["iou"] for r in mask_scores if r["static"] and r["mask_scope"] == mask_scope]
+        lines.append("%s：%d份%s。两种口径不合并验收。" % (
+            label, len(values), "，IoU中位%.3f" % float(np.median(values)) if values else "，未覆盖"))
     if coverage_gaps:
         lines += ["", "## 未覆盖的采集场景", ""]
         for session, skipped in coverage_gaps.items():

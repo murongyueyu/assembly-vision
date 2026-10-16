@@ -267,6 +267,8 @@ def build_templates(rows, policy, feature_set):
             raise ValueError("%s 只有 %d 个可匹配开发样本，先检查漏检/标注" % (part, len(feats)))
         bands = {}
         for key in keys:
+            if key in policy.get("experiment.ignored_features_by_part", {}).get(part, []):
+                continue
             vals = [f[key] for f in feats if key in f and np.isfinite(f[key])]
             if len(vals) != len(feats):
                 raise ValueError("开发样本缺少特征 %s；不允许静默降低维度" % key)

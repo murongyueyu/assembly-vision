@@ -16,7 +16,7 @@ from part_dataset import (ROOT, POLICY, PARTS, bbox_iou, capture_tasks, file_has
                           load_config, load_samples, match_boxes, read_json, save_image,
                           score_frame, validate_annotation, write_json)
 from part_dataset import remaining_tasks, selected_tasks, classifier_from_templates
-from measure_part_dataset import fit, evaluate
+from measure_part_dataset import fit, evaluate, mask_iou_score
 from capture_part_dataset import main as capture_main, check_locked, windows_mf_exposure
 from annotate_part_dataset import mask_view_geometry, mask_view_point, MASK_TOOLBAR
 from annotate_part_dataset import main as annotate_main
@@ -70,6 +70,17 @@ def make_session(folder, split, wp_path, policy_path, count):
 
 
 def main():
+    silhouette = np.zeros((30, 30), np.uint8)
+    cv2.circle(silhouette, (15, 15), 10, 255, -1)
+    ring = silhouette.copy()
+    cv2.circle(ring, (15, 15), 4, 0, -1)
+    check(mask_iou_score(silhouette, ring, "outer_silhouette") == 1 and
+          mask_iou_score(silhouette, ring, "full_mask") < 1,
+          "孔洞未标时只比较外轮廓，与完整金属掩膜指标区分")
+    ring[0:3, 0:3] = 255
+    check(mask_iou_score(silhouette, ring, "outer_silhouette") < 1,
+          "外轮廓口径仍保留额外背景误检惩罚，不裁切预测")
+    raises(lambda: mask_iou_score(silhouette, ring, "wrong"), "未知标注口径必须报错")
     editor = MaskEditor((40, 40))
     for p in [(5, 5), (30, 5), (30, 30), (5, 30)]:
         editor.point(p)
@@ -323,6 +334,9 @@ def main():
         fit(SimpleNamespace(dataset=base, policy=cfg_path, workpiece=wp,
                             output=model, variant="brass", features="shape_scale"))
         check(len(read_json(model)["templates"]) == 4, "四类模板由开发集建立")
+        check("holes" not in read_json(model)["templates"]["P4_cap"]["ranges"] and
+              "holes" in read_json(model)["templates"]["P1_base"]["ranges"],
+              "新顶盖模板不使用孔数区分身份，其他类别特征保持配置")
         check(all(r["session"] == "dev_a" for r in read_json(model)["source"]), "模板来源不包含验收会话")
         args = SimpleNamespace(dataset=base, policy=cfg_path, workpiece=wp, templates=model,
                                split="test", baseline=False, scope="full", clips=False, output=base / "report")

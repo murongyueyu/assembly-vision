@@ -118,6 +118,8 @@ def paint_mask(image, obj, smoke=False, initial=None, draft_path=None, image_has
     print("z/右键撤销一步，y 恢复；r 只取消当前多边形，x 清空整张（可撤销）。")
     print("s 确认，q 退出保留草稿；矩形框仅作参考，不限制掩膜边界。")
     print("已自动放大零件局部；+/- 调整倍率，v 隐藏/显示填充。保存仍为原图像素。")
+    if obj["part"] == "P4_cap":
+        print("顶盖统一按外轮廓标注，不要求挖出看不清的小孔；不以孔数区分两面。")
 
     def checkpoint():
         if draft_path is not None and not smoke:
@@ -337,6 +339,9 @@ def main(argv=None):
                     save_image(path.parent / rel, mask)
                     obj["mask"] = rel
                     obj["mask_sha256"] = file_hash(path.parent / rel)
+                    if obj["part"] == "P4_cap":
+                        obj["mask_scope"] = "outer_silhouette"
+                        obj.setdefault("holes_reviewed", False)
                     write_json(ann_path, previous)
                     draft_path.unlink(missing_ok=True)
                     print("掩膜保存成功：%s" % (path.parent / rel))
