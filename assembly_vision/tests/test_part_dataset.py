@@ -70,6 +70,23 @@ def make_session(folder, split, wp_path, policy_path, count):
 
 
 def main():
+    # 小件面积实验必须只改内存副本，不能污染工位配置或采集快照。
+    from assemvision.config import Config
+    from part_dataset import segment_variant
+    original_wp = load_config(str(ROOT / "config" / "workpiece.yaml"))
+    original_data = copy.deepcopy(original_wp.data)
+    experiment = copy.deepcopy(load_config(str(POLICY)).data)
+    image = np.zeros((80, 120, 3), np.uint8)
+    image[:] = cv2.cvtColor(np.array([[[82, 255, 130]]], np.uint8), cv2.COLOR_HSV2BGR)[0, 0]
+    image[20:30, 40:60] = cv2.cvtColor(np.array([[[25, 110, 180]]], np.uint8), cv2.COLOR_HSV2BGR)[0, 0]
+    _, before, _ = segment_variant(image, original_wp, Config(experiment), "brass")
+    experiment["experiment"]["segmentation_overrides"] = {"segment.brass.min_area_px": 100}
+    _, after, _ = segment_variant(image, original_wp, Config(experiment), "brass")
+    check(not before and len(after) == 1 and original_wp.data == original_data,
+          "独立面积实验可保留小件但不修改正式配置对象")
+    experiment["experiment"]["segmentation_overrides"] = {"capture.exposure": 10}
+    raises(lambda: segment_variant(image, original_wp, Config(experiment), "brass"),
+           "分割实验禁止覆盖相机采集参数")
     silhouette = np.zeros((30, 30), np.uint8)
     cv2.circle(silhouette, (15, 15), 10, 255, -1)
     ring = silhouette.copy()

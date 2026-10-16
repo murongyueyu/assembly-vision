@@ -228,6 +228,14 @@ def segment_variant(image, wp, policy, variant):
     """实验分割直接处理原图；不给旧单应或物理尺寸闸门，木桌也保留供评测。"""
     if variant not in policy.get("experiment.variants"):
         raise ValueError("未知掩膜方案：%s" % variant)
+    # 独立实验只在内存副本上覆盖分割参数，保留正式配置及采集快照用于对账。
+    overrides = policy.get("experiment.segmentation_overrides", {})
+    if overrides:
+        wp = type(wp)(copy.deepcopy(wp.data))
+        for key, value in overrides.items():
+            if not key.startswith("segment."):
+                raise ValueError("实验覆盖只允许segment分割参数：%s" % key)
+            wp.set(key, value)
     seg = Segmenter(wp)
     result = seg.segment(image, mm_per_px=None, work_roi=None)
     mask = result.brass_mask.copy()

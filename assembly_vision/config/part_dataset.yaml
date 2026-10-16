@@ -15,6 +15,8 @@ capture:
 annotation:
   clip_interval_s: 1.0          # 连续视频的标注按时间戳抽样，避免把相邻帧当独立样本
 experiment:
+  # 正式配置不变；离线实验另存policy时可覆盖segment.*，默认不覆盖。
+  segmentation_overrides: {}
   variants: [brass, seeded_metal, seeded_metal_close]
   # ★ 候选实验值，必须由真实标注对比决定，不能直接作为正式参数。
   seed_margin_px: 8
