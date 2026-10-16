@@ -56,6 +56,7 @@ sys.path.insert(0, ROOT)
 import cv2                                                        # noqa: E402
 from assemvision.config import load_config                        # noqa: E402
 from assemvision.core.checks import Qualifier                     # noqa: E402
+from assemvision.core.part_id import classify_features               # noqa: E402
 from assemvision.core.part_tracker import PartTracker, make_tracker   # noqa: E402
 from assemvision.core.roi import TrayMap                          # noqa: E402
 from assemvision.core.segment import Segmenter, glove_hits         # noqa: E402
@@ -182,13 +183,31 @@ def main() -> int:
     print("                  medianflow 会崩、csrt 太慢（见文件头实测表）")
     print()
 
+    def prepare(blob, img=None, mask=None, roi_area_px=None):
+        """把**分类器要用的特征**算好挂到 `blob.features` 上。
+
+        ★★ 为什么必须这样分工（2026-10 修，本模块一个真 bug）：
+          `PartTracker` 的 `classify` 回调收到的是**一个特征字典**（不是 blob、不是图），
+          所以"算特征"这件事只能在**调用方**做。原来这里做错了 —— 只补了
+          `area_mm2` / `length_mm` / `short_side_mm` 三个尺度特征，
+          **没有色域特征、也没有 `area_frac`**；而 c6 标定与 `checks.py` 判定走的是
+          完整的 `features_from_blob(bgr=, mask=)`。
+          ⇒ 同一个零件在「界面显示的身份」与「槽位判定的身份」上**得分不一样**，
+            而且缺的正是**权重合计 3.2/18.1 的色域特征** ——
+            **标定了一份特征、推理时扔掉了**。
+
+        ★ 现在统一走 `part_id.classify_features()`（全项目唯一入口）：
+            img / mask  给了才算色域特征；不给则退回"只有形状+尺度"的老行为（不抛异常）
+            roi_area_px 给了才算 `area_frac`
+          ⇒ 调用方**手里有什么就传什么**，不再各自补特征。
+        """
+        blob.features = classify_features(blob, mm_per_px=mmpp, bgr=img, mask=mask,
+                                          roi_area_px=roi_area_px)
+        return blob
+
     def classify(feats):
-        f = dict(feats)
-        f["area_mm2"] = float(f.get("area_px", 0.0)) * mmpp * mmpp
-        rw, rh = float(f.get("rect_w", 0)), float(f.get("rect_h", 0))
-        f["length_mm"] = max(rw, rh) * mmpp
-        f["short_side_mm"] = min(rw, rh) * mmpp
-        pid, sc, _ = clf.classify(f)
+        """`PartTracker` 的回调：只吃特征字典（特征由 `prepare()` 预先挂好）。"""
+        pid, sc, _ = clf.classify(dict(feats))
         return pid, sc
 
     # ★ 槽位 -> 该放的零件 id（"缺件"提示要用它，见下面的说明）
@@ -211,7 +230,9 @@ def main() -> int:
             # 两道闸：位置（内缩 ROI 内）+ 身份（能被认成某种零件）。
             if not _in_inset_roi(_b):
                 return False
-            _pid, _sc = classify(dict(_b.features or {}))
+            # ★ 先把特征补齐（含色域）再判身份 —— 见 prepare() 的说明
+            _pid, _sc = classify(prepare(_b, frame,
+                                         res.brass_mask if res is not None else None).features)
             if not _pid:
                 return False
             return float(_sc) >= float(args.new_track_min_score)
@@ -349,7 +370,8 @@ def main() -> int:
                             if not (tracker.min_area_px <= _b.area_px
                                     <= tracker.max_area_px):
                                 continue
-                            _pid, _sc = classify(dict(_b.features or {}))
+                            # ★ 先把特征补齐（含色域）再判身份 —— 见 prepare() 的说明
+                            _pid, _sc = classify(prepare(_b, frame, r_full.brass_mask).features)
                             if _pid:
                                 ids.add(_pid)
                             else:
@@ -364,6 +386,15 @@ def main() -> int:
                     if occl is None:
                         occl = r_full.glove_mask
 
+                # ★★ 关键一步：**在交给追踪器之前**把分类器要用的特征补齐（含色域）。
+                #   为什么必须在这里做：`PartTracker` 内部调的是 `classify(b.features)`
+                #   （只吃特征字典），它手上没有图与掩膜。
+                #   而 `segment()` 出来的块只带 `contour_features()` 的结果
+                #   （形状 + `area_px`），**没有 `area_mm2`/`length_mm`/色域** ——
+                #   不补的话追踪器那条路径就只能拿形状分，与 c6 标定/`checks.py`
+                #   那条路径**得分不一致**（缺的正是权重 3.2/18.1 的色域特征）。
+                for _b in blobs:
+                    prepare(_b, frame, res.brass_mask if res is not None else None)
                 tracks = tracker.update(frame, blobs, detect=need_detect,
                                         classify=classify,
                                         seen_ids=seen_ids, occluder=occl,
@@ -424,19 +455,20 @@ def main() -> int:
                                 if float(np.hypot(b.centroid[0] - t.centroid[0],
                                                   b.centroid[1] - t.centroid[1])) > _gate:
                                     continue
-                                t.contour = b.contour
-                                t.area_px = float(b.area_px)
-                                t.visible_ratio = b.area_px / max(1e-6, t.area_ref)
-                                t.bbox = cv2.boundingRect(b.contour)
-                                if t.visible_ratio >= tracker.full_ratio:
-                                    t.state = "detected"
-                                    pid, sc = classify(dict(b.features or {}))
-                                    if pid:
-                                        t.part_id, t.id_score = pid, float(sc)
-                                elif t.visible_ratio <= tracker.occluded_ratio:
-                                    t.state = "occluded"
-                                else:
-                                    t.state = "tracked"
+                                # ★★ 交给 `PartTracker.absorb()` 去做状态机 ——
+                                #   **不要在这里自己改 `t.state` / 直接赋 `t.part_id`**。
+                                #   原来这段自己写了一遍状态机，与 core 的 `_adopt` 不一致：
+                                #     · 没更新 `area_ref`
+                                #     · 直接赋值 -> 绕过 `apply_id()`，`score_ema` 永不更新
+                                #       -> `reid_ok()` 的"分数余量"闸门形同虚设
+                                #     · 没走形状对称闸 -> 非检测帧上更容易换错身份
+                                #     · 没重置 `lost_frames`/`clear_frames`/`covered`/`miss_streak`
+                                #   ⇒ 现在两边共用同一套（见 `absorb()` 的说明）。
+                                #   ★ `reattach=False`：非检测帧只是**临时补一次轮廓与位置**，
+                                #     重建 KCF 会把刚跟稳的追踪器状态打散，还多花一次 init。
+                                tracker.absorb(frame, t, b, cv2.boundingRect(b.contour),
+                                               float(b.area_px), classify=classify,
+                                               reattach=False)
 
                 canvas = frame.copy()
                 # 手**先画**（方框在下层），零件轮廓后画（压在上面，不被手框盖住）

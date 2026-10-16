@@ -445,54 +445,74 @@ class PartTracker:
                     t.apply_id(pid, float(sc))
             self.tracks.append(t)
 
-    def _adopt(self, frame, t: TrackState, b, bb, a: float, classify) -> None:
-        """已有轨迹吸收一次新检测。
+    def absorb(self, frame, t: TrackState, b, bb, a: float, classify=None,
+               reattach: bool = True) -> None:
+        """**已有轨迹吸收一次检测** —— 状态机的唯一入口。
 
-        ★★ 这里的顺序很关键（我第一版写反了，实测出假数据）：
-            先 `area_ref` 更新再算 `visible_ratio` -> 参考值被**遮挡后的小面积**拉低
-            -> `visible_ratio` 恒为 1.0 -> 状态永远是 `detected`
-            -> **每帧都拿"被切掉一半的残缺件"去重新识别** -> 认错
-               （实测 遮挡 50% 时 P3_wheel 被认成 P2_column）
-            正确顺序：**先用旧参考算可见比例 -> 再按状态决定要不要更新参考**。
+        ★★ 为什么要把它抽成公开方法（2026-10 修，本模块的一个真 bug）：
+          原来这套状态机只存在于 `_detect` -> `_adopt` 这条内部路径里，
+          而 `tools/part_track_demo.py` 在**非检测帧**的"遮挡重分割"路径上
+          **自己又写了一遍**，而且写得不一样：
+            · 没更新 `area_ref`（参考面积不再跟着走）
+            · 直接 `t.part_id, t.id_score = pid, sc` —— **绕过 `apply_id()`**，
+              于是 `score_ema` 永远不更新，`reid_ok()` 的"换标签要有分数余量"
+              这道闸门**形同虚设**（与本文件 `_detect` 里记过的那个坑同型）
+            · 完全没走 `reid_ok()` 的**形状对称闸** —— 非检测帧上更容易换错身份
+            · 没重置 `lost_frames` / `clear_frames` / `covered` / `miss_streak`
+          后果：同一个零件在"检测帧"与"非检测帧"上走**两套不同的身份逻辑**，
+          表现就是身份偶尔跳变、判丢偶发误报 —— 而这两条路各自单独看都"像是对的"。
+        ⇒ 现在两边**共用本方法**，差异只剩"怎么把块匹配到轨迹"
+          （内部是全局最优匹配，demo 是当帧最近的块）。
+
+        参数
+        ----
+        b, bb, a   Blob / bbox / area_px（`bb` 单独传是为了省一次 `boundingRect`）
+        classify   `classify(features) -> (part_id, score)`；None = 不重判身份
+        reattach   是否重建 KCF 追踪器（`_attach`）。★ demo 的非检测帧**不要**重建 ——
+                   它只是临时补一次轮廓/位置，重建会把刚跟稳的追踪器状态打散，
+                   而且 `_attach` 每次都要 `make_tracker()` + `init()`，是有成本的。
         """
-        # ① 先算可见比例（用**旧**参考值）
+        # ① 先算可见比例（用**旧**参考值）—— 顺序铁律，见 `_adopt` 的说明
         vis = a / max(1e-6, t.area_ref)
         t.bbox, t.area_px, t.contour = bb, a, b.contour
         t.centroid = (float(b.centroid[0]), float(b.centroid[1]))
         t.lost_frames = 0
         t.visible_ratio = vis
-        # ★ 「真的看到过」与"遮挡物已移开"都要在这里重置 ——
-        #   判丢的前提是"曾看到过"（见 judge_lost）。
         t.ever_seen = True
         t.clear_frames = 0
+        t.clear_since = 0.0
+        t.clear_seconds = 0.0
         t.covered = False
-        t.miss_streak = 0          # 拿到检测结果了 -> 重置
-        # ★ 记录"最后一次真正检测到"的位置/框 —— 匹配用它（不用卡尔曼预测值）
+        t.miss_streak = 0
         t.last_bbox = bb
         t.last_centroid = (float(b.centroid[0]), float(b.centroid[1]))
 
         if vis >= self.full_ratio:
-            # ② 只有"看得够全"才动参考值，且**只允许缓慢上升/有限下降**
-            #    —— 否则被遮挡几帧就把参考拉低，之后再也判不出遮挡
+            # ② 只有"看得够全"才动参考值，且只允许缓慢上升/有限下降
             t.area_ref = min((1 - self.area_rate) * t.area_ref + self.area_rate * a,
                              t.area_ref * (1.0 + self.area_rate))
             t.state = "detected"
-            # ★ 只在"看得够全"时重判身份 —— 残缺件拿去认必然认错
             if classify is not None:
                 feats = dict(b.features or {})
                 pid, sc = classify(feats)
                 if pid:
-                    # ★ 再套两道闸门：分数要有优势 + 形状要够对称（见 TrackState.reid_ok）
                     asp = float(feats.get("aspect", feats.get("elongation", 1.0)) or 1.0)
                     sym = 0.45 <= asp <= 2.2
                     if t.reid_ok(pid, float(sc), symmetric=sym):
                         t.apply_id(pid, float(sc))
         elif vis <= self.occluded_ratio:
-            # ③ 遮挡重：**不改参考、不重判身份**，只更新轮廓与位置
+            # ③ 遮挡重：不改参考、不重判身份，只更新轮廓与位置
             t.state = "occluded"
         else:
             t.state = "tracked"
-        self._attach(frame, t)
+        if reattach:
+            self._attach(frame, t)
+
+    def _adopt(self, frame, t: TrackState, b, bb, a: float, classify) -> None:
+        """已有轨迹吸收一次检测（内部路径）。★ 现在只是 `absorb()` 的薄封装 ——
+        状态机本体已抽到 `absorb()`，好让 `tools/part_track_demo.py` 共用同一套
+        （原来那两套不一致，见 `absorb()` 的说明）。"""
+        self.absorb(frame, t, b, bb, a, classify=classify, reattach=True)
 
     def _attach(self, frame, t: TrackState) -> None:
         tr, api = make_tracker(self.backend)

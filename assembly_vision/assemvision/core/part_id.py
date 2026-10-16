@@ -534,6 +534,38 @@ def features_from_blob(blob, roi_area_px: Optional[float] = None,
     return f
 
 
+def classify_features(blob, mm_per_px: Optional[float] = None,
+                      bgr: Optional[np.ndarray] = None,
+                      mask: Optional[np.ndarray] = None,
+                      roi_area_px: Optional[float] = None) -> Dict[str, float]:
+    """**给分类器用的特征字典** —— 全项目唯一入口。
+
+    ★★ 为什么必须有这个函数（2026-10 修，本模块一个真 bug）：
+      在此之前，"喂给分类器的特征"有**两条不一样的路径**：
+
+        | 路径 | 代码 | 喂进去的特征 |
+        |---|---|---|
+        | c6 标定 / `checks.py` 判定 | `features_from_blob(..., bgr=, mask=)` | 形状 + `area_mm2` + `length_mm` + `short_side_mm` + `area_frac` + **6 个色域特征** |
+        | `tools/part_track_demo.py` 实时分类 | 手搓闭包，只补 3 个尺度特征 | 形状 + `area_mm2`/`length_mm`/`short_side_mm`（**没有色域、没有 area_frac**） |
+
+      后果：**同一个零件，在「界面显示的身份」与「槽位判定的身份」上会得到不同的分**；
+      而且缺的正是**权重合计 3.2/18.1 的色域特征** ——
+      等于**标定了一份特征、推理时扔掉了**。
+      （同一类病在本项目反复出现：新建路径与更新路径初始化不一致。）
+
+    ★ 本函数把三条信息凑齐后统一交给 `features_from_blob()`：
+      - `mm_per_px`：算 `area_mm2` / `length_mm` / `short_side_mm`（**必须**，否则物理量算不出）
+      - `bgr` + `mask`：算色域特征（不给就只有形状特征）
+      - `roi_area_px`：算 `area_frac`（可省）
+
+    ★ 缺什么就少算什么、**不抛异常** —— 老调用方（只给 blob）行为完全不变。
+      想知道"这次到底算了哪些特征"，看返回字典的键即可。
+    ★ 自检：`tests/test_part_id.py` 里有一条断言钉住"实时路径与标定路径算出的键集合一致"。
+    """
+    return features_from_blob(blob, roi_area_px=roi_area_px, mm_per_px=mm_per_px,
+                              bgr=bgr, mask=mask)
+
+
 def slot_area_px(tray_map, slot_id: str, scale: float = 1.0) -> float:
     """某个槽的物理面积（像素²），用作该槽 area_frac 的归一化分母。
 
