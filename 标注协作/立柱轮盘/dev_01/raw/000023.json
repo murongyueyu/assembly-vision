@@ -1,0 +1,17 @@
+{
+  "objects": [
+    {
+      "part": "P2_column",
+      "bbox": [
+        80,
+        268,
+        77,
+        59
+      ],
+      "occluded": false
+    }
+  ],
+  "work_roi": null,
+  "reviewed": true,
+  "image_sha256": "b4dc04e796f73939eed803f79ba8ed6269b646ca60083fd2e4df965247bb30c5"
+}

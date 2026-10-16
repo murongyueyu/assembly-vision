@@ -1,0 +1,1639 @@
+{
+  "schema": 1,
+  "session": "dev_01",
+  "split": "dev",
+  "mode": "guided",
+  "clip": "",
+  "created_at": "2026-10-16T16:23:44.663989+08:00",
+  "source": "RealSenseSource(SN=262322070302, 640x480@30, USB=3.2)",
+  "fingerprints": {
+    "camera": "ea607c8d614a0e1e45f9ad6d3506b393ac9e1ba2abd8856c5fec6ceb1db74b68",
+    "policy": "02f123c7d58405ae8faa1435eecaf6350316162158195bbfb49b423a1ad4c50f",
+    "workpiece": "64b356d2629937ba26484606919c3ad354bdc8af716216362cbe58ea5b5a70b9"
+  },
+  "camera_config": {
+    "source": "d435",
+    "device": 0,
+    "path": "",
+    "realsense": {
+      "width": 640,
+      "height": 480,
+      "fps": 30,
+      "serial": "",
+      "timeout_ms": 1000,
+      "open_retries": 3,
+      "retry_wait_s": 1.5,
+      "controls": {
+        "enable_auto_exposure": 0,
+        "exposure": 126,
+        "gain": 28,
+        "enable_auto_white_balance": 0,
+        "white_balance": 6300,
+        "brightness": -13,
+        "contrast": 50,
+        "gamma": 300,
+        "saturation": 60,
+        "sharpness": 100,
+        "hue": 0,
+        "backlight_compensation": 0,
+        "power_line_frequency": 3
+      }
+    },
+    "capture": {
+      "backend": "dshow",
+      "backend_windows": "dshow",
+      "fourcc": "MJPG",
+      "width": 1280,
+      "height": 480,
+      "frame_rate_hint": 30,
+      "fps": 30,
+      "mode": "side_by_side",
+      "left_index": 0,
+      "decoder": "full"
+    },
+    "locked_controls": {
+      "auto_exposure": 1,
+      "exposure_absolute": 120,
+      "gain": 30,
+      "white_balance_automatic": 0,
+      "white_balance_temperature": 4600
+    },
+    "exposure_windows": {
+      "exposure": -6.0,
+      "auto_exposure_off": 0.25
+    },
+    "scale": {
+      "realtime": 1.0,
+      "inspect": 1.0
+    },
+    "video": {
+      "loop": true,
+      "pace": true,
+      "stereo": false,
+      "fps": 15,
+      "start_frame": 0
+    },
+    "depth": {
+      "enabled": false,
+      "every_n_frames": 30,
+      "matcher": "sgbm",
+      "work_scale": 0.5,
+      "num_disparities": 160,
+      "block_size": 5,
+      "min_valid_ratio": 0.12
+    },
+    "pose_check": {
+      "enabled": true,
+      "every_n_frames": 15,
+      "aruco_dict": "DICT_4X4_50",
+      "marker_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "warn_px": 3.0,
+      "fail_px": 20.0,
+      "min_markers": 3
+    }
+  },
+  "policy": {
+    "capture": {
+      "exposure_readback": "windows_mf",
+      "distance_mm": 440.0,
+      "warmup_frames": 30,
+      "failed_reads_limit": 15,
+      "poses_deg": [
+        0,
+        30,
+        60,
+        90,
+        135,
+        180
+      ],
+      "positions": [
+        "left",
+        "center",
+        "right",
+        "left",
+        "center",
+        "right"
+      ],
+      "backgrounds": [
+        "tray",
+        "green"
+      ],
+      "negative_scenes": [
+        "green",
+        "empty_tray",
+        "wood",
+        "shadow",
+        "glove",
+        "empty_workarea"
+      ],
+      "negative_repeats": 2
+    },
+    "annotation": {
+      "clip_interval_s": 1.0
+    },
+    "experiment": {
+      "variants": [
+        "brass",
+        "seeded_metal",
+        "seeded_metal_close"
+      ],
+      "seed_margin_px": 8,
+      "close_kernel_px": 3,
+      "feature_sets": {
+        "shape": [
+          "circularity",
+          "solidity",
+          "elongation",
+          "holes",
+          "straightness",
+          "end_width_ratio",
+          "area_frac"
+        ],
+        "shape_scale": [
+          "circularity",
+          "solidity",
+          "elongation",
+          "holes",
+          "straightness",
+          "end_width_ratio",
+          "area_frac",
+          "area_mm2",
+          "length_mm",
+          "short_side_mm"
+        ],
+        "shape_color": [
+          "circularity",
+          "solidity",
+          "elongation",
+          "holes",
+          "straightness",
+          "end_width_ratio",
+          "area_frac",
+          "c_hue_mean",
+          "c_hue_std",
+          "c_sat_mean",
+          "c_val_mean",
+          "c_sat_hi_frac"
+        ]
+      },
+      "min_score": 0.55,
+      "min_margin": 0.05,
+      "holes_tol": 1.0,
+      "min_samples_per_class": 8,
+      "lower_percentile": 5,
+      "upper_percentile": 95,
+      "relative_padding": 0.1,
+      "minimum_padding": 0.02
+    },
+    "evaluation": {
+      "bbox_iou": 0.5,
+      "precision_target": 0.95,
+      "recall_target": 0.95,
+      "mask_iou_target": 0.85,
+      "latency_p95_ms_target": 33.0
+    }
+  },
+  "workpiece_config": {
+    "workpiece": "brass_shipwheel",
+    "name": "黄铜船用舵轮摆件",
+    "tray": {
+      "size": [
+        160.0,
+        160.0
+      ],
+      "thickness": 10.0,
+      "pocket_depth": 2.0,
+      "flip_x": false,
+      "flip_y": false
+    },
+    "slots": [
+      {
+        "id": "slot_wheel",
+        "part": "P3_wheel",
+        "type": "circle",
+        "center": [
+          28.6,
+          49.5
+        ],
+        "diameter": 75.0,
+        "roi_margin_mm": 3.0
+      },
+      {
+        "id": "slot_column",
+        "part": "P2_column",
+        "type": "capsule",
+        "center": [
+          108.2,
+          43.7
+        ],
+        "length": 91.0,
+        "width": 28.0,
+        "angle_deg": -44.0,
+        "roi_margin_mm": 4.0
+      },
+      {
+        "id": "slot_cap",
+        "part": "P4_cap",
+        "type": "circle",
+        "center": [
+          28.0,
+          128.8
+        ],
+        "diameter": 25.0,
+        "roi_margin_mm": 3.0
+      },
+      {
+        "id": "slot_base",
+        "part": "P1_base",
+        "type": "circle",
+        "center": [
+          114.5,
+          129.4
+        ],
+        "diameter": 65.0,
+        "roi_margin_mm": 3.0
+      }
+    ],
+    "parts": {
+      "P1_base": {
+        "name": "底座圆盘",
+        "expect": 1
+      },
+      "P2_column": {
+        "name": "立柱",
+        "expect": 1
+      },
+      "P3_wheel": {
+        "name": "轮盘组件",
+        "expect": 1,
+        "spokes": 8
+      },
+      "P4_cap": {
+        "name": "顶盖铭牌",
+        "expect": 1
+      }
+    },
+    "assembly": {
+      "enabled": true,
+      "center": [
+        -65.0,
+        80.0
+      ],
+      "radius": 45.0,
+      "radii_mm": {
+        "outer": 37.2,
+        "spoke_band": [
+          12.0,
+          24.0
+        ],
+        "spoke_band_outer": [
+          30.0,
+          35.0
+        ],
+        "ring_band": [
+          26.0,
+          30.0
+        ],
+        "hub": 13.0,
+        "cap": 12.5,
+        "center_plug": 6.0
+      },
+      "baseline": {
+        "wheel_height_mm": null,
+        "base_height_mm": 5.0,
+        "spoke_peak_count": 8,
+        "ring_coverage": null,
+        "hub_coverage": null
+      },
+      "stereo_baseline_mm": 125.7
+    },
+    "segment": {
+      "background": "green",
+      "work_roi_margin_mm": 25.0,
+      "work_roi_mode": "work",
+      "max_diam_mm": 100.0,
+      "metal_keep_margin_mm": 6.0,
+      "metal": {
+        "enabled": true,
+        "v_min": 150,
+        "s_max": 100,
+        "green_h_min": 60,
+        "green_h_max": 100,
+        "green_s_min": 120
+      },
+      "brass": {
+        "h_min": 10,
+        "h_max": 45,
+        "s_min": 30,
+        "s_max": 180,
+        "v_min": 90,
+        "morph_open": 3,
+        "morph_close": 5,
+        "min_area_px": 500
+      },
+      "glove": {
+        "h_min": 91,
+        "h_max": 130,
+        "s_min": 80,
+        "v_min": 130,
+        "morph_open": 3,
+        "morph_close": 21,
+        "min_area_px": 2000,
+        "max_area_px": 200000,
+        "max_aspect": 6.0
+      }
+    },
+    "tracking": {
+      "backend": "kcf",
+      "detect_every_n": 8,
+      "lost_grace_seconds": 2.0,
+      "assumed_fps": 30.0,
+      "gone_keep_seconds": 60.0,
+      "cover_overlap_ratio": 0.25,
+      "min_area_px": 400,
+      "max_area_px": 10000,
+      "iou_match": 0.15,
+      "dist_match_px": 60.0,
+      "full_ratio": 0.8,
+      "occluded_ratio": 0.55,
+      "area_ref_rate": 0.15,
+      "id_margin": 0.12
+    },
+    "check": {
+      "coverage_present": 0.45,
+      "coverage_absent": 0.15,
+      "coverage_scale_by_max": true,
+      "drone_consistency": 2,
+      "spokes": {
+        "required": 8,
+        "r_min_mm": 12.0,
+        "r_max_mm": 24.0,
+        "n_radii": 3,
+        "peak_k_mad": 3.0,
+        "baseline_slack": 2,
+        "min_peak_width_deg": 6.0,
+        "select": "uniform",
+        "max_jitter_deg": 15.0
+      },
+      "column": {
+        "aspect_min": 3.0,
+        "min_length_mm": 40.0,
+        "wheel_height_tol_mm": 15.0
+      },
+      "unsupported": [
+        "顶盖是否拧紧（行程 1-2 mm，与深度噪声同量级）",
+        "螺纹牙、小于 1 mm 的划痕与毛刺（受 GSD 限制）",
+        "底座与工件内部结构（俯视不可见）"
+      ]
+    },
+    "part_id": {
+      "min_score": 0.55,
+      "holes_tol": 1
+    },
+    "operations": [
+      {
+        "id": "op1",
+        "name": "放置底座圆盘",
+        "pre": [],
+        "eff": [
+          "base_present"
+        ],
+        "prompt": "请将底座圆盘放入槽位并放上装配位"
+      },
+      {
+        "id": "op2",
+        "name": "立柱旋入底座",
+        "pre": [
+          "base_present"
+        ],
+        "eff": [
+          "column_present"
+        ],
+        "prompt": "请将立柱旋入底座中心孔"
+      },
+      {
+        "id": "op3",
+        "name": "轮盘套上立柱",
+        "pre": [
+          "column_present"
+        ],
+        "eff": [
+          "wheel_present"
+        ],
+        "prompt": "请将轮盘组件套到立柱上"
+      },
+      {
+        "id": "op4",
+        "name": "顶盖旋入拧紧",
+        "pre": [
+          "column_present",
+          "wheel_present"
+        ],
+        "eff": [
+          "cap_present"
+        ],
+        "prompt": "请旋入顶盖并拧紧"
+      }
+    ],
+    "predicates": {
+      "base_present": "asm('base')",
+      "column_present": "asm('column')",
+      "wheel_present": "asm('wheel')",
+      "cap_present": "asm('cap')"
+    },
+    "fiducials": {
+      "enabled": true,
+      "marker_size_mm": 20.0,
+      "positions": [
+        [
+          12.0,
+          12.0
+        ],
+        [
+          148.0,
+          12.0
+        ],
+        [
+          148.0,
+          148.0
+        ],
+        [
+          12.0,
+          148.0
+        ]
+      ]
+    },
+    "ui": {
+      "panel_ratio": 0.2,
+      "video_fps": 30,
+      "font_path": "",
+      "colors": {
+        "ok": [
+          46,
+          125,
+          50
+        ],
+        "warn": [
+          249,
+          168,
+          37
+        ],
+        "error": [
+          198,
+          40,
+          40
+        ],
+        "idle": [
+          97,
+          97,
+          97
+        ]
+      }
+    }
+  },
+  "actual_controls": {
+    "RGB Camera": {
+      "Backlight Compensation": 0.0,
+      "Brightness": -13.0,
+      "Contrast": 50.0,
+      "Exposure": 156.0,
+      "Gain": 28.0,
+      "Gamma": 300.0,
+      "Hue": 0.0,
+      "Saturation": 60.0,
+      "Sharpness": 100.0,
+      "White Balance": 6300.0,
+      "Enable Auto Exposure": 0.0,
+      "Enable Auto White Balance": 0.0,
+      "Frames Queue Size": 16.0,
+      "Power Line Frequency": 3.0,
+      "Auto Exposure Priority": 0.0,
+      "Global Time Enabled": 1.0
+    }
+  },
+  "control_validation": [
+    {
+      "control": "enable_auto_exposure",
+      "requested": 0.0,
+      "observed": [
+        0.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "exposure",
+      "requested": 126.0,
+      "observed": [
+        156.0
+      ],
+      "status": "windows_mf_quantized"
+    },
+    {
+      "control": "gain",
+      "requested": 28.0,
+      "observed": [
+        28.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "enable_auto_white_balance",
+      "requested": 0.0,
+      "observed": [
+        0.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "white_balance",
+      "requested": 6300.0,
+      "observed": [
+        6300.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "brightness",
+      "requested": -13.0,
+      "observed": [
+        -13.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "contrast",
+      "requested": 50.0,
+      "observed": [
+        50.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "gamma",
+      "requested": 300.0,
+      "observed": [
+        300.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "saturation",
+      "requested": 60.0,
+      "observed": [
+        60.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "sharpness",
+      "requested": 100.0,
+      "observed": [
+        100.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "hue",
+      "requested": 0.0,
+      "observed": [
+        0.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "backlight_compensation",
+      "requested": 0.0,
+      "observed": [
+        0.0
+      ],
+      "status": "exact"
+    },
+    {
+      "control": "power_line_frequency",
+      "requested": 3.0,
+      "observed": [
+        3.0
+      ],
+      "status": "exact"
+    }
+  ],
+  "intrinsics": {
+    "width": 640.0,
+    "height": 480.0,
+    "fx": 603.8247680664062,
+    "fy": 602.4337158203125,
+    "ppx": 325.0372314453125,
+    "ppy": 254.80599975585938
+  },
+  "distance_mm": 440.0,
+  "scale_note": "distance/fx 是桌面近似尺度，不是旧单应或精确零件尺寸",
+  "samples": [
+    {
+      "image": "raw/000013.png",
+      "sha256": "38c7245908ec29222f397a6edef0d86633611444768bfa89da821255327372d8",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:40:53.877935+08:00",
+      "source_ts": 3.5294394493103027,
+      "elapsed_s": 1.6307449000014458,
+      "task": {
+        "part": "P2_column",
+        "background": "tray",
+        "angle_deg": 0,
+        "position": "left",
+        "id": "013"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "right",
+        "usable": true,
+        "note": "原图目视复核：立柱平放在黑盘长槽内，两端完整可见，无手部遮挡。实际在画面右侧，与任务左侧提示不同，按实际位置记录；角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000014.png",
+      "sha256": "3d9b9ab5e8a16d743b747b69ce26bfcb36b927b9aee71e1999a5ba0ef2a61316",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:43:04.994918+08:00",
+      "source_ts": 11.596765756607056,
+      "elapsed_s": 9.66771529999096,
+      "task": {
+        "part": "P2_column",
+        "background": "tray",
+        "angle_deg": 30,
+        "position": "center",
+        "id": "014"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "center",
+        "usable": true,
+        "note": "原图目视复核：立柱在黑盘长槽中平放，两端完整可见、无遮挡；料盘全部入画，方向发生变化，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000015.png",
+      "sha256": "c32dd2b65215ff8cb584c601d5398bdcae18e436cd0d798e7245d79a0a06f786",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:43:13.262082+08:00",
+      "source_ts": 19.86846947669983,
+      "elapsed_s": 17.935627099999692,
+      "task": {
+        "part": "P2_column",
+        "background": "tray",
+        "angle_deg": 60,
+        "position": "right",
+        "id": "015"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "right",
+        "usable": true,
+        "note": "原图目视复核：立柱在黑盘长槽中平放，两端完整可见、无遮挡；料盘全部入画，方向发生变化，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000016.png",
+      "sha256": "93d3621484a73188a8239ca33d59a425d3945095676d8514e6d8c8d13a995207",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:43:19.572583+08:00",
+      "source_ts": 26.17285418510437,
+      "elapsed_s": 24.245633200000157,
+      "task": {
+        "part": "P2_column",
+        "background": "tray",
+        "angle_deg": 90,
+        "position": "left",
+        "id": "016"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "left",
+        "usable": true,
+        "note": "原图目视复核：立柱在黑盘长槽中平放，两端完整可见、无遮挡；料盘全部入画，方向发生变化，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000017.png",
+      "sha256": "b6912adc765f8a457e0b77a5eb517a41b9bbd61c132f9ffb2975496cb3b12ed6",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:43:29.359927+08:00",
+      "source_ts": 35.94676208496094,
+      "elapsed_s": 34.03337819999433,
+      "task": {
+        "part": "P2_column",
+        "background": "tray",
+        "angle_deg": 135,
+        "position": "center",
+        "id": "017"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "upper_center",
+        "usable": true,
+        "note": "原图目视复核：立柱在黑盘长槽中平放，两端完整可见、无遮挡；料盘全部入画，方向发生变化，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000018.png",
+      "sha256": "1bd82653468f17b0da8c574ebf5026ec4a048affeb98a1c7511766ed88bbc9b2",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:43:35.213192+08:00",
+      "source_ts": 41.81827473640442,
+      "elapsed_s": 39.88698189999559,
+      "task": {
+        "part": "P2_column",
+        "background": "tray",
+        "angle_deg": 180,
+        "position": "right",
+        "id": "018"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "lower_center",
+        "usable": true,
+        "note": "原图目视复核：立柱在黑盘长槽中平放，两端完整可见、无遮挡；料盘全部入画，方向发生变化，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000019.png",
+      "sha256": "c627d3c2df793f260c01454a6c57369f9ab0ecbb4cbef14fddfbfc0c619153cc",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:45:25.806429+08:00",
+      "source_ts": 6.2416346073150635,
+      "elapsed_s": 4.328260499998578,
+      "task": {
+        "part": "P2_column",
+        "background": "green",
+        "angle_deg": 0,
+        "position": "left",
+        "id": "019"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "left",
+        "usable": true,
+        "note": "原图目视复核：立柱直接平放绿幕，两端可见、无遮挡，画面内方向有变化；实际位置按原图记，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000020.png",
+      "sha256": "517d0a0b25f754a594063319d072371d39f4f086fc2e8c61b5cf22b19ad1972a",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:45:31.445400+08:00",
+      "source_ts": 11.878514528274536,
+      "elapsed_s": 9.96669089999341,
+      "task": {
+        "part": "P2_column",
+        "background": "green",
+        "angle_deg": 30,
+        "position": "center",
+        "id": "020"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "center",
+        "usable": true,
+        "note": "原图目视复核：立柱直接平放绿幕，两端可见、无遮挡，画面内方向有变化；实际位置按原图记，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000021.png",
+      "sha256": "7f8ded36033d94e90b761ee9a1decb219cf5fd8335de850a8cc93e7d8ded39cd",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:45:36.649019+08:00",
+      "source_ts": 17.082709074020386,
+      "elapsed_s": 15.170491500000935,
+      "task": {
+        "part": "P2_column",
+        "background": "green",
+        "angle_deg": 60,
+        "position": "right",
+        "id": "021"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "right",
+        "usable": true,
+        "note": "原图目视复核：立柱直接平放绿幕，两端可见、无遮挡，画面内方向有变化；实际位置按原图记，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000022.png",
+      "sha256": "4477462596bfb30add6c2aea9f7065abf3e37a0c0ae1cf2e87cb847a2a03391a",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:45:40.251020+08:00",
+      "source_ts": 20.685372352600098,
+      "elapsed_s": 18.772467699993285,
+      "task": {
+        "part": "P2_column",
+        "background": "green",
+        "angle_deg": 90,
+        "position": "left",
+        "id": "022"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "center",
+        "usable": true,
+        "note": "原图目视复核：立柱直接平放绿幕，两端可见、无遮挡，画面内方向有变化；实际位置按原图记，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000023.png",
+      "sha256": "b4dc04e796f73939eed803f79ba8ed6269b646ca60083fd2e4df965247bb30c5",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:45:47.248767+08:00",
+      "source_ts": 27.689515352249146,
+      "elapsed_s": 25.77000180000323,
+      "task": {
+        "part": "P2_column",
+        "background": "green",
+        "angle_deg": 135,
+        "position": "center",
+        "id": "023"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "left",
+        "usable": true,
+        "note": "原图目视复核：立柱直接平放绿幕，两端可见、无遮挡，画面内方向有变化；实际位置按原图记，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000024.png",
+      "sha256": "a6f1d403231b5f707cb5fdc793b33f74468cafba9a5890b05b7d3e99bb290868",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:45:55.965351+08:00",
+      "source_ts": 36.396276235580444,
+      "elapsed_s": 34.48742619999393,
+      "task": {
+        "part": "P2_column",
+        "background": "green",
+        "angle_deg": 180,
+        "position": "right",
+        "id": "024"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "center",
+        "usable": true,
+        "note": "原图目视复核：立柱直接平放绿幕，两端可见、无遮挡，画面内方向有变化；实际位置按原图记，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000025.png",
+      "sha256": "fff4313aae8af2726e1e4573a84f11f52ba43e9e0263b61200186b2fb5554da7",
+      "kind": "image",
+      "captured_at": "2026-10-16T16:47:55.029069+08:00",
+      "source_ts": 7.870118856430054,
+      "elapsed_s": 5.957743399994797,
+      "task": {
+        "part": "P3_wheel",
+        "background": "tray",
+        "angle_deg": 0,
+        "position": "left",
+        "id": "025"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "left",
+        "usable": true,
+        "note": "原图目视复核：轮盘平放大圆槽，外圈、辐条端部及中心毂完整入画，无手遮挡；其他槽空。此为图像可用性检查，未宣称算法数辐条通过。角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000026.png",
+      "sha256": "e478045c47a3beabd76a82c77f9ec9607e4a6dd1c4e61117eee57bff7fc2bb92",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:56:58.808647+08:00",
+      "source_ts": 13.521685600280762,
+      "elapsed_s": 11.603059999994002,
+      "task": {
+        "part": "P3_wheel",
+        "background": "tray",
+        "angle_deg": 30,
+        "position": "center",
+        "id": "026"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "center",
+        "usable": true,
+        "note": "原图目视复核：轮盘外圈、辐条端部及中心毂完整入画，无手遮挡，料盘整体方向有变化；角度未实测。第30张料盘接近下边界但未裁切。"
+      }
+    },
+    {
+      "image": "raw/000027.png",
+      "sha256": "aa0405a83faf2577f1f5b5d5998f44f2d473e543c39b5544f21414c24fac3209",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:57:10.965932+08:00",
+      "source_ts": 25.663381099700928,
+      "elapsed_s": 23.760320699992008,
+      "task": {
+        "part": "P3_wheel",
+        "background": "tray",
+        "angle_deg": 60,
+        "position": "right",
+        "id": "027"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "right",
+        "usable": true,
+        "note": "原图目视复核：轮盘外圈、辐条端部及中心毂完整入画，无手遮挡，料盘整体方向有变化；角度未实测。第30张料盘接近下边界但未裁切。"
+      }
+    },
+    {
+      "image": "raw/000028.png",
+      "sha256": "f0fdcbe5004d3026242e7c781ae810c8c84c44e7be47bac07600fd5b5fbd3a17",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:57:17.892238+08:00",
+      "source_ts": 32.601850271224976,
+      "elapsed_s": 30.686167199994088,
+      "task": {
+        "part": "P3_wheel",
+        "background": "tray",
+        "angle_deg": 90,
+        "position": "left",
+        "id": "028"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "left",
+        "usable": true,
+        "note": "原图目视复核：轮盘外圈、辐条端部及中心毂完整入画，无手遮挡，料盘整体方向有变化；角度未实测。第30张料盘接近下边界但未裁切。"
+      }
+    },
+    {
+      "image": "raw/000029.png",
+      "sha256": "1de438fa7612b00cb6433557249d40e158182176af82c0f415fe8a2ce1a1f7dc",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:57:23.842472+08:00",
+      "source_ts": 38.54019784927368,
+      "elapsed_s": 36.63691010000184,
+      "task": {
+        "part": "P3_wheel",
+        "background": "tray",
+        "angle_deg": 135,
+        "position": "center",
+        "id": "029"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "upper_center",
+        "usable": true,
+        "note": "原图目视复核：轮盘外圈、辐条端部及中心毂完整入画，无手遮挡，料盘整体方向有变化；角度未实测。第30张料盘接近下边界但未裁切。"
+      }
+    },
+    {
+      "image": "raw/000030.png",
+      "sha256": "c3531666b8b8355e4b2d474c71e72411a867f1478efb9a00602362715373e865",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:57:29.519799+08:00",
+      "source_ts": 44.242408752441406,
+      "elapsed_s": 42.31422709999606,
+      "task": {
+        "part": "P3_wheel",
+        "background": "tray",
+        "angle_deg": 180,
+        "position": "right",
+        "id": "030"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "tray",
+        "actual_position": "lower_right",
+        "usable": true,
+        "note": "原图目视复核：轮盘外圈、辐条端部及中心毂完整入画，无手遮挡，料盘整体方向有变化；角度未实测。第30张料盘接近下边界但未裁切。"
+      }
+    },
+    {
+      "image": "raw/000031.png",
+      "sha256": "bd0087f05f2c6e8ac7796fe7b1bb267e96bd08be761d83c7d21d5c99267a1fc6",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:59:41.045839+08:00",
+      "source_ts": 11.600388526916504,
+      "elapsed_s": 9.666526800006977,
+      "task": {
+        "part": "P3_wheel",
+        "background": "green",
+        "angle_deg": 0,
+        "position": "left",
+        "id": "031"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "center",
+        "usable": true,
+        "note": "原图目视复核：轮盘直接平放绿幕，外圈、辐条端部和中心毂完整入画，无手遮挡；实际位置按原图记录，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000032.png",
+      "sha256": "b7046ac4a9ffd6ca6219bdd2d823e33720b390ac7a171c490e58cea59a59f564",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:59:46.378985+08:00",
+      "source_ts": 16.937446117401123,
+      "elapsed_s": 14.9997502000042,
+      "task": {
+        "part": "P3_wheel",
+        "background": "green",
+        "angle_deg": 30,
+        "position": "center",
+        "id": "032"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "right",
+        "usable": true,
+        "note": "原图目视复核：轮盘直接平放绿幕，外圈、辐条端部和中心毂完整入画，无手遮挡；实际位置按原图记录，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000033.png",
+      "sha256": "8c4e209690336ecdd8c6c225c605b05f733c37fc63140d748ea764d3bfc41b69",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:59:51.049446+08:00",
+      "source_ts": 21.607935667037964,
+      "elapsed_s": 19.670217799997772,
+      "task": {
+        "part": "P3_wheel",
+        "background": "green",
+        "angle_deg": 60,
+        "position": "right",
+        "id": "033"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "left",
+        "usable": true,
+        "note": "原图目视复核：轮盘直接平放绿幕，外圈、辐条端部和中心毂完整入画，无手遮挡；实际位置按原图记录，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000034.png",
+      "sha256": "64ed85b53fe68a74366d13afb293a5872164d06a14748c6fc86d61ea5a156132",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:59:55.456701+08:00",
+      "source_ts": 26.01061725616455,
+      "elapsed_s": 24.077232099996763,
+      "task": {
+        "part": "P3_wheel",
+        "background": "green",
+        "angle_deg": 90,
+        "position": "left",
+        "id": "034"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "upper_center",
+        "usable": true,
+        "note": "原图目视复核：轮盘直接平放绿幕，外圈、辐条端部和中心毂完整入画，无手遮挡；实际位置按原图记录，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000035.png",
+      "sha256": "2a5285639d8a7b3141d0e2a60d54a03c3b3f35aaf4fd1050e652d1a7f6842fbd",
+      "kind": "image",
+      "captured_at": "2026-10-16T17:59:59.856428+08:00",
+      "source_ts": 30.413679122924805,
+      "elapsed_s": 28.4771405000065,
+      "task": {
+        "part": "P3_wheel",
+        "background": "green",
+        "angle_deg": 135,
+        "position": "center",
+        "id": "035"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "lower_center",
+        "usable": true,
+        "note": "原图目视复核：轮盘直接平放绿幕，外圈、辐条端部和中心毂完整入画，无手遮挡；实际位置按原图记录，角度未实测。"
+      }
+    },
+    {
+      "image": "raw/000036.png",
+      "sha256": "1b9df5b0b996d393775a711fcc06e50036160d2d08ebb66a1f0b20fb1519bfb1",
+      "kind": "image",
+      "captured_at": "2026-10-16T18:00:05.832491+08:00",
+      "source_ts": 36.38514971733093,
+      "elapsed_s": 34.4529698999977,
+      "task": {
+        "part": "P3_wheel",
+        "background": "green",
+        "angle_deg": 180,
+        "position": "right",
+        "id": "036"
+      },
+      "actual_controls": {
+        "RGB Camera": {
+          "Backlight Compensation": 0.0,
+          "Brightness": -13.0,
+          "Contrast": 50.0,
+          "Exposure": 156.0,
+          "Gain": 28.0,
+          "Gamma": 300.0,
+          "Hue": 0.0,
+          "Saturation": 60.0,
+          "Sharpness": 100.0,
+          "White Balance": 6300.0,
+          "Enable Auto Exposure": 0.0,
+          "Enable Auto White Balance": 0.0,
+          "Frames Queue Size": 16.0,
+          "Power Line Frequency": 3.0,
+          "Auto Exposure Priority": 0.0,
+          "Global Time Enabled": 1.0
+        }
+      },
+      "capture_review": {
+        "actual_background": "green",
+        "actual_position": "center",
+        "usable": true,
+        "note": "原图目视复核：轮盘直接平放绿幕，外圈、辐条端部和中心毂完整入画，无手遮挡；实际位置按原图记录，角度未实测。"
+      }
+    }
+  ],
+  "image_shape": [
+    480,
+    640,
+    3
+  ],
+  "appearance_requirements": {
+    "P4_cap": {
+      "hole_up": "料盘中主要使用的正常待装姿态",
+      "smooth_up": "另一正常放置方式；装配固定到立柱及轮盘后，有孔面被遮住，成品必为光滑面可见",
+      "source": "用户当前对话确认；两种外观均属于同一顶盖类，成品检出另行验证"
+    }
+  },
+  "annotation_handoff": {
+    "source_session": "dev_01",
+    "source_image_ids": "000013-000036",
+    "purpose": "立柱与轮盘人工掩膜协作副本，合并回主会话，不作为独立评测批次",
+    "image_count": 24
+  }
+}

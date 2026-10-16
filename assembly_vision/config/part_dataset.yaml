@@ -1,0 +1,39 @@
+# 阶段 1 专用实验配置，不自动写回正式相机、分割配置或旧标定。
+capture:
+  # ★ Windows MF 后端按 SDK 的 log2 曝光换算验证：请求 126 → 回读 156。
+  # SDK v2.59.1 src/mf/mf-uvc.cpp 的 from_100micros / to_100micros；
+  # 非 Windows 或其他控件仍精确校验；实际回读与请求值分别保存，不改正式配置。
+  exposure_readback: windows_mf
+  distance_mm: 440.0             # ★ 用户确认的相机到桌面距离；仅供近似尺度对照
+  warmup_frames: 30
+  failed_reads_limit: 15
+  poses_deg: [0, 30, 60, 90, 135, 180]
+  positions: [left, center, right, left, center, right]
+  backgrounds: [tray, green]
+  negative_scenes: [green, empty_tray, wood, shadow, glove, empty_workarea]
+  negative_repeats: 2
+annotation:
+  clip_interval_s: 1.0          # 连续视频的标注按时间戳抽样，避免把相邻帧当独立样本
+experiment:
+  variants: [brass, seeded_metal, seeded_metal_close]
+  # ★ 候选实验值，必须由真实标注对比决定，不能直接作为正式参数。
+  seed_margin_px: 8
+  close_kernel_px: 3
+  feature_sets:
+    shape: [circularity, solidity, elongation, holes, straightness, end_width_ratio, area_frac]
+    shape_scale: [circularity, solidity, elongation, holes, straightness, end_width_ratio, area_frac, area_mm2, length_mm, short_side_mm]
+    shape_color: [circularity, solidity, elongation, holes, straightness, end_width_ratio, area_frac, c_hue_mean, c_hue_std, c_sat_mean, c_val_mean, c_sat_hi_frac]
+  min_score: 0.55
+  min_margin: 0.05             # ★ 实验拒识余量，防止并列由模板顺序决定
+  holes_tol: 1.0
+  min_samples_per_class: 8
+  lower_percentile: 5
+  upper_percentile: 95
+  relative_padding: 0.10
+  minimum_padding: 0.02
+evaluation:
+  bbox_iou: 0.50
+  precision_target: 0.95
+  recall_target: 0.95
+  mask_iou_target: 0.85
+  latency_p95_ms_target: 33.0

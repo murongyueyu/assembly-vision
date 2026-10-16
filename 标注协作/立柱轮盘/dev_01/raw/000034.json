@@ -1,0 +1,17 @@
+{
+  "objects": [
+    {
+      "part": "P3_wheel",
+      "bbox": [
+        298,
+        53,
+        107,
+        101
+      ],
+      "occluded": false
+    }
+  ],
+  "work_roi": null,
+  "reviewed": true,
+  "image_sha256": "64ed85b53fe68a74366d13afb293a5872164d06a14748c6fc86d61ea5a156132"
+}

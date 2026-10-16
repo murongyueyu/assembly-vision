@@ -1,0 +1,25 @@
+{
+  "objects": [
+    {
+      "part": "P2_column",
+      "bbox": [
+        515,
+        150,
+        74,
+        67
+      ],
+      "occluded": false
+    }
+  ],
+  "work_roi": null,
+  "reviewed": true,
+  "image_sha256": "38c7245908ec29222f397a6edef0d86633611444768bfa89da821255327372d8",
+  "review_corrections": [
+    {
+      "field": "objects[0].part",
+      "before": "P4_cap",
+      "after": "P2_column",
+      "reason": "独立目视原图确认是立柱，框位置正确，纠正类别误选；不依据算法预测"
+    }
+  ]
+}
