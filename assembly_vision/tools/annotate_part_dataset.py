@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from pathlib import Path
 
 import cv2
@@ -36,26 +37,105 @@ def mask_view_point(x, y, geometry):
     return x0 + x // scale, y0 + y // scale
 
 
-def paint_mask(image, obj, smoke=False):
+class MaskEditor:
+    """掩膜和顶点作为同一步历史保存；所有修改可撤销，历史间共享未修改掩膜。"""
+
+    def __init__(self, shape, initial=None):
+        self.mask = np.zeros(shape[:2], np.uint8) if initial is None else initial.copy()
+        self.points = []
+        self.past, self.future = [], []
+
+    def remember(self):
+        self.past.append((self.mask, self.points.copy()))
+        self.future.clear()
+
+    def point(self, point):
+        self.remember()
+        self.points.append(tuple(point))
+
+    def fill(self, value):
+        if len(self.points) < 3:
+            return False
+        self.remember()
+        self.mask = self.mask.copy()
+        cv2.fillPoly(self.mask, [np.asarray(self.points, np.int32)], value)
+        self.points.clear()
+        return True
+
+    def cancel_polygon(self):
+        if self.points:
+            self.remember()
+            self.points.clear()
+
+    def clear(self):
+        self.remember()
+        self.mask = np.zeros_like(self.mask)
+        self.points.clear()
+
+    def undo(self):
+        if self.past:
+            self.future.append((self.mask, self.points.copy()))
+            self.mask, self.points = self.past.pop()
+
+    def redo(self):
+        if self.future:
+            self.past.append((self.mask, self.points.copy()))
+            self.mask, self.points = self.future.pop()
+
+
+def save_mask_draft(path, editor, image_hash, part):
+    """每次编辑保留草稿；不将未确认草稿作为评测真值。"""
+    ok, encoded = cv2.imencode(".png", editor.mask)
+    if not ok:
+        raise OSError("掩膜草稿编码失败")
+    write_json(path, dict(image_sha256=image_hash, part=part, points=editor.points,
+                         mask_png=base64.b64encode(encoded.tobytes()).decode("ascii")))
+
+
+def load_mask_draft(path, shape, image_hash, part):
+    data = read_json(path)
+    if data.get("image_sha256") != image_hash or data.get("part") != part:
+        raise ValueError("草稿与原图或类别不一致：%s" % path)
+    mask = cv2.imdecode(np.frombuffer(base64.b64decode(data["mask_png"]), np.uint8), cv2.IMREAD_GRAYSCALE)
+    if mask is None or mask.shape != tuple(shape[:2]):
+        raise ValueError("草稿掩膜尺寸不正确：%s" % path)
+    editor = MaskEditor(shape, mask)
+    editor.points = [tuple(p) for p in data["points"]]
+    if any(len(p) != 2 or not (0 <= p[0] < shape[1] and 0 <= p[1] < shape[0]) for p in editor.points):
+        raise ValueError("草稿顶点超出原图：%s" % path)
+    return editor
+
+
+def paint_mask(image, obj, smoke=False, initial=None, draft_path=None, image_hash=None):
     """手点多边形；前景和孔洞分开提交，不用算法结果自动当真值。"""
-    mask = np.zeros(image.shape[:2], np.uint8)
-    points = []
+    editor = MaskEditor(image.shape, initial)
+    if draft_path is not None and draft_path.exists():
+        editor = load_mask_draft(draft_path, image.shape, image_hash, obj["part"])
+        print("已恢复上次未保存的掩膜草稿与顶点。")
     geometry = list(mask_view_geometry(image.shape, obj["bbox"]))
     show_overlay = True
     print("精细掩膜 %s：左键沿可见边界点多边形，f 填前景，h 扣孔洞，右键撤点。" % obj["part"])
-    print("可多次画前景/孔洞；s 确认，r 清空，q 取消。边界不清楚请取消并换样本。")
+    print("z/右键撤销一步，y 恢复；r 只取消当前多边形，x 清空整张（可撤销）。")
+    print("s 确认，q 退出保留草稿；矩形框仅作参考，不限制掩膜边界。")
     print("已自动放大零件局部；+/- 调整倍率，v 隐藏/显示填充。保存仍为原图像素。")
+
+    def checkpoint():
+        if draft_path is not None and not smoke:
+            save_mask_draft(draft_path, editor, image_hash, obj["part"])
 
     def mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             point = mask_view_point(x, y, geometry)
             if point is not None:
-                points.append(point)
-        elif event == cv2.EVENT_RBUTTONDOWN and points:
-            points.pop()
+                editor.point(point)
+                checkpoint()
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            editor.undo()
+            checkpoint()
 
     cv2.setMouseCallback(WINDOW, mouse)
     while True:
+        mask, points = editor.mask, editor.points
         view = image.copy()
         selected = mask > 0
         if show_overlay:
@@ -76,37 +156,47 @@ def paint_mask(image, obj, smoke=False):
             cv2.polylines(view, [np.asarray(displayed, np.int32)], False, (0, 0, 255), 1)
             for point in displayed:
                 cv2.circle(view, point, 2, (0, 0, 255), -1)
-        cv2.putText(view, "F fill / H hole / S save / R reset / Q cancel", (6, 20),
+        cv2.putText(view, "F fill H hole S save Z undo Y redo R cancel X clear Q exit", (6, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 255, 255), 1)
-        cv2.putText(view, "Zoom %dx   +/- zoom   V overlay   Right click undo point" % scale, (6, 46),
+        cv2.putText(view, "Zoom %dx   +/- zoom   0 full/local   V overlay   Right click undo" % scale, (6, 46),
                     cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 255, 255), 1)
         cv2.imshow(WINDOW, view)
         key = cv2.waitKey(20) & 0xFF
         if smoke or key in (27, ord("q")) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
             return None
-        if key in (ord("+"), ord("=")):
+        if key == ord("0"):
+            if geometry[:4] == [0, 0, image.shape[1], image.shape[0]]:
+                geometry = list(mask_view_geometry(image.shape, obj["bbox"]))
+            else:
+                geometry = [0, 0, image.shape[1], image.shape[0], 1]
+        elif key in (ord("+"), ord("=")):
             geometry[-1] = min(scale + 1, max(1, min(16, 1280 // cw, 800 // ch)))
         elif key in (ord("-"), ord("_")):
             geometry[-1] = max(1, scale - 1)
         elif key == ord("v"):
             show_overlay = not show_overlay
-        if key in (ord("f"), ord("h")) and len(points) >= 3:
-            cv2.fillPoly(mask, [np.asarray(points, np.int32)], 255 if key == ord("f") else 0)
-            points.clear()
+        if key in (ord("f"), ord("h")):
+            editor.fill(255 if key == ord("f") else 0)
+            checkpoint()
         elif key == ord("r"):
-            mask[:] = 0
-            points.clear()
+            editor.cancel_polygon()
+            checkpoint()
+        elif key in (ord("z"), 26):
+            editor.undo()
+            checkpoint()
+        elif key in (ord("y"), 25):
+            editor.redo()
+            checkpoint()
+        elif key == ord("x"):
+            editor.clear()
+            checkpoint()
         elif key == ord("s"):
-            outside = mask.copy()
-            outside[y:y + h, x:x + w] = 0
-            if points:
+            if editor.points:
                 print("还有未提交多边形，先按 f 或 h。")
-            elif not np.any(mask):
+            elif not np.any(editor.mask):
                 print("掩膜为空，不能保存。")
-            elif np.any(outside):
-                print("掩膜越出人工位置框；请先修正位置框或重画掩膜。")
             else:
-                return mask
+                return editor.mask
 
 
 def annotate(image, previous, smoke=False):
@@ -183,11 +273,14 @@ def main(argv=None):
     ap.add_argument("--dataset", type=Path, default=DEFAULT_DATA)
     ap.add_argument("--session", required=True)
     ap.add_argument("--masks", action="store_true", help="为已确认的框逐件人工画掩膜")
+    ap.add_argument("--part", choices=list(PARTS), help="掩膜模式只处理指定类别，供多人分工")
     ap.add_argument("--redo", action="store_true")
     ap.add_argument("--limit", type=int, help="本次最多标注的图片数，便于分批或单张重画")
     ap.add_argument("--clips", action="store_true", help="标注视频序列，每秒最多抽一张，按时间戳抽样")
     ap.add_argument("--smoke", action="store_true", help="仅检查首张图窗口，不保存标注")
     args = ap.parse_args(argv)
+    if args.part and not args.masks:
+        ap.error("--part 仅用于已有框标注的 --masks 模式")
     if args.limit is not None and args.limit < 1:
         ap.error("--limit 必须为正整数")
     if Path(args.session).name != args.session or args.session in (".", ".."):
@@ -218,13 +311,26 @@ def main(argv=None):
                 if not previous:
                     raise ValueError("请先完成位置框标注：%s" % path)
                 validate_annotation(previous, image.shape)
-                if not args.redo and not args.smoke and all(o.get("mask") for o in previous["objects"]):
+                selected = [o for o in previous["objects"] if not args.part or o["part"] == args.part]
+                if not selected:
+                    continue
+                if not args.redo and not args.smoke and all(o.get("mask") for o in selected):
                     continue
                 cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
                 for i, obj in enumerate(previous["objects"]):
+                    if args.part and obj["part"] != args.part:
+                        continue
                     if obj.get("mask") and not args.redo:
                         continue
-                    mask = paint_mask(image, obj, smoke=args.smoke)
+                    draft_path = path.parent / ("%s_mask_%d.draft.json" % (path.stem, i))
+                    initial = None
+                    if obj.get("mask"):
+                        mask_path = path.parent / obj["mask"]
+                        initial = imread_safe(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                        if initial is None or initial.shape != image.shape[:2] or file_hash(mask_path) != obj.get("mask_sha256"):
+                            raise ValueError("已有掩膜缺失、尺寸或hash不匹配：%s" % mask_path)
+                    mask = paint_mask(image, obj, smoke=args.smoke, initial=initial,
+                                      draft_path=draft_path, image_hash=rec["sha256"])
                     if mask is None:
                         return 0
                     rel = "%s_mask_%d.png" % (path.stem, i)
@@ -232,6 +338,8 @@ def main(argv=None):
                     obj["mask"] = rel
                     obj["mask_sha256"] = file_hash(path.parent / rel)
                     write_json(ann_path, previous)
+                    draft_path.unlink(missing_ok=True)
+                    print("掩膜保存成功：%s" % (path.parent / rel))
             else:
                 data = annotate(image, previous, args.smoke)
                 if data is None:

@@ -19,6 +19,8 @@ from part_dataset import remaining_tasks, selected_tasks, classifier_from_templa
 from measure_part_dataset import fit, evaluate
 from capture_part_dataset import main as capture_main, check_locked, windows_mf_exposure
 from annotate_part_dataset import mask_view_geometry, mask_view_point, MASK_TOOLBAR
+from annotate_part_dataset import main as annotate_main
+from annotate_part_dataset import MaskEditor, paint_mask, save_mask_draft, load_mask_draft
 
 
 def raises(call, message):
@@ -68,6 +70,48 @@ def make_session(folder, split, wp_path, policy_path, count):
 
 
 def main():
+    editor = MaskEditor((40, 40))
+    for p in [(5, 5), (30, 5), (30, 30), (5, 30)]:
+        editor.point(p)
+    editor.fill(255)
+    outer = editor.mask.copy()
+    for p in [(12, 12), (20, 12), (20, 20), (12, 20)]:
+        editor.point(p)
+    editor.fill(0)
+    hole = editor.mask.copy()
+    check(hole[15, 15] == 0 and outer[15, 15] == 255, "孔洞操作只扣指定区域")
+    editor.undo()
+    check(np.array_equal(editor.mask, outer) and len(editor.points) == 4,
+          "撤销挖孔恢复之前的金属和孔洞顶点，不清空整张")
+    editor.redo()
+    check(np.array_equal(editor.mask, hole) and not editor.points, "恢复操作可重新应用孔洞")
+    editor.point((10, 10))
+    editor.cancel_polygon()
+    check(np.array_equal(editor.mask, hole) and not editor.points, "取消当前多边形保留全部已画掩膜")
+    editor.undo()
+    check(editor.points == [(10, 10)], "取消多边形也能撤销")
+    editor.clear()
+    editor.undo()
+    check(np.array_equal(editor.mask, hole), "误清空整张后可撤销恢复成果")
+    editor.redo()
+    editor.point((1, 1))
+    check(not editor.future, "撤销后新编辑废弃旧恢复分支，避免恢复错误版本")
+    with TemporaryDirectory(prefix="mask_draft_") as tmp:
+        draft = Path(tmp) / "draft.json"
+        editor = MaskEditor((40, 40), hole)
+        editor.point((8, 9))
+        save_mask_draft(draft, editor, "raw_hash", "P1_base")
+        restored = load_mask_draft(draft, (40, 40), "raw_hash", "P1_base")
+        check(np.array_equal(restored.mask, hole) and restored.points == [(8, 9)],
+              "退出后草稿可恢复已填掩膜和未提交顶点")
+        raises(lambda: load_mask_draft(draft, (40, 40), "other_raw", "P1_base"),
+               "其他原图的草稿不得误恢复")
+    with patch("annotate_part_dataset.cv2.setMouseCallback"), patch("annotate_part_dataset.cv2.imshow"), \
+            patch("annotate_part_dataset.cv2.waitKey", return_value=ord("s")), \
+            patch("annotate_part_dataset.cv2.getWindowProperty", return_value=1):
+        result = paint_mask(np.zeros((40, 40, 3), np.uint8),
+                            {"part": "P1_base", "bbox": [12, 12, 5, 5]}, initial=outer)
+        check(np.array_equal(result, outer), "人工掩膜允许越出粗定位框，保存不裁切金属")
     geometry = mask_view_geometry((480, 640, 3), [366, 225, 69, 67])
     x0, y0, cw, ch, scale = geometry
     check(scale > 1 and x0 <= 366 and y0 <= 225 and x0 + cw >= 435 and y0 + ch >= 292,
@@ -296,6 +340,16 @@ def main():
         write_json(model, data)
         args.output = base / "leak"
         raises(lambda: evaluate(args), "验收会话与建模板来源重叠时拒绝执行")
+        with patch("annotate_part_dataset.cv2.namedWindow"), patch("annotate_part_dataset.cv2.destroyAllWindows"), \
+                patch("annotate_part_dataset.paint_mask", return_value=np.ones((180, 200), np.uint8)) as painter:
+            annotate_main(["--dataset", str(base), "--session", "dev_a", "--masks",
+                           "--part", "P4_cap", "--limit", "1"])
+            check(painter.call_count == 1 and painter.call_args.args[1]["part"] == "P4_cap",
+                  "按类别筛选掩膜时跳过其他零件，limit仅计实际处理图片")
+            saved = [read_json(p) for p in (base / "dev_a" / "raw").glob("*.json")]
+            masked = [o for a in saved for o in a["objects"] if o.get("mask")]
+            check(len(masked) == 1 and masked[0]["part"] == "P4_cap",
+                  "分工标注只保存指定类别的一张，不写其他同学的零件")
         raw = base / "dev_a" / "raw" / "000.png"
         raw.write_bytes(b"changed")
         raises(lambda: load_samples(base, "dev"), "原图被覆盖或无法解码必须报错，不静默跳过")
