@@ -60,16 +60,7 @@ desktop.ini
 !assembly_vision/data/refs/.gitkeep
 !assembly_vision/data/videos/.gitkeep
 
-# ── data/refs 里**必须入库**的 8 张真机对账帧 ─────────────────────
-# ★ 为什么破例：验收③④⑤以及一批诊断工具全都读这几张图 ——
-#     verify_glove_fix / verify_allow_new / part_track_occlusion_test /
-#     check_hand_box / measure_features_real / measure_holes_gap /
-#     measure_holes_fix / measure_holes_ablation / measure_glove_area /
-#     measure_glove_gamut / fix_glove_fragments
-#   整目录忽略的话，**换一台电脑 clone 下来这些工具全部报错**（找不到图），
-#   而这正是队友接手时最需要跑的东西。合计约 2.9MB。
-# ★ 只放这 8 张；其余真机素材（refs 目录一共 15.5MB 的调试图、视频、
-#   标定截图）继续忽略。
+# 历史真机对账参考图继续入库，供问题追溯；当前验收以阶段1原图/真值为准。
 !assembly_vision/data/refs/assembly_choice.png
 !assembly_vision/data/refs/assembly_left_check.png
 !assembly_vision/data/refs/assembly_positions.png

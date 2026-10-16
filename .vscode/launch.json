@@ -38,7 +38,7 @@
       "program": "${workspaceFolder}\\ai_测试工具\\d435_intrinsics_check.py",
       "args": [
         "--distance-mm",
-        "289",
+        "440",
         "--modes",
         "640x480,1280x720"
       ],
@@ -72,7 +72,7 @@
         "--seconds",
         "3",
         "--distance-mm",
-        "289",
+        "440",
         "--save-dir",
         "${workspaceFolder}\\ai_测试工具\\工位帧\\样张"
       ],
@@ -111,7 +111,7 @@
       }
     },
     {
-      "name": "⑦ 离线回归（13 个模块，不需要相机）",
+      "name": "⑦ 离线回归（16 个模块，不需要相机）",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}\\assembly_vision\\tests\\run_all.py",
