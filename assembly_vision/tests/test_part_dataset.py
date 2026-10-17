@@ -95,6 +95,22 @@ def main():
     raises(lambda: segment_variant(image, original_wp, Config(experiment), "brass"),
            "候选跨度配置不得为零或负值")
     experiment["experiment"]["max_candidate_extent_px"] = None
+    border_image = np.zeros((150, 180, 3), np.uint8)
+    color = image[25, 45].tolist()
+    for x, y in [(70, 0), (70, 130), (0, 60), (160, 60), (70, 60)]:
+        border_image[y:y+20, x:x+20] = color
+    mask_before, border_before, _ = segment_variant(border_image, original_wp, Config(experiment), "brass")
+    experiment["experiment"]["reject_border_candidates"] = True
+    mask_after, border_after, border_result = segment_variant(border_image, original_wp, Config(experiment), "brass")
+    check(len(border_before) == 5 and len(border_after) == 1
+          and 0 < border_after[0].bbox[0] < 100
+          and len(border_result.detail["rejected_candidates"]) == 4
+          and np.array_equal(mask_before, mask_after) and original_wp.data == original_data,
+          "贴边开关拒识四边截断候选、保留内部目标与完整掩膜，并逐一登记原因；默认不变")
+    experiment["experiment"]["reject_border_candidates"] = "false"
+    raises(lambda: segment_variant(border_image, original_wp, Config(experiment), "brass"),
+           "贴边开关拒绝易误解的字符串配置")
+    experiment["experiment"]["reject_border_candidates"] = False
     experiment["experiment"]["segmentation_overrides"] = {"capture.exposure": 10}
     raises(lambda: segment_variant(image, original_wp, Config(experiment), "brass"),
            "分割实验禁止覆盖相机采集参数")
@@ -545,6 +561,30 @@ def main():
         check(saving.call_count == 1 and automatic_failure["diagnostics"]["save_errors"] == 1
               and len(automatic_failure["diagnostics"]["frame_trace"]) == 3
               and evidence_path.exists(), "自动保存失败也消耗额度，后续帧继续记账且旧证据保留")
+        confirmed_artifact = copy.deepcopy(demo_artifact)
+        confirmed_artifact["policy"]["experiment"]["confirmation"] = dict(frames=7, min_score=0,
+            max_gap_seconds=.25, dist_match_px=60, iou_match=.15, area_ratio=[.8, 1.25])
+        confirmed_model = base / "confirmed_model.json"
+        write_json(confirmed_model, confirmed_artifact)
+        confirmed_meta = copy.deepcopy(replay_meta)
+        confirmed_meta["samples"] = [dict(replay_meta["samples"][0], elapsed_s=i/30) for i in range(9)]
+        confirmed_session = base / "dev_a" / "confirmed_session.json"
+        write_json(confirmed_session, confirmed_meta)
+        confirmed_args = copy.copy(demo_args)
+        confirmed_args.dataset_model, confirmed_args.session = confirmed_model, confirmed_session
+        confirmed_args.max_frames, confirmed_args.report = 0, base / "confirmed_report.json"
+        confirmed_args.diagnostic_slow_ms = 10000
+        confirmed_report = run_dataset_model(confirmed_args)
+        confirmed_trace = confirmed_report["diagnostics"]["frame_trace"]
+        check([len(row["tracks"]) for row in confirmed_trace] == [0]*6+[1]*3
+              and [row["confirmation"][0]["frames"] for row in confirmed_trace] == [1,2,3,4,5,6,7,7,7],
+              "实际演示入口前六帧不建身份，第七帧建轨迹，后续继续同一key且保留确认计数")
+        confirmed_args.report = base / "confirmed_ambiguous_report.json"
+        with patch("part_dataset.segment_variant", side_effect=duplicate_candidates):
+            ambiguous_report = run_dataset_model(confirmed_args)
+        check(ambiguous_report["raw_duplicate_identity_frames"] == 9
+              and ambiguous_report["track_count_range"] == [0,0],
+              "多帧闸门拒绝同类歧义后仍完整报告原始九帧重复身份，不能伪装成原始检测正确")
         demo_args.report = ""
         raises(lambda: run_dataset_model(demo_args), "自动诊断必须指定可保存的报告")
         demo_args.report = base / "invalid_diagnostic.json"

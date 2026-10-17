@@ -64,7 +64,7 @@ import cv2                                                        # noqa: E402
 from assemvision.config import load_config                        # noqa: E402
 from assemvision.core.checks import Qualifier                     # noqa: E402
 from assemvision.core.part_id import classify_features               # noqa: E402
-from assemvision.core.part_tracker import PartTracker, make_tracker   # noqa: E402
+from assemvision.core.part_tracker import PartTracker, make_tracker, IdentityConfirmation  # noqa: E402
 from assemvision.core.roi import TrayMap                          # noqa: E402
 from assemvision.core.segment import Segmenter, glove_hits         # noqa: E402
 from assemvision.imgio import imread_safe                         # noqa: E402
@@ -136,6 +136,7 @@ def run_dataset_model(args):
     replay_clock = [1000.0]
     tracker = PartTracker(cfg, clock=(lambda: replay_clock[0]) if args.session else None)
     classifier = classifier_from_templates(artifact["templates"], policy)
+    confirmation = IdentityConfirmation(policy.get("experiment.confirmation", {}))
     source, meta, records = None, None, None
     display = not (args.bench or args.no_preview)
     timings, counts, duplicates, frames, failures = [], [], 0, 0, 0
@@ -217,6 +218,7 @@ def run_dataset_model(args):
                 raise ValueError("原图无法解码或尺寸与采集清单不符")
             cpu_start = time.process_time() if diagnostics else None
             start = time.perf_counter()
+            elapsed_s = record["elapsed_s"] if records is not None else start-preview_started
             mask, blobs, result = segment_variant(image, wp, policy, artifact["variant"])
             after_seg = time.perf_counter()
             labels, predictions = [], []
@@ -226,11 +228,17 @@ def run_dataset_model(args):
                 labels.append(pid)
                 predictions.append(dict(part=pid, score=score, margin=margin,
                     bbox=list(blob.bbox), area_px=float(blob.area_px), features=blob.features))
-            identified = {pid for pid in labels if pid}
-            unidentified = any(not pid and tracker.min_area_px <= b.area_px <= tracker.max_area_px
-                               for pid, b in zip(labels, blobs))
+            confirmed = confirmation.update(predictions, elapsed_s)
+            if confirmation.enabled:
+                for prediction, passed, streak in zip(predictions, confirmed, confirmation.streaks):
+                    prediction["confirmation"] = dict(confirmed=passed, frames=streak)
+            observed_blobs = [b for b, passed in zip(blobs, confirmed) if passed]
+            identified = {pid for pid, passed in zip(labels, confirmed) if pid and passed}
+            unidentified = any((not pid or not passed)
+                               and tracker.min_area_px <= b.area_px <= tracker.max_area_px
+                               for pid, b, passed in zip(labels, blobs, confirmed))
             after_features = time.perf_counter()
-            tracks = tracker.update(image, blobs, detect=True,
+            tracks = tracker.update(image, observed_blobs, detect=True,
                 classify=lambda features: predict(classifier, features, policy)[:2],
                 seen_ids=identified, unidentified=unidentified, occluder=result.glove_mask,
                 allow_new=lambda b: predict(classifier, b.features, policy)[0] is not None)
@@ -242,10 +250,10 @@ def run_dataset_model(args):
                          association_ms=(after_tracking-after_features)*1000)
             phases.append(phase)
             counts.append(len(tracks))
-            duplicate = any(labels.count(pid) > 1 for pid in identified)
+            # 原始检测统计必须在时间确认之前，不能把过滤后的结果冒充单帧无误报。
+            duplicate = any(labels.count(pid) > 1 for pid in set(labels) if pid)
             duplicates += int(duplicate)
             frames += 1
-            elapsed_s = record["elapsed_s"] if records is not None else start-preview_started
             reasons = []
             if diagnostics:
                 if timings[-1] > slow_ms:
@@ -265,8 +273,11 @@ def run_dataset_model(args):
                         covered=bool(track.covered), visible_ratio=float(track.visible_ratio)))
                 frame_trace.append(dict(frame=frames, elapsed_s=elapsed_s,
                     algorithm_ms=timings[-1], stages_ms=phase, process_cpu_ms=cpu_ms,
+                    rejected_candidates=result.detail.get("rejected_candidates", []),
                     reasons=reasons, predictions=[{k: p[k] for k in ("part", "bbox", "score")}
                                                   for p in predictions], tracks=track_details))
+                if confirmation.enabled:
+                    frame_trace[-1]["confirmation"] = [p["confirmation"] for p in predictions]
             key = None
             if display or auto_reasons:
                 canvas = image.copy()
@@ -298,6 +309,7 @@ def run_dataset_model(args):
                         intrinsics=meta.get("intrinsics"), distance_mm=meta.get("distance_mm"),
                         controls_at_start=meta.get("actual_controls") if records is not None else controls_before,
                         predictions=predictions, tracks=track_details,
+                        segmentation_detail=result.detail,
                         algorithm_ms=timings[-1], stages_ms=phase, process_cpu_ms=cpu_ms,
                         triggers=(["manual"] if manual_save else []) + reasons,
                         note="开发诊断证据，不是自动真值。保存耗时不计入算法计时；自动写盘会影响后续采集节奏。")
@@ -329,6 +341,7 @@ def run_dataset_model(args):
                 raise RuntimeError("预览结束时相机实际控件发生变化")
         report = dict(frames=frames, source=source_name, template_sha256=model_hash,
             tracker_config=cfg, raw_duplicate_identity_frames=duplicates,
+            confirmation_config=confirmation.config,
             track_count_range=[min(counts), max(counts)],
             algorithm_ms=dict(median=float(np.median(timings)), p95=float(np.percentile(timings,95))),
             algorithm_stages_ms={name: dict(median=float(np.median([p[name] for p in phases])),

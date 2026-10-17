@@ -282,6 +282,22 @@ def segment_variant(image, wp, policy, variant):
             raise ValueError("候选最大像素跨度必须为正的有限值")
         # 在昂贵形状特征之前挡掉明显超长背景；掩膜保留，诊断不会隐藏原始分割。
         blobs = [b for b in blobs if max(b.bbox[2:]) <= extent]
+    reject_border = policy.get("experiment.reject_border_candidates", False)
+    if not isinstance(reject_border, bool):
+        raise ValueError("贴边候选拒识开关必须为布尔值")
+    if reject_border:
+        # 贴边块可能被画面裁断，尺寸/形状不可靠；不拿残片建立身份。
+        # ★ 完整零件也必须完全入画且不贴边；这不是手腕材质识别，内部皮肤仍可能误检。
+        height, width = mask.shape[:2]
+        kept, rejected = [], []
+        for blob in blobs:
+            x, y, w, h = blob.bbox
+            if x <= 0 or y <= 0 or x + w >= width or y + h >= height:
+                rejected.append(dict(bbox=list(blob.bbox), reason="image_border"))
+            else:
+                kept.append(blob)
+        blobs = kept
+        result.detail["rejected_candidates"] = rejected
     for blob in blobs:
         blob.features = contour_features(blob.contour, mask)
     return mask, blobs, result

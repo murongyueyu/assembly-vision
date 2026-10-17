@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cv2                                                    # noqa: E402
 import assemvision.core.part_tracker as tracker_module
 from assemvision.core.part_tracker import (KalmanXY, PartTracker,   # noqa: E402
-                                           _iou, make_tracker, identity_relink_pairs)
+                                           _iou, make_tracker, identity_relink_pairs, IdentityConfirmation)
 from assemvision.types import Blob                            # noqa: E402
 
 
@@ -61,6 +61,33 @@ def mk_blob(cx: float, cy: float, area_px: float, aspect: float = 1.0) -> Blob:
 
 
 def main() -> int:
+    print("== 多帧确认 ==")
+    confirm_cfg = dict(frames=7, min_score=.85, max_gap_seconds=.25,
+                       dist_match_px=60, iou_match=.15, area_ratio=[.8, 1.25])
+    observation = dict(part="P1_base", score=.95, bbox=[10,20,50,50], area_px=2000)
+    confirmer = IdentityConfirmation(confirm_cfg)
+    outputs = [confirmer.update([observation], i/30)[0] for i in range(7)]
+    check(outputs == [False]*6+[True], "连续七帧才确认，不用单帧身份建立轨迹")
+    check(confirmer.update([], 7/30) == []
+          and confirmer.update([observation], 8/30) == [False] and confirmer.streaks == [1],
+          "漏一帧立即重计；历史轨迹另由追踪器保留，不用旧票补足新确认")
+    for replacement in [dict(observation, score=.5), dict(observation, part="P3_wheel"),
+                        dict(observation, bbox=[400,300,50,50]), dict(observation, area_px=500)]:
+        confirmer = IdentityConfirmation(confirm_cfg)
+        for i in range(6):confirmer.update([observation], i/30)
+        check(confirmer.update([replacement], 6/30) == [False]
+              and confirmer.update([observation], 7/30) == [False],
+              "低分/换类/位置跳变/面积突变不能继承已有票数")
+    confirmer = IdentityConfirmation(confirm_cfg)
+    for i in range(6):confirmer.update([observation], i/30)
+    check(confirmer.update([observation, observation], 6/30) == [False, False]
+          and confirmer.update([observation], 7/30) == [False],
+          "同一类别两个候选时不挑一个投票，并重置该类别确认")
+    for stamp in [1.0, -1.0]:
+        confirmer = IdentityConfirmation(confirm_cfg)
+        for i in range(6):confirmer.update([observation], i/30)
+        check(confirmer.update([observation], stamp) == [False], "源时间间隔过长或倒退需重新计数")
+    check(IdentityConfirmation().update([observation], 0) == [True], "默认关闭保持旧模型行为")
     frame = np.full((480, 640, 3), 90, np.uint8)
     print("== 单件身份的远距离关联与逐帧检测模式 ==")
     refs = [("P1_base", 4000.0)]

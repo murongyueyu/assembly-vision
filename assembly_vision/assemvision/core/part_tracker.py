@@ -44,6 +44,70 @@ import numpy as np
 from ..types import Blob
 
 
+class IdentityConfirmation:
+    """单件工位的可选连续帧确认；只接收检测记录，不接触相机或文件。"""
+
+    def __init__(self, config=None):
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("连续帧确认配置必须为字典")
+        self.config = dict(config or {})
+        self.enabled = bool(self.config)
+        self.pending = {}
+        self.streaks = []
+        if not self.enabled:
+            return
+        if not {"frames", "min_score", "max_gap_seconds", "dist_match_px", "iou_match", "area_ratio"}.issubset(self.config):
+            raise ValueError("连续帧确认缺少必要配置")
+        self.frames = self.config["frames"]
+        self.min_score = float(self.config["min_score"])
+        self.max_gap = float(self.config["max_gap_seconds"])
+        self.distance = float(self.config["dist_match_px"])
+        self.iou = float(self.config["iou_match"])
+        self.area_ratio = tuple(self.config["area_ratio"])
+        if (type(self.frames) is not int or self.frames < 1
+                or not np.isfinite([self.min_score, self.max_gap, self.distance, self.iou]).all()
+                or not 0 <= self.min_score <= 1 or self.max_gap <= 0 or self.distance <= 0
+                or not 0 <= self.iou <= 1 or len(self.area_ratio) != 2
+                or not np.isfinite(self.area_ratio).all()
+                or not 0 < self.area_ratio[0] <= 1 <= self.area_ratio[1]):
+            raise ValueError("连续帧确认的帧数、分数、时间、位置或面积配置无效")
+
+    def update(self, predictions, elapsed_s):
+        """同类只有一个可靠候选且连续帧位置/面积一致才确认；缺测/冲突立即重计。"""
+        if not self.enabled:
+            self.streaks = [1] * len(predictions)
+            return [True] * len(predictions)
+        if not np.isfinite(elapsed_s):
+            raise ValueError("连续帧确认需要有限的源时间")
+        counts = {}
+        for p in predictions:
+            if p["part"]:
+                counts[p["part"]] = counts.get(p["part"], 0) + 1
+        current, accepted, self.streaks = {}, [], []
+        for p in predictions:
+            pid, score, bbox, area = p["part"], p["score"], p["bbox"], p["area_px"]
+            valid = (pid and counts[pid] == 1 and np.isfinite([score, area]).all()
+                     and score >= self.min_score and area > 0)
+            streak, reference = 0, area
+            if valid:
+                previous = self.pending.get(pid)
+                if previous:
+                    oldbox, oldarea, oldcount, oldtime = previous
+                    dx = bbox[0]+bbox[2]/2 - oldbox[0]-oldbox[2]/2
+                    dy = bbox[1]+bbox[3]/2 - oldbox[1]-oldbox[3]/2
+                    consistent = (0 < elapsed_s-oldtime <= self.max_gap
+                        and (_iou(oldbox, bbox) >= self.iou or np.hypot(dx, dy) <= self.distance)
+                        and self.area_ratio[0] <= area / oldarea <= self.area_ratio[1])
+                    if consistent:
+                        streak, reference = min(oldcount, self.frames-1), oldarea
+                streak += 1
+                current[pid] = (tuple(bbox), reference, streak, elapsed_s)
+            self.streaks.append(streak)
+            accepted.append(streak >= self.frames)
+        self.pending = current
+        return accepted
+
+
 # ──────────────────────────────────────────────────────────────
 class KalmanXY:
     """匀速模型卡尔曼：状态 [x, y, vx, vy]，观测 [x, y]。

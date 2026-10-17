@@ -17,9 +17,15 @@ annotation:
 experiment:
   # 可选追踪实验覆盖仅由离线诊断读取，正式tracking配置保持原样。
   tracking_overrides: {}
+  # ★ 多帧确认默认关闭保留旧实验；新开发候选需配置帧数/分数/最大帧间隔及几何一致性。
+  # 只用于阶段1逐帧演示，静态单图评测仍报告原始检测，不能用时间过滤掩盖单帧误检。
+  confirmation: {}
   # ★ 可选像素跨度闸门，在最终候选算特征前生效；换分辨率须重新实测。
   # 本轮640x480开发件跨度约100px，顶部背景可达248~317px；正式默认关闭。
   max_candidate_extent_px: null
+  # ★ 现场皮肤误报贴着图像底边；可选保守拒识，开启后真实零件贴边也不判新身份。
+  # 默认关闭保留旧实验；新候选必须整批回放，不能据此声称解决了画面内部皮肤误检。
+  reject_border_candidates: false
   # 正式配置不变；离线实验另存policy时可覆盖segment.*，默认不覆盖。
   segmentation_overrides: {}
   variants: [brass, seeded_metal, seeded_metal_close, seeded_color]
