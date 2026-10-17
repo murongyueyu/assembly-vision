@@ -17,6 +17,7 @@ from part_dataset import (ROOT, POLICY, PARTS, bbox_iou, capture_tasks, file_has
                           load_config, load_samples, match_boxes, read_json, save_image,
                           score_frame, validate_annotation, write_json)
 from part_dataset import remaining_tasks, selected_tasks, classifier_from_templates
+from part_dataset import required_features_match, predict
 from measure_part_dataset import fit, evaluate, mask_iou_score
 from capture_part_dataset import main as capture_main, check_locked, windows_mf_exposure
 from annotate_part_dataset import mask_view_geometry, mask_view_point, MASK_TOOLBAR
@@ -88,6 +89,41 @@ def main():
     experiment["experiment"]["segmentation_overrides"] = {"capture.exposure": 10}
     raises(lambda: segment_variant(image, original_wp, Config(experiment), "brass"),
            "分割实验禁止覆盖相机采集参数")
+    weak_policy = copy.deepcopy(load_config(str(POLICY)).data)
+    weak_policy["experiment"]["segmentation_overrides"] = {"segment.brass.min_area_px": 100}
+    weak_image = image.copy()
+    dark = cv2.cvtColor(np.array([[[25, 230, 60]]], np.uint8), cv2.COLOR_HSV2BGR)[0, 0]
+    weak_image[22:28, 60:68] = dark
+    weak_image[22:28, 90:100] = dark
+    original_mask, _, _ = segment_variant(weak_image, original_wp, Config(weak_policy), "brass")
+    weak_mask, _, _ = segment_variant(weak_image, original_wp, Config(weak_policy), "seeded_color")
+    check(not original_mask[25, 61] and weak_mask[25, 61] and not weak_mask[25, 65]
+          and not np.any(weak_mask[22:28, 90:100]) and original_wp.data == original_data,
+          "弱色域只能补种子近邻暗边，不能独立发现远处暗块或污染正式配置")
+    weak_policy["experiment"]["seeded_color"]["margin_px"] = -1
+    raises(lambda: segment_variant(weak_image, original_wp, Config(weak_policy), "seeded_color"),
+           "拒绝负的暗边补全半径")
+    bands = {"length_mm": (50, 60)}
+    check(required_features_match({"length_mm": 50}, bands, ["length_mm"])
+          and required_features_match({"length_mm": 60}, bands, ["length_mm"])
+          and not required_features_match({"length_mm": 61}, bands, ["length_mm"])
+          and not required_features_match({}, bands, ["length_mm"])
+          and not required_features_match({"length_mm": float("nan")}, bands, ["length_mm"]),
+          "必检特征边界包含端点，越界、缺失和非有限值必须拒识")
+    required_policy = Config(copy.deepcopy(load_config(str(POLICY)).data))
+    example_templates = {"P2_column": dict(ranges=dict(length_mm=[50, 60],
+        circularity=[.5, 1], solidity=[.8, 1]), weights=dict(length_mm=1, circularity=3, solidity=3))}
+    required_clf = classifier_from_templates(example_templates, required_policy)
+    feats = dict(length_mm=500, circularity=.8, solidity=.9)
+    check(predict(required_clf, feats, required_policy)[0] == "P2_column",
+          "未启用必检特征时保持原有软评分")
+    required_policy.set("experiment.required_features", ["length_mm"])
+    check(predict(required_clf, feats, required_policy)[0] is None
+          and predict(required_clf, dict(feats, length_mm=55), required_policy)[0] == "P2_column",
+          "尺寸严重越界不能被其他形状高分掩盖，合法尺寸仍可识别")
+    required_policy.set("experiment.required_features", ["short_side_mm"])
+    raises(lambda: classifier_from_templates(example_templates, required_policy),
+           "模板缺少必检区间时提前报错，不静默放行")
     silhouette = np.zeros((30, 30), np.uint8)
     cv2.circle(silhouette, (15, 15), 10, 255, -1)
     ring = silhouette.copy()

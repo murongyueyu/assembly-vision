@@ -17,16 +17,29 @@ annotation:
 experiment:
   # 正式配置不变；离线实验另存policy时可覆盖segment.*，默认不覆盖。
   segmentation_overrides: {}
-  variants: [brass, seeded_metal, seeded_metal_close]
+  variants: [brass, seeded_metal, seeded_metal_close, seeded_color]
   # ★ 候选实验值，必须由真实标注对比决定，不能直接作为正式参数。
   seed_margin_px: 8
   close_kernel_px: 3
+  # ★ 2026-10-17开发掩膜暗边诊断：漏掉立柱像素的V中位61~90、S可达234。
+  # 仅seeded_color候选在既有种子邻域补暗边；不覆盖正式brass参数。
+  seeded_color:
+    margin_px: 2              # 暗部补全仅限2px，避免8px邻域吞入料盘暗纹/投影
+    h_min: 10
+    h_max: 45
+    s_min: 30
+    s_max: 255
+    v_min: 50
+    v_max: 255
   feature_sets:
     shape: [circularity, solidity, elongation, holes, straightness, end_width_ratio, area_frac]
     shape_scale: [circularity, solidity, elongation, holes, straightness, end_width_ratio, area_frac, area_mm2, length_mm, short_side_mm]
     shape_color: [circularity, solidity, elongation, holes, straightness, end_width_ratio, area_frac, c_hue_mean, c_hue_std, c_sat_mean, c_val_mean, c_sat_hi_frac]
   min_score: 0.55
   min_margin: 0.05             # ★ 实验拒识余量，防止并列由模板顺序决定
+  # ★ 可选尺寸必检闸门仅在另存实验policy时启用；默认保持原软评分。
+  # 2026-10-17：顶部248px长木桌细条能被新模板软评分认成立柱，必须另作对照。
+  required_features: []
   holes_tol: 1.0
   # 用户确认：顶盖小孔在当前清晰度下不可靠，两面同类，不用孔数区分身份。
   ignored_features_by_part:

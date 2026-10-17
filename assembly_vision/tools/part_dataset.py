@@ -256,7 +256,21 @@ def segment_variant(image, wp, policy, variant):
         radius = int(policy.get("experiment.seed_margin_px"))
         seed = cv2.dilate(mask, np.ones((2 * radius + 1, 2 * radius + 1), np.uint8))
         mask = cv2.bitwise_or(mask, cv2.bitwise_and(metal, seed))
-        if variant == "seeded_metal_close":
+        if variant == "seeded_color":
+            # 暗边允许更高饱和度和更低亮度，但只能补在原黄铜种子邻域。
+            # ★ 不能全图放宽色域：真实开发图会把背景连进底座并产生误认。
+            spec = policy.get("experiment.seeded_color")
+            if not isinstance(spec, dict):
+                raise ValueError("seeded_color缺少弱色域配置")
+            weak = seg._mask(hsv, spec, morph=False)
+            # 早期候选未单列暗边半径时沿用其已留档的种子半径，保留实验可重放性。
+            dark_radius = int(spec.get("margin_px", radius))
+            if dark_radius < 0:
+                raise ValueError("弱色域补全半径不能为负")
+            dark_seed = cv2.dilate(result.brass_mask, np.ones(
+                (2 * dark_radius + 1, 2 * dark_radius + 1), np.uint8))
+            mask = cv2.bitwise_or(mask, cv2.bitwise_and(weak, dark_seed))
+        if variant in ("seeded_metal_close", "seeded_color"):
             k = int(policy.get("experiment.close_kernel_px"))
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
     blobs = seg._blobs(mask, min_area_px=float(seg.brass.get("min_area_px", 500)))
@@ -312,6 +326,9 @@ def classifier_from_templates(data, policy, allowed=None):
                   if isinstance(v, (list, tuple)) and len(v) == 2 and (allowed is None or k in allowed)}
         if not ranges:
             raise ValueError("%s 没有可用特征区间" % part)
+        required = policy.get("experiment.required_features", [])
+        if any(key not in ranges for key in required):
+            raise ValueError("%s 缺少配置要求的必检特征区间" % part)
         weights = dict(item.get("weights", {}))
         tol = {"holes": float(weights.pop("holes_tol"))} if "holes_tol" in weights else {}
         templates.append(PartTemplate(part=part, ranges=ranges, weights=weights, discrete_tol=tol))
@@ -325,4 +342,22 @@ def predict(clf, features, policy):
     margin = float(ranked[0][1] - ranked[1][1]) if len(ranked) > 1 else 1.0
     if margin < float(policy.get("experiment.min_margin")):
         part = None
+    required = policy.get("experiment.required_features", [])
+    if part and required:
+        template = next(t for t in clf.templates if t.part == part)
+        # 单个尺寸严重越界不能被其他形状特征的平均分掩盖；拒识后不猜第二名。
+        if not required_features_match(features, template.ranges, required):
+            part = None
     return part, float(score), margin
+
+
+def required_features_match(features, ranges, required):
+    """显式配置的必检特征必须存在、有限且落在模板区间；不另加硬编码容差。"""
+    for key in required:
+        value = features.get(key)
+        if key not in ranges or value is None or not np.isfinite(value):
+            return False
+        lo, hi = ranges[key]
+        if not lo <= value <= hi:
+            return False
+    return True

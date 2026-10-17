@@ -274,7 +274,7 @@ def main(argv=None):
     ap.add_argument("--workpiece", type=Path, default=ROOT / "config" / "workpiece.yaml")
     sub = ap.add_subparsers(dest="command", required=True)
     train = sub.add_parser("fit", help="只从 dev 素材拟合，不读取 test")
-    train.add_argument("--variant", choices=["brass", "seeded_metal", "seeded_metal_close"], required=True)
+    train.add_argument("--variant", choices=["brass", "seeded_metal", "seeded_metal_close", "seeded_color"], required=True)
     train.add_argument("--features", choices=["shape", "shape_scale", "shape_color"], required=True)
     train.add_argument("--output", type=Path, required=True)
     ev = sub.add_parser("evaluate")
