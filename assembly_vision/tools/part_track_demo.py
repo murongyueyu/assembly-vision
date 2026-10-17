@@ -52,6 +52,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 
@@ -95,6 +96,19 @@ def _read_frame(src, images, idx):
     return getattr(f, "left", None)
 
 
+def save_preview_snapshot(folder, image, canvas, mask, details):
+    """每次按键独立落盘，JSON最后写入作为完成标记；重复运行不覆盖既有证据。"""
+    from part_dataset import save_image, write_json, file_hash
+    target = Path(folder) / ("frame_%06d_%s" % (details["frame"], uuid4().hex[:12]))
+    target.mkdir(parents=True, exist_ok=False)
+    files = {}
+    for name, array in [("raw.png", image), ("overlay.png", canvas), ("mask.png", mask)]:
+        save_image(target / name, array)
+        files[name] = file_hash(target / name)
+    write_json(target / "snapshot.json", dict(details, image_shape=list(image.shape), files=files))
+    return target / "snapshot.json"
+
+
 def run_dataset_model(args):
     """阶段1独立模型预览；不读取旧单应/槽位，支持真实清单时间戳回放。"""
     from part_dataset import (read_json, write_json, file_hash, sample_scale,
@@ -119,6 +133,13 @@ def run_dataset_model(args):
     source, meta, records = None, None, None
     display = not (args.bench or args.no_preview)
     timings, counts, duplicates, frames, failures = [], [], 0, 0, 0
+    phases, snapshots, snapshot_errors = [], [], 0
+    snapshot_folder = getattr(args, "snapshot_dir", "")
+    if not snapshot_folder:
+        snapshot_folder = (Path(args.report).with_name(Path(args.report).stem + "_snapshots")
+                           if args.report else Path(args.dataset_model).parent / "preview_snapshots")
+    model_hash = file_hash(args.dataset_model)
+    track_keys, track_refs = {}, []
     controls_before = controls_after = None
     try:
         if args.session:
@@ -157,7 +178,8 @@ def run_dataset_model(args):
         mmpp = sample_scale({"meta": meta})
         if mmpp is None:
             raise ValueError("缺SDK内参或工作距离，不能使用近似尺寸模板")
-        print("阶段1开发模型预览：逐帧检测关联；q/ESC退出；此处不作独立精度验收。")
+        print("阶段1开发模型预览：s保存诊断快照，q/ESC退出；此处不作独立精度验收。")
+        preview_started = time.perf_counter()
         while not args.max_frames or frames < args.max_frames:
             if records is not None:
                 record = next(records, None)
@@ -183,18 +205,28 @@ def run_dataset_model(args):
                 raise ValueError("原图无法解码或尺寸与采集清单不符")
             start = time.perf_counter()
             mask, blobs, result = segment_variant(image, wp, policy, artifact["variant"])
-            labels = []
+            after_seg = time.perf_counter()
+            labels, predictions = [], []
             for blob in blobs:
                 blob.features = extract_features(blob, image, mask, mmpp)
-                labels.append(predict(classifier, blob.features, policy)[0])
+                pid, score, margin = predict(classifier, blob.features, policy)
+                labels.append(pid)
+                predictions.append(dict(part=pid, score=score, margin=margin,
+                    bbox=list(blob.bbox), area_px=float(blob.area_px), features=blob.features))
             identified = {pid for pid in labels if pid}
             unidentified = any(not pid and tracker.min_area_px <= b.area_px <= tracker.max_area_px
                                for pid, b in zip(labels, blobs))
+            after_features = time.perf_counter()
             tracks = tracker.update(image, blobs, detect=True,
                 classify=lambda features: predict(classifier, features, policy)[:2],
                 seen_ids=identified, unidentified=unidentified, occluder=result.glove_mask,
                 allow_new=lambda b: predict(classifier, b.features, policy)[0] is not None)
-            timings.append((time.perf_counter() - start) * 1000)
+            after_tracking = time.perf_counter()
+            timings.append((after_tracking - start) * 1000)
+            phase = dict(segmentation_ms=(after_seg-start)*1000,
+                         features_classify_ms=(after_features-after_seg)*1000,
+                         association_ms=(after_tracking-after_features)*1000)
+            phases.append(phase)
             counts.append(len(tracks))
             duplicates += int(any(labels.count(pid) > 1 for pid in identified))
             frames += 1
@@ -206,10 +238,37 @@ def run_dataset_model(args):
                     x, y = track.last_bbox[:2]
                     cv2.putText(canvas, "%s %s" % (track.part_id or "?", track.state),
                                 (x, max(15, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, .4, color, 1)
-                cv2.putText(canvas, "DEV model | tracks=%d | %.1fms | Q exit" % (len(tracks), timings[-1]),
+                cv2.putText(canvas, "DEV | tracks=%d shots=%d | %.1fms | S save / Q exit" % (
+                    len(tracks), len(snapshots), timings[-1]),
                             (5, 20), cv2.FONT_HERSHEY_SIMPLEX, .45, (255,255,255), 1)
                 cv2.imshow(WIN, canvas)
-                if cv2.waitKey(1) & 0xff in (ord("q"), 27):
+                key = cv2.waitKey(1) & 0xff
+                if key in (ord("s"), ord("S")):
+                    track_details = []
+                    for track in tracks:
+                        if id(track) not in track_keys:
+                            track_keys[id(track)] = len(track_refs)
+                            track_refs.append(track)
+                        track_details.append(dict(key=track_keys[id(track)], part=track.part_id,
+                            state=track.state, bbox=list(track.last_bbox), score=float(track.id_score),
+                            covered=bool(track.covered), visible_ratio=float(track.visible_ratio)))
+                    details = dict(frame=frames, source=source_name, template_sha256=model_hash,
+                        elapsed_s=record["elapsed_s"] if records is not None else start-preview_started,
+                        source_ts=record.get("source_ts") if records is not None else getattr(frame, "ts", None),
+                        intrinsics=meta.get("intrinsics"), distance_mm=meta.get("distance_mm"),
+                        controls_at_start=meta.get("actual_controls") if records is not None else controls_before,
+                        predictions=predictions, tracks=track_details,
+                        algorithm_ms=timings[-1], stages_ms=phase,
+                        note="人工按s保留的开发诊断证据，不是自动真值。保存耗时不计入算法计时。")
+                    try:
+                        saved = save_preview_snapshot(snapshot_folder, image, canvas, mask, details)
+                    except OSError as error:
+                        snapshot_errors += 1
+                        print("快照保存失败：%s；此前快照保留。" % error)
+                    else:
+                        snapshots.append(str(saved))
+                        print("快照已保存：%s" % saved)
+                if key in (ord("q"), 27):
                     break
                 if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
                     break
@@ -219,10 +278,13 @@ def run_dataset_model(args):
             controls_after = actual_controls(source)
             if check_locked(source, controls_after, cam, policy.get("capture.exposure_readback")) != validation:
                 raise RuntimeError("预览结束时相机实际控件发生变化")
-        report = dict(frames=frames, source=source_name, template_sha256=file_hash(args.dataset_model),
+        report = dict(frames=frames, source=source_name, template_sha256=model_hash,
             tracker_config=cfg, raw_duplicate_identity_frames=duplicates,
             track_count_range=[min(counts), max(counts)],
             algorithm_ms=dict(median=float(np.median(timings)), p95=float(np.percentile(timings,95))),
+            algorithm_stages_ms={name: dict(median=float(np.median([p[name] for p in phases])),
+                p95=float(np.percentile([p[name] for p in phases], 95))) for name in phases[0]},
+            snapshots=snapshots, snapshot_save_errors=snapshot_errors,
             controls_before=controls_before, controls_after=controls_after,
             final_tracks=[dict(part=t.part_id, state=t.state, bbox=list(t.last_bbox)) for t in tracker.tracks],
             note="开发模型预览，不是独立精度验收；算法计时不含读图/取帧、显示及落盘。")
@@ -230,6 +292,8 @@ def run_dataset_model(args):
             write_json(args.report, report)
         print("阶段1预览：%d帧；轨迹数%d～%d；算法中位%.2fms / P95 %.2fms。" % (
             frames, min(counts), max(counts), report["algorithm_ms"]["median"], report["algorithm_ms"]["p95"]))
+        if display:
+            print("诊断快照：成功%d次，失败%d次；目录：%s" % (len(snapshots), snapshot_errors, snapshot_folder))
         return report
     finally:
         if source is not None:
@@ -279,14 +343,15 @@ def main(argv=None) -> int:
     ap.add_argument("--dataset-model", default="", help="阶段1独立模型，使用其分割及追踪参数，不读旧标定")
     ap.add_argument("--session", default="", help="阶段1原图序列的session.json；不传则使用D435实时画面")
     ap.add_argument("--report", default="", help="阶段1预览统计JSON；不覆盖已有文件")
+    ap.add_argument("--snapshot-dir", default="", help="s诊断快照目录；默认放在报告同名_snapshots目录")
     args = ap.parse_args(argv)
     if args.dataset_model:
         if args.save:
             ap.error("阶段1模型预览不使用--save；保留原图请运行阶段1采集工具")
         run_dataset_model(args)
         return 0
-    if args.session or args.report:
-        ap.error("--session/--report需要同时指定--dataset-model")
+    if args.session or args.report or args.snapshot_dir:
+        ap.error("--session/--report/--snapshot-dir需要同时指定--dataset-model")
 
     wp = load_config(args.workpiece)
     cal = load_config(args.calibration)

@@ -15,7 +15,7 @@ import numpy as np
 from _common import check
 from part_dataset import (ROOT, POLICY, PARTS, bbox_iou, capture_tasks, file_hash,
                           load_config, load_samples, match_boxes, read_json, save_image,
-                          score_frame, validate_annotation, write_json)
+                          score_frame, validate_annotation, write_json, imread_safe)
 from part_dataset import remaining_tasks, selected_tasks, classifier_from_templates
 from part_dataset import required_features_match, predict
 from measure_part_dataset import fit, evaluate, mask_iou_score
@@ -472,6 +472,42 @@ def main():
         check(demo_report["frames"] == 2 and demo_report["tracker_config"]["backend"] == "detection"
               and (base / "demo_report.json").exists(),
               "独立模型预览实际入口可按清单时钟回放并生成报告，不读取旧标定")
+        demo_args.report = ""
+        demo_args.bench, demo_args.max_frames = False, 4
+        demo_args.snapshot_dir = base / "中文诊断快照"
+        with patch("part_track_demo.cv2.imshow"), \
+                patch("part_track_demo.cv2.waitKey", side_effect=[ord("s"), ord("s"), ord("S"), ord("q")]), \
+                patch("part_track_demo.cv2.getWindowProperty", return_value=1), \
+                patch("part_track_demo.cv2.destroyAllWindows"):
+            saved_demo = run_dataset_model(demo_args)
+        paths = [Path(p) for p in saved_demo["snapshots"]]
+        check(len(paths) == 3 and len(set(paths)) == 3 and saved_demo["frames"] == 4,
+              "窗口内连续按s/s/S分别保存三次，q正常退出，快照互不覆盖")
+        first_evidence = read_json(paths[0])
+        first_original = imread_safe(str(base / "dev_a" / replay_meta["samples"][0]["image"]))
+        check(np.array_equal(imread_safe(str(paths[0].parent / "raw.png")), first_original)
+              and set(first_evidence["files"]) == {"raw.png", "overlay.png", "mask.png"}
+              and first_evidence["frame"] == 1 and first_evidence["elapsed_s"] == 0
+              and "predictions" in first_evidence and "stages_ms" in first_evidence
+              and all(file_hash(paths[0].parent / name) == digest for name,digest in first_evidence["files"].items()),
+              "中文路径快照保留无文字原图、叠加图和掩膜，关联当前帧预测/时钟/耗时及hash")
+        with patch("part_track_demo.cv2.imshow"), \
+                patch("part_track_demo.cv2.waitKey", side_effect=[ord("s"), ord("q")]), \
+                patch("part_track_demo.cv2.getWindowProperty", return_value=1), \
+                patch("part_track_demo.cv2.destroyAllWindows"):
+            repeated_snapshot = run_dataset_model(demo_args)
+        check(Path(repeated_snapshot["snapshots"][0]) not in paths
+              and all(p.exists() for p in paths), "重启后再保存第1帧也不会覆盖上次证据")
+        with patch("part_track_demo.cv2.imshow"), \
+                patch("part_track_demo.cv2.waitKey", side_effect=[ord("s"), ord("q")]), \
+                patch("part_track_demo.cv2.getWindowProperty", return_value=1), \
+                patch("part_track_demo.cv2.destroyAllWindows"), \
+                patch("part_track_demo.save_preview_snapshot", side_effect=OSError("模拟写入被拒")):
+            failed_snapshot = run_dataset_model(demo_args)
+        check(failed_snapshot["snapshot_save_errors"] == 1 and not failed_snapshot["snapshots"]
+              and all(p.exists() for p in paths), "快照失败明确记录且预览可退出，先前快照保持完整")
+        demo_args.report = base / "demo_report.json"
+        demo_args.bench, demo_args.max_frames = True, 2
         raises(lambda: run_dataset_model(demo_args), "模型预览报告禁止覆盖")
         demo_args.report = ""
         replay_meta["samples"][0]["sha256"] = "broken"
