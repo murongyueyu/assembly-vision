@@ -143,7 +143,10 @@ class TrackJournal:
             counts = record["state_frames"]
             counts[track.state] = counts.get(track.state, 0) + 1
             record["last_frame"], record["last_elapsed_s"] = frame, elapsed_s
-            if track.state == "detected":
+            observation = getattr(track,"detail",{}) or {}
+            current = track.state=="detected" or bool(observation.get("visible_observed",False))
+            partial = current and (track.state!="detected" or bool(observation.get("partial_observed",False)))
+            if current:
                 x,y,w,h = track.last_bbox
                 center = (float(x+w/2), float(y+h/2))
                 record["last_observed_frame"] = frame
@@ -155,7 +158,8 @@ class TrackJournal:
             last_time = record["last_observed_elapsed_s"]
             details.append(dict(key=key, part=track.part_id, state=track.state,
                 bbox=list(track.last_bbox), score=float(track.id_score), covered=bool(track.covered),
-                visible_ratio=float(track.visible_ratio), observation_current=track.state=="detected",
+                visible_ratio=float(track.visible_ratio), observation_current=current,
+                observation_region="visible_fragment" if partial else ("full_detection" if current else "history"),
                 last_observed_frame=record["last_observed_frame"],
                 observation_age_s=None if last_time is None else max(0.0,elapsed_s-last_time)))
         for key, trail in self.trails.items():
@@ -167,7 +171,8 @@ class TrackJournal:
 def run_dataset_model(args):
     """阶段1独立模型预览；不读取旧单应/槽位，支持真实清单时间戳回放。"""
     from part_dataset import (read_json, write_json, file_hash, sample_scale,
-                              segment_variant, extract_features, predict, classifier_from_templates)
+                              segment_variant, extract_features, predict, classifier_from_templates,
+                              visible_hand_candidates)
     from assemvision.config import Config
     from assemvision.sources.factory import make_source
     from capture_part_dataset import actual_controls, check_locked
@@ -284,19 +289,28 @@ def run_dataset_model(args):
                 predictions.append(dict(part=pid, score=score, margin=margin,
                     bbox=list(blob.bbox), area_px=float(blob.area_px), features=blob.features))
             confirmed = confirmation.update(predictions, elapsed_s)
+            continued = tracker.known_continuations(predictions)
             if confirmation.enabled:
                 for prediction, passed, streak in zip(predictions, confirmed, confirmation.streaks):
                     prediction["confirmation"] = dict(confirmed=passed, frames=streak)
-            observed_blobs = [b for b, passed in zip(blobs, confirmed) if passed]
-            identified = {pid for pid, passed in zip(labels, confirmed) if pid and passed}
+            admitted = [passed or i in continued for i,passed in enumerate(confirmed)]
+            new_identity_candidates = {id(b) for b,pid,passed in zip(blobs,labels,confirmed) if pid and passed}
+            observed_blobs = [b for b, passed in zip(blobs, admitted) if passed]
+            identified = {pid for pid, passed in zip(labels, admitted) if pid and passed}
             unidentified = any((not pid or not passed)
                                and tracker.min_area_px <= b.area_px <= tracker.max_area_px
-                               for pid, b, passed in zip(labels, blobs, confirmed))
+                               for pid, b, passed in zip(labels, blobs, admitted))
+            partial_blobs = visible_hand_candidates(mask,
+                result.glove_mask if result.glove_bbox is not None else None,policy)
+            if partial_blobs:
+                normal_boxes = {tuple(b.bbox) for b in observed_blobs}
+                unidentified = unidentified or any(tuple(b.bbox) not in normal_boxes for b in partial_blobs)
             after_features = time.perf_counter()
             tracks = tracker.update(image, observed_blobs, detect=True,
                 classify=lambda features: predict(classifier, features, policy)[:2],
                 seen_ids=identified, unidentified=unidentified, occluder=result.glove_mask,
-                allow_new=lambda b: predict(classifier, b.features, policy)[0] is not None)
+                allow_new=lambda b: id(b) in new_identity_candidates,
+                partial_blobs=partial_blobs)
             after_tracking = time.perf_counter()
             cpu_ms = (time.process_time() - cpu_start) * 1000 if diagnostics else None
             timings.append((after_tracking - start) * 1000)
@@ -325,6 +339,10 @@ def run_dataset_model(args):
                                                   for p in predictions], tracks=track_details))
                 if confirmation.enabled:
                     frame_trace[-1]["confirmation"] = [p["confirmation"] for p in predictions]
+                if tracker.partial_follow:
+                    frame_trace[-1]["continued_existing"] = sorted(continued)
+                    frame_trace[-1]["visible_hand_candidates"] = [dict(bbox=list(b.bbox),area_px=b.area_px)
+                                                                  for b in partial_blobs]
             key = None
             if display or auto_reasons:
                 canvas = image.copy()
@@ -336,8 +354,9 @@ def run_dataset_model(args):
                                       False, color, 1)
                     cv2.drawContours(canvas, [track.contour], -1, color, 1)
                     x, y = track.last_bbox[:2]
-                    label = "#%d %s %s%s" % (detail["key"], track.part_id or "?", track.state,
-                                             "" if detail["observation_current"] else " [last]")
+                    suffix = (" [partial]" if detail["observation_region"]=="visible_fragment" else
+                              ("" if detail["observation_current"] else " [last]"))
+                    label = "#%d %s %s%s" % (detail["key"], track.part_id or "?", track.state,suffix)
                     text_width = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, .4, 1)[0][0]
                     x = max(0, min(x, canvas.shape[1]-text_width-1))
                     cv2.putText(canvas, label,
@@ -357,6 +376,8 @@ def run_dataset_model(args):
                         controls_at_start=meta.get("actual_controls") if records is not None else controls_before,
                         predictions=predictions, tracks=track_details,
                         segmentation_detail=result.detail,
+                        existing_identity_continuations=sorted(continued),
+                        visible_hand_candidates=[dict(bbox=list(b.bbox),area_px=b.area_px) for b in partial_blobs],
                         algorithm_ms=timings[-1], stages_ms=phase, process_cpu_ms=cpu_ms,
                         triggers=(["manual"] if manual_save else []) + reasons,
                         note="开发诊断证据，不是自动真值。保存耗时不计入算法计时；自动写盘会影响后续采集节奏。")

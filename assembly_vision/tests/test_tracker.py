@@ -103,6 +103,47 @@ def main() -> int:
     cfg = dict(backend="detection", detect_every_n=1, min_area_px=100,
                identity_relink=True, identity_relink_min_score=.85,
                identity_relink_area_ratio=[.8, 1.25])
+    partial_cfg = dict(min_area_px=80,max_extent_px=160,glove_margin_px=12,
+        max_distance_px=100,max_gap_seconds=3,min_score=.85,area_ratio=[.08,1.6],
+        short_side_ratio=[.25,1.8],full_area_ratio=[.8,1.25],
+        min_aspect_by_part={"P2_column":2.0},unique_hand_relink=True)
+    partial_clock=[1000.0]
+    partial_tracker=PartTracker(dict(cfg,partial_follow=partial_cfg),clock=lambda:partial_clock[0])
+    column=mk_blob(100,120,1000,8)
+    column_classifier=lambda features:("P2_column",.95)
+    partial_tracker.update(frame,[column],classify=column_classifier,seen_ids={"P2_column"})
+    held=partial_tracker.tracks[0]
+    reference,score=held.area_ref,held.id_score
+    fragment=mk_blob(300,180,240,6)
+    glove=np.zeros(frame.shape[:2],np.uint8);glove[165:195,270:290]=255
+    partial_clock[0]+=.1
+    partial_tracker.update(frame,[],classify=column_classifier,seen_ids=set(),occluder=glove,
+                           partial_blobs=[fragment])
+    check(partial_tracker.tracks[0] is held and held.part_id=="P2_column"
+          and held.last_bbox==fragment.bbox and held.lost_frames==0
+          and held.area_ref==reference and held.id_score==score
+          and held.detail["partial_observed"]==1,
+          "手边残片跟随原立柱更新可见位置，身份/分数/完整面积冻结，不重新分类或新建对象")
+    previous=held.last_bbox
+    partial_clock[0]+=.1
+    partial_tracker.update(frame,[],classify=column_classifier,seen_ids=set(),occluder=glove,
+                           partial_blobs=[fragment,mk_blob(330,180,240,6)])
+    check(held.last_bbox==previous and held.detail["visible_observed"]==0,
+          "同一手边有两个合格残片时不猜一个，保留历史而不伪造当前位置")
+    partial_clock[0]+=.1
+    partial_tracker.update(frame,[],classify=column_classifier,seen_ids=set(),partial_blobs=[fragment])
+    check(held.detail["visible_observed"]==0, "没有手套证据时不凭残片跨位置接回")
+    empty_partial=PartTracker(dict(cfg,partial_follow=partial_cfg))
+    empty_partial.update(frame,[],classify=column_classifier,occluder=glove,partial_blobs=[fragment])
+    check(not empty_partial.tracks,"残片不能直接建立新身份；必须先有已确认的真实零件")
+    candidates=[dict(part="P2_column",score=.95,bbox=list(held.last_bbox),area_px=reference),
+                dict(part="P2_column",score=.95,bbox=[10,10,20,20],area_px=reference)]
+    check(partial_tracker.known_continuations(candidates)=={0},
+          "已知身份的近处完整观测不因远处同类歧义重等七帧；新身份仍不绕过确认")
+    partial_clock[0]+=4
+    partial_tracker.update(frame,[],classify=column_classifier,seen_ids=set(),occluder=glove,
+                           partial_blobs=[fragment])
+    check(held.detail["visible_observed"]==0,"残片缺少连续历史且超过时间窗口，不强行认回")
     away_clock = [1000.0]
     away = PartTracker(cfg, clock=lambda: away_clock[0])
     stable_classify = lambda features: ("P1_base", .95)

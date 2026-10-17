@@ -310,6 +310,25 @@ def sample_scale(sample):
     return float(distance) / float(fx) if distance and fx > 0 else None
 
 
+def visible_hand_candidates(mask, glove_mask, policy):
+    """只给已有轨迹找手边金属残片；不改识别掩膜/分类候选，不用于新身份准入。"""
+    cfg = policy.get("experiment.tracking_overrides.partial_follow", {}) or {}
+    if not cfg or glove_mask is None or not np.any(glove_mask):
+        return []
+    radius = int(cfg["glove_margin_px"])
+    near = cv2.dilate(glove_mask,np.ones((2*radius+1,2*radius+1),np.uint8))
+    height,width = mask.shape[:2]
+    result = []
+    for blob in Segmenter._blobs(mask,min_area_px=float(cfg["min_area_px"])):
+        x,y,w,h = blob.bbox
+        if x<=0 or y<=0 or x+w>=width or y+h>=height or max(w,h)>cfg["max_extent_px"]:
+            continue
+        points = blob.contour.reshape(-1,2)
+        if np.any(near[points[:,1],points[:,0]]):
+            result.append(blob)
+    return result
+
+
 def extract_features(blob, image, mask, mmpp=None):
     return classify_features(blob, mm_per_px=mmpp, bgr=image, mask=mask)
 

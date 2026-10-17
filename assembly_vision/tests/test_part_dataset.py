@@ -108,6 +108,13 @@ def main():
     no_trail.observe([first], 1, 0)
     check(not no_trail.trails[0] and len(no_trail.records)==1, "关闭轨迹线仍保留身份与状态记录")
     raises(lambda: TrackJournal(-1), "拒绝负数轨迹线长度")
+    first.detail={"visible_observed":1.0,"partial_observed":1.0}
+    first.state,first.last_bbox="occluded",(400,300,10,30)
+    visible_partial=journal.observe([first],8,.7)[0]
+    check(visible_partial["observation_current"]
+          and visible_partial["observation_region"]=="visible_fragment"
+          and journal.records[0]["last_observed_center_px"]==[405,315],
+          "部分遮挡但有真实可见观测时显示当前位置，不把手持残片错误标成旧位置")
     # 小件面积实验必须只改内存副本，不能污染工位配置或采集快照。
     from assemvision.config import Config
     from part_dataset import segment_variant
@@ -146,6 +153,19 @@ def main():
     raises(lambda: segment_variant(border_image, original_wp, Config(experiment), "brass"),
            "贴边开关拒绝易误解的字符串配置")
     experiment["experiment"]["reject_border_candidates"] = False
+    from part_dataset import visible_hand_candidates
+    experiment["experiment"]["tracking_overrides"]={"partial_follow":dict(
+        min_area_px=10,max_extent_px=50,glove_margin_px=3)}
+    partial_mask=np.zeros((80,120),np.uint8)
+    partial_mask[30:35,40:50]=255  # 面积小于正式识别阈值的手边残片。
+    partial_mask[30:35,90:100]=255
+    partial_mask[60:65,0:10]=255  # 贴边残片不能借追踪通道冒入。
+    partial_glove=np.zeros_like(partial_mask);partial_glove[35:50,40:60]=255
+    hand_candidates=visible_hand_candidates(partial_mask,partial_glove,Config(experiment))
+    check(len(hand_candidates)==1 and hand_candidates[0].bbox==(40,30,10,5)
+          and not visible_hand_candidates(partial_mask,None,Config(experiment)),
+          "追踪单独保留小的手边残片，排除远处/贴边块；不放宽识别分割阈值")
+    experiment["experiment"]["tracking_overrides"]={}
     experiment["experiment"]["segmentation_overrides"] = {"capture.exposure": 10}
     raises(lambda: segment_variant(image, original_wp, Config(experiment), "brass"),
            "分割实验禁止覆盖相机采集参数")
@@ -614,6 +634,12 @@ def main():
         check([len(row["tracks"]) for row in confirmed_trace] == [0]*6+[1]*3
               and [row["confirmation"][0]["frames"] for row in confirmed_trace] == [1,2,3,4,5,6,7,7,7],
               "实际演示入口前六帧不建身份，第七帧建轨迹，后续继续同一key且保留确认计数")
+        confirmed_args.report = base / "continuation_does_not_admit_new.json"
+        with patch("part_track_demo.PartTracker.known_continuations",return_value={0}):
+            continuation_admission = run_dataset_model(confirmed_args)
+        check([len(row["tracks"]) for row in continuation_admission["diagnostics"]["frame_trace"]]
+              == [0]*6+[1]*3,
+              "即使连续跟踪分支给了观测，也不能绕过七帧确认建立新的身份")
         confirmed_args.report = base / "confirmed_ambiguous_report.json"
         with patch("part_dataset.segment_variant", side_effect=duplicate_candidates):
             ambiguous_report = run_dataset_model(confirmed_args)

@@ -371,6 +371,28 @@ class PartTracker:
         #   配置与代码脱节，调配置没用。
         #   现在读进来并**下发到每条轨迹**（见 `_detect` 建新轨迹处）。
         self.id_margin = float(c.get("id_margin", 0.12))
+        self.partial_follow = c.get("partial_follow", {}) or {}
+        if not isinstance(self.partial_follow, dict):
+            raise ValueError("部分可见追踪配置必须为字典")
+        if self.partial_follow:
+            required = ["min_area_px", "max_extent_px", "glove_margin_px", "max_distance_px",
+                        "max_gap_seconds", "min_score", "area_ratio", "short_side_ratio", "full_area_ratio"]
+            if any(k not in self.partial_follow for k in required):
+                raise ValueError("部分可见追踪缺少参数")
+            for k in required[:-3]:
+                v = self.partial_follow[k]
+                if not np.isfinite(v) or v <= 0:
+                    raise ValueError("部分可见追踪参数必须为有限正数：%s" % k)
+            for k in required[-3:]:
+                bounds = self.partial_follow[k]
+                if len(bounds)!=2 or not np.isfinite(bounds).all() or not 0<bounds[0]<=1<=bounds[1]:
+                    raise ValueError("部分可见追踪比例参数无效：%s" % k)
+            if (self.partial_follow["min_score"]>1
+                    or int(self.partial_follow["glove_margin_px"])!=self.partial_follow["glove_margin_px"]
+                    or type(self.partial_follow.get("unique_hand_relink",False)) is not bool):
+                raise ValueError("部分可见追踪分数、像素半径或唯一关联开关无效")
+            if self.backend != "detection":
+                raise ValueError("部分可见追踪目前仅支持逐帧检测模式")
         # ★ 单件工位的可选远距离重关联：仅对唯一身份且面积接近的完整候选生效。
         # 默认关闭，先在独立开发回放验证，不能把同类多件场景套进来。
         self.identity_relink = bool(c.get("identity_relink", False))
@@ -405,7 +427,7 @@ class PartTracker:
                seen_ids: Optional[set] = None,
                occluder: Optional[np.ndarray] = None,
                unidentified: bool = False,
-               allow_new=None) -> List[TrackState]:
+               allow_new=None, partial_blobs=None) -> List[TrackState]:
         """跑一帧。
 
         参数
@@ -424,11 +446,24 @@ class PartTracker:
             if self.backend == "detection":
                 # 未匹配的历史轨迹先记缺观测；真正匹配上的由absorb统一重置。
                 for track in self.tracks:
+                    if self.partial_follow:
+                        track.detail["visible_observed"] = 0.0
+                        track.detail["partial_observed"] = 0.0
                     track.lost_frames += 1
                     track.miss_streak += 1
                     track.state = "occluded"
                     track.visible_ratio = 0.0
             self._detect(frame, blobs or [], classify, allow_new=allow_new)
+            if self.partial_follow:
+                now = self._clock() if self._clock is not None else time.perf_counter()
+                for track in self.tracks:
+                    if track.lost_frames == 0:
+                        track.detail["last_visible_at"] = now
+                        track.detail["visible_observed"] = 1.0
+                        if track.state == "detected":
+                            _, (w,h), _ = cv2.minAreaRect(track.contour)
+                            track.detail["reference_short_px"] = float(min(w,h))
+                self._follow_visible(frame, partial_blobs or [], blobs or [], occluder, now)
             if self.backend != "detection":
                 self._run_trackers(frame)      # 相关滤波模式保持原路径
             self.judge_lost(seen_ids, occluder, unidentified=unidentified)
@@ -444,6 +479,67 @@ class PartTracker:
         return self.tracks
 
     # ── 内部 ────────────────────────────────────────────────
+    def known_continuations(self, predictions):
+        """已有身份的局部完整观测不重新等七帧；新身份仍由外部连续确认准入。"""
+        if not self.partial_follow:
+            return set()
+        choices = []
+        lo,hi = self.partial_follow["full_area_ratio"]
+        for track in self.tracks:
+            valid = []
+            for i,p in enumerate(predictions):
+                if (not track.part_id or p["part"] != track.part_id
+                        or p["score"] < self.partial_follow["min_score"]
+                        or not lo <= p["area_px"]/max(track.area_ref,1e-6) <= hi):
+                    continue
+                x,y,w,h = p["bbox"]
+                distance = np.hypot(x+w/2-track.last_centroid[0],y+h/2-track.last_centroid[1])
+                if _iou(track.last_bbox,p["bbox"]) >= self.iou_match or distance <= self.dist_match:
+                    valid.append(i)
+            if len(valid)==1:
+                choices.append(valid[0])
+        return {i for i in choices if choices.count(i)==1}
+
+    def _follow_visible(self, frame, partial_blobs, normal_blobs, occluder, now):
+        """可见残片只更新已确认对象的位置，冻结身份/完整面积，不创建新身份。"""
+        cfg = self.partial_follow
+        if occluder is None or not np.any(occluder):
+            return
+        missing = [t for t in self.tracks if t.ever_seen and t.part_id and t.lost_frames>0]
+        occupied = {tuple(b.bbox) for b in normal_blobs}
+        candidates = [b for b in partial_blobs if tuple(b.bbox) not in occupied]
+        pairs = []
+        for ti,track in enumerate(missing):
+            gap = now-track.detail.get("last_visible_at",float("-inf"))
+            if not 0 <= gap <= cfg["max_gap_seconds"]:
+                continue
+            for bi,b in enumerate(candidates):
+                area_ratio = b.area_px/max(track.area_ref,1e-6)
+                _, (w,h), _ = cv2.minAreaRect(b.contour)
+                short = min(w,h)
+                reference = track.detail.get("reference_short_px",0.0)
+                if not reference or not cfg["area_ratio"][0] <= area_ratio <= cfg["area_ratio"][1]:
+                    continue
+                if not cfg["short_side_ratio"][0] <= short/reference <= cfg["short_side_ratio"][1]:
+                    continue
+                min_aspect = cfg.get("min_aspect_by_part",{}).get(track.part_id)
+                if min_aspect is not None and max(w,h)/max(short,1e-6) < min_aspect:
+                    continue
+                distance = np.hypot(b.centroid[0]-track.last_centroid[0],b.centroid[1]-track.last_centroid[1])
+                # 仅一个已知身份暂缺且只有一个合格手边残片时允许跨位置接回。
+                if distance <= cfg["max_distance_px"] or (len(missing)==1 and cfg.get("unique_hand_relink",False)):
+                    pairs.append((ti,bi))
+        for ti,bi in pairs:
+            if sum(t==ti for t,b in pairs)!=1 or sum(b==bi for t,b in pairs)!=1:
+                continue  # 多目标/多残片有歧义，不按面积或遍历顺序猜。
+            track,b = missing[ti],candidates[bi]
+            reference = track.area_ref
+            self.absorb(frame,track,b,b.bbox,float(b.area_px),classify=None,reattach=False)
+            track.area_ref = reference
+            track.visible_ratio = float(b.area_px)/max(reference,1e-6)
+            track.state = "tracked"
+            track.detail.update(visible_observed=1.0,partial_observed=1.0,last_visible_at=now)
+
     def age_all(self) -> None:
         for t in self.tracks:
             t.age += 1
@@ -744,7 +840,9 @@ class PartTracker:
                 #     它既要表示“多久没检测到”，又要表示“多久真的丢了”。
                 #     **被遮挡不是不存在的证据**，不能计入。
                 t.miss_streak = 0
-                t.state = "occluded"          # ★ 挡着就永远是“遮挡”，不管多久
+                # 手边有真实可见残片时仍在跟踪；完全不可见才仅保留遮挡历史。
+                t.state = ("tracked" if self.partial_follow and t.detail.get("visible_observed")
+                           else "occluded")
                 continue
 
             # ② 本帧追踪器**成功了** -> 它就在那儿，

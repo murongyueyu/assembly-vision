@@ -17,6 +17,8 @@ annotation:
 experiment:
   # 可选追踪实验覆盖仅由离线诊断读取，正式tracking配置保持原样。
   tracking_overrides: {}
+  # ★ 手持残片追踪仅在独立候选tracking_overrides.partial_follow显式配置时开启。
+  # 只更新已确认身份的可见轮廓，不用残片新建/改判身份；完全不可见仍保留历史位置。
   # ★ 多帧确认默认关闭保留旧实验；新开发候选需配置帧数/分数/最大帧间隔及几何一致性。
   # 只用于阶段1逐帧演示，静态单图评测仍报告原始检测，不能用时间过滤掩盖单帧误检。
   confirmation: {}
