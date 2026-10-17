@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -210,6 +211,28 @@ def main():
     print("== 采集契约、拟合和评测端到端（合成工具自检） ==")
     with TemporaryDirectory(prefix="part_dataset_test_") as tmp:
         base = Path(tmp)
+        stable = base / "atomic.json"
+        write_json(stable, {"version": 1})
+        replace_real = os.replace
+        calls = []
+
+        def transient_replace(source, target):
+            calls.append(1)
+            if len(calls) <= 2:
+                check(read_json(stable) == {"version": 1}, "替换被拒期间原有效清单保持完整")
+                raise PermissionError("模拟Windows短暂占用")
+            return replace_real(source, target)
+
+        with patch("part_dataset.os.replace", side_effect=transient_replace), patch("part_dataset.time.sleep"):
+            write_json(stable, {"version": 2})
+        check(len(calls) == 3 and read_json(stable) == {"version": 2},
+              "临时拒绝替换可自动重试，不导致录像立即中断")
+        with patch("part_dataset.os.replace", side_effect=PermissionError("持续拒绝")) as replacer, \
+                patch("part_dataset.time.sleep"):
+            raises(lambda: write_json(stable, {"version": 3}), "持续权限问题有限重试后明确报错")
+        check(replacer.call_count == 8 and read_json(stable) == {"version": 2}
+              and read_json(stable.with_suffix(".json.tmp")) == {"version": 3},
+              "永久失败保留原有效清单及完整临时清单供恢复")
         print("== 回归真机曝光未应用：必须先开流，再锁参数，再预热/读图 ==")
 
         class FakeSensor:
@@ -260,6 +283,28 @@ def main():
                 self.closed = True
 
         source = FakeSource()
+        failed_clip_source = FakeSource()
+        clip_writes = []
+
+        def fail_frame_manifest(path, data):
+            clip_writes.append(1)
+            if len(clip_writes) == 3:
+                raise PermissionError("模拟第2帧已写盘但清单替换失败")
+            return write_json(path, data)
+
+        with patch("capture_part_dataset.make_source", return_value=failed_clip_source), \
+                patch("capture_part_dataset.write_json", side_effect=fail_frame_manifest), \
+                patch("capture_part_dataset.cv2.imshow"), \
+                patch("capture_part_dataset.cv2.waitKey", return_value=255), \
+                patch("capture_part_dataset.cv2.getWindowProperty", return_value=1), \
+                patch("capture_part_dataset.cv2.destroyAllWindows"):
+            raises(lambda: capture_main(["--dataset", str(base / "capture"), "--session", "clip_failed",
+                                         "--split", "dev", "--clip", "pick_place", "--seconds", "30"]),
+                   "异常录像不能伪装为正常完成")
+        failed = read_json(base / "capture" / "clip_failed" / "session.json")
+        check(len(failed["samples"]) == 2 and not failed["recording_summary"]["stopped_normally"]
+              and failed["recording_summary"]["controls_end_verified"] and failed_clip_source.closed,
+              "异常收尾补齐已写原图记录、回读控件并释放设备")
         with patch("capture_part_dataset.make_source", return_value=source):
             capture_main(["--dataset", str(base / "capture"), "--session", "check_fixed",
                           "--split", "check", "--check", "--headless"])

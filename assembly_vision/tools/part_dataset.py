@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -31,8 +32,17 @@ def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
-    os.replace(tmp, path)
+    payload = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False)
+    # Windows读者/索引服务可能短暂阻止替换；保留旧清单，有限重试后仍明确报错。
+    for attempt in range(8):
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(min(.01 * 2 ** attempt, .2))
 
 
 def read_json(path):

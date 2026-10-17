@@ -260,7 +260,29 @@ def main(argv=None):
             final_controls = check_locked(src, meta["controls_after_clip"], cam, exposure_mode)
             if final_controls != meta["control_validation"]:
                 raise RuntimeError("录像结束时实际控件发生变化，本会话不能作为固定参数素材")
+            meta["recording_summary"] = dict(
+                frames=len(meta["samples"]), requested_seconds=args.seconds,
+                last_saved_elapsed_s=meta["samples"][-1]["elapsed_s"] if meta["samples"] else 0,
+                controls_end_verified=True, stopped_normally=True)
             write_json(manifest, meta)
+    except (OSError, ValueError, RuntimeError, KeyboardInterrupt) as exc:
+        if meta and mode == "clip":
+            # 原图先落盘、记录已在内存中；异常退出前尽量补齐清单和首尾控件证据。
+            meta["recording_summary"] = dict(
+                frames=len(meta["samples"]), requested_seconds=args.seconds,
+                stopped_normally=False, controls_end_verified=False,
+                error="%s: %s" % (type(exc).__name__, exc))
+            try:
+                meta["controls_after_clip"] = actual_controls(src)
+                checked = check_locked(src, meta["controls_after_clip"], cam, exposure_mode)
+                meta["recording_summary"]["controls_end_verified"] = checked == meta["control_validation"]
+            except Exception as end_error:
+                meta["recording_summary"]["controls_error"] = str(end_error)
+            try:
+                write_json(manifest, meta)
+            except OSError as save_error:
+                print("异常收尾仍无法写入清单，保留临时清单供恢复：%s" % save_error)
+        raise
     finally:
         src.close()
         if not args.headless:
