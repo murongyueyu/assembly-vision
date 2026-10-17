@@ -240,12 +240,20 @@ class PartTracker:
         tracks = tr.update(frame, seg_result, detect=need_detect)
     其中 `detect=True` 的那一帧会做"分割结果 -> 框 -> 匹配/新建/删除"，
     其余帧只跑追踪器 update（快）。
+
+    backend="detection"时每帧必须提供检测结果，不创建相关滤波器；缺观测仍按
+    遮挡物和真实时钟判丢。identity_relink仅供每类单件的工位显式开启，需配置
+    分数及面积比例闸门；同身份有歧义时保留历史，不新建重复身份轨迹。
     """
 
-    def __init__(self, cfg: Optional[dict] = None) -> None:
+    def __init__(self, cfg: Optional[dict] = None, *, clock=None) -> None:
         c = dict(cfg or {})
+        # 离线回放可注入录制时钟；真机默认仍使用perf_counter。
+        self._clock = clock
         self.backend = str(c.get("backend", "kcf"))
         self.detect_every = int(c.get("detect_every_n", 5))
+        if self.backend == "detection" and self.detect_every != 1:
+            raise ValueError("逐帧检测关联模式必须配置detect_every_n=1")
         # ── 丢失判据（用户明确定义，不要再用"看不见多久"来判）──
         #   ★★ 用户原话：
         #     「不是持续很久才被怀疑，而是最后一次还检测到有零件的位置的时候，
@@ -299,6 +307,16 @@ class PartTracker:
         #   配置与代码脱节，调配置没用。
         #   现在读进来并**下发到每条轨迹**（见 `_detect` 建新轨迹处）。
         self.id_margin = float(c.get("id_margin", 0.12))
+        # ★ 单件工位的可选远距离重关联：仅对唯一身份且面积接近的完整候选生效。
+        # 默认关闭，先在独立开发回放验证，不能把同类多件场景套进来。
+        self.identity_relink = bool(c.get("identity_relink", False))
+        if self.identity_relink:
+            self.identity_relink_min_score = float(c["identity_relink_min_score"])
+            self.identity_relink_area_ratio = tuple(c["identity_relink_area_ratio"])
+            if (len(self.identity_relink_area_ratio) != 2
+                    or not 0 < self.identity_relink_area_ratio[0] <= self.identity_relink_area_ratio[1]
+                    or not 0 <= self.identity_relink_min_score <= 1):
+                raise ValueError("身份重关联的分数/面积比例配置无效")
         # ★ KCF 的耗时是**每目标固定成本**（实测 5.5ms/目标，4 目标 35ms/帧），
         #   与整帧尺寸无关。曾试过「裁剪出小图再跑 KCF」，实测**只快 14% 但
         #   静止漂移从 2.76px 崩到 131px**（裁剪窗滑动会逼着反复 init，
@@ -314,7 +332,7 @@ class PartTracker:
         self.last_detect_ms = 0.0
         self.last_track_ms = 0.0
         self.stats: Dict[str, float] = {"detects": 0, "track_only": 0}
-        self.api_name = ""
+        self.api_name = "detection association" if self.backend == "detection" else ""
 
     # ── 对外 ────────────────────────────────────────────────
     def update(self, frame: np.ndarray, blobs: Optional[Sequence[Blob]] = None,
@@ -334,11 +352,21 @@ class PartTracker:
         seen_ids  : 本帧**全图**识别到的零件 id 集合 —— 判丢用它（用户要求全图搜索）。
         occluder  : 遮挡物掩膜（手套）。有它才能判断"遮挡物是否已移开"。
         """
+        if self.backend == "detection" and not detect:
+            raise ValueError("逐帧检测关联模式不能跳过检测帧")
         t0 = time.perf_counter()
         self._frame_ref_n += 1
         if detect:
+            if self.backend == "detection":
+                # 未匹配的历史轨迹先记缺观测；真正匹配上的由absorb统一重置。
+                for track in self.tracks:
+                    track.lost_frames += 1
+                    track.miss_streak += 1
+                    track.state = "occluded"
+                    track.visible_ratio = 0.0
             self._detect(frame, blobs or [], classify, allow_new=allow_new)
-            self._run_trackers(frame)          # 检测帧也 update 一次，保持一致
+            if self.backend != "detection":
+                self._run_trackers(frame)      # 相关滤波模式保持原路径
             self.judge_lost(seen_ids, occluder, unidentified=unidentified)
             self._prune()
             self.stats["detects"] += 1
@@ -359,11 +387,11 @@ class PartTracker:
     def _detect(self, frame, blobs, classify, allow_new=None) -> None:
         """把这一帧的分割结果与已有轨迹关联：匹配上的更新，没匹配上的新建。
 
-        ★★ 用**全局最优匹配**而不是"按列表顺序贪心"：
+        ★★ 对全图候选按配对分数做一对一认领，而不是"按轨迹列表顺序认领"：
            贪心时先遍历到的轨迹会抢走后面轨迹更该拿的块，
            结果是"一条轨迹吃掉别人的块 + 那个块不再新建" -> 轨迹错配、数量虚增。
            做法：把所有 (轨迹, 块) 的合法配对按打分排序，从高到低依次认领，
-           **每条轨迹与每个块都只能用一次**（互相最优）。
+           **每条轨迹与每个块都只能用一次**；这不是求总权重最大值的算法。
         ★★ 匹配位置用 `last_centroid`（**最后一次真正检测到**的位置），
            不用卡尔曼预测值 —— 见 `TrackState.last_centroid` 的说明。
         """
@@ -375,13 +403,31 @@ class PartTracker:
             x, y, w, h = cv2.boundingRect(b.contour)
             cands.append((b, (int(x), int(y), int(w), int(h)), a))
 
-        # ① 收集所有合法配对并打分
+        # 单件身份可靠时先认回原轨迹，防止跨越位置闸门后建第二条同身份轨迹。
+        # 身份/面积有歧义时不做远距离猜测，继续走原空间匹配。
+        t_used, b_used = set(), set()
+        if self.identity_relink and classify is not None:
+            labels = [classify(dict(b.features or {})) for b, _, _ in cands]
+            selected = identity_relink_pairs(
+                [(t.part_id if t.ever_seen else None, t.area_ref) for t in self.tracks],
+                [(pid, score, area) for (pid, score), (_, _, area) in zip(labels, cands)],
+                self.identity_relink_min_score, self.identity_relink_area_ratio)
+            for ti, bi in selected:
+                b, bb, area = cands[bi]
+                self._adopt(frame, self.tracks[ti], b, bb, area,
+                            lambda _features, label=labels[bi]: label)
+                t_used.add(ti)
+                b_used.add(bi)
+
+        # ① 收集剩余的合法空间配对并打分
         pairs = []
         for ti, t in enumerate(self.tracks):
-            if not t.ever_seen:
+            if not t.ever_seen or ti in t_used:
                 continue                       # 从没看到过的轨迹不参与匹配
             rx, ry = t.last_centroid
             for bi, (b, _bb, _a) in enumerate(cands):
+                if bi in b_used:
+                    continue
                 iou = _iou(t.last_bbox, _bb)
                 cx, cy = b.centroid
                 d = float(np.hypot(cx - rx, cy - ry))
@@ -393,7 +439,6 @@ class PartTracker:
         pairs.sort(key=lambda p: -p[0])
 
         # ② 从高到低认领，轨迹与块都只能用一次
-        t_used, b_used = set(), set()
         for _score, ti, bi in pairs:
             if ti in t_used or bi in b_used:
                 continue
@@ -411,6 +456,13 @@ class PartTracker:
         for i, (b, bb, a) in enumerate(cands):
             if i in b_used:
                 continue
+            if self.identity_relink and classify is not None:
+                pid, score = labels[i]
+                # 单件假设下同身份不建第二条；歧义时保留历史，不能按面积随便挑。
+                if pid and (score < self.identity_relink_min_score
+                            or sum(label[0] == pid for label in labels) != 1
+                            or any(t.part_id == pid for t in self.tracks)):
+                    continue
             if allow_new is not None and not allow_new(b):
                 continue
             t = TrackState(bbox=bb, area_px=a, area_ref=a, contour=b.contour,
@@ -462,7 +514,7 @@ class PartTracker:
           后果：同一个零件在"检测帧"与"非检测帧"上走**两套不同的身份逻辑**，
           表现就是身份偶尔跳变、判丢偶发误报 —— 而这两条路各自单独看都"像是对的"。
         ⇒ 现在两边**共用本方法**，差异只剩"怎么把块匹配到轨迹"
-          （内部是全局最优匹配，demo 是当帧最近的块）。
+          （内部是一对一配对认领，demo 是当帧最近的块）。
 
         参数
         ----
@@ -515,6 +567,8 @@ class PartTracker:
         self.absorb(frame, t, b, bb, a, classify=classify, reattach=True)
 
     def _attach(self, frame, t: TrackState) -> None:
+        if self.backend == "detection":
+            return                            # 由当帧轮廓定位，不创建相关滤波器
         tr, api = make_tracker(self.backend)
         if tr is None:
             return
@@ -604,7 +658,7 @@ class PartTracker:
         ★ 计时用**真实时间**而不是帧数：实测用户感觉“等了一分钟”，
           而帧数计数器只走了 64 —— 帧数在掉帧/暂停时与真实时间脱节。
         """
-        now = time.perf_counter()
+        now = self._clock() if self._clock is not None else time.perf_counter()
         for t in self.tracks:
             if not t.ever_seen:
                 # 新建后**一次都没真看到**过：不算“丢”，过一会儿清掉（多是误检）
@@ -709,7 +763,7 @@ class PartTracker:
             它会**新建一条** -> 同一零件两条轨迹 -> 界面上出现「零件 8」。
           实测踩过：原来超过宽限窗口就删，于是「拿走 -> 放回」就变成两条。
         """
-        now = time.perf_counter()
+        now = self._clock() if self._clock is not None else time.perf_counter()
         keep = []
         for t in self.tracks:
             # ★ 幻影：从未跟踪成功过的轨迹，活过短限就删（不让它白吃 KCF）
@@ -840,6 +894,34 @@ class PartTracker:
                              (int(cx + 18 * np.cos(a)), int(cy + 18 * np.sin(a))), col, 1)
             cv2.putText(canvas, t.label(), (cx + 8, cy - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
+
+
+def identity_relink_pairs(tracks, candidates, min_score, area_ratio):
+    """单件身份的保守重关联；输入仅含身份/分数/面积，不依赖图像或位置。
+
+    tracks为(part_id, area_ref)，candidates为(part_id, score, area)。
+    同身份多轨迹或多候选均不猜；部分可见或尺寸突变也留给原空间匹配。
+    """
+    track_ids, candidate_ids = {}, {}
+    for index, (pid, _) in enumerate(tracks):
+        if pid:
+            track_ids.setdefault(pid, []).append(index)
+    for index, (pid, _, _) in enumerate(candidates):
+        if pid:
+            candidate_ids.setdefault(pid, []).append(index)
+    out = []
+    for pid, indices in track_ids.items():
+        found = candidate_ids.get(pid, [])
+        if len(indices) != 1 or len(found) != 1:
+            continue
+        ti, bi = indices[0], found[0]
+        _, reference = tracks[ti]
+        _, score, area = candidates[bi]
+        if not all(np.isfinite(x) for x in (reference, score, area)) or reference <= 0:
+            continue
+        if score >= min_score and area_ratio[0] <= area / reference <= area_ratio[1]:
+            out.append((ti, bi))
+    return out
 
 
 def _iou(a: Sequence[int], b: Sequence[int]) -> float:

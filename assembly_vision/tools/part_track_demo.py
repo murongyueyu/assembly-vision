@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """零件检测实时演示 —— 看得见画面、看得见**形状轮廓**、带追踪与去抖。
 
+阶段1独立模型使用--dataset-model，可选--session按原清单时间戳回放。
+它不读取旧标定，支持逐帧检测关联；以下KCF耗时说明是兼容路径的历史记录，
+不能作为新模型或树莓派性能结论。
+
 用户要求（逐条对应实现）：
   ① 「要能让我看到实时画面」          -> cv2 窗口，本工具
   ② 「要能看到标注轮廓，是形状轮廓而不是一个方框」
@@ -33,7 +37,8 @@
 
 用法：
     python tools/part_track_demo.py                     # 真机实时
-    python tools/part_track_demo.py --backend mosse     # 树莓派推荐（2ms）
+    python tools/part_track_demo.py --dataset-model MODEL.json  # 阶段1独立模型
+    python tools/part_track_demo.py --dataset-model MODEL.json --session SESSION.json --bench
     python tools/part_track_demo.py --source images --path data/synthetic_seq
     python tools/part_track_demo.py --bench --max-frames 200   # 只测帧率不显示
 
@@ -46,6 +51,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -89,7 +95,150 @@ def _read_frame(src, images, idx):
     return getattr(f, "left", None)
 
 
-def main() -> int:
+def run_dataset_model(args):
+    """阶段1独立模型预览；不读取旧单应/槽位，支持真实清单时间戳回放。"""
+    from part_dataset import (read_json, write_json, file_hash, sample_scale,
+                              segment_variant, extract_features, predict, classifier_from_templates)
+    from assemvision.config import Config
+    from assemvision.sources.factory import make_source
+    from capture_part_dataset import actual_controls, check_locked
+
+    artifact = read_json(args.dataset_model)
+    wp, policy = load_config(str(args.workpiece)), Config(artifact["policy"])
+    if file_hash(args.workpiece) != artifact["workpiece_sha256"]:
+        raise ValueError("正式分割配置与模型来源不符，请使用对应配置或重新建实验")
+    cfg = dict(wp.get("tracking", {}) or {})
+    cfg.update(policy.get("experiment.tracking_overrides", {}))
+    if cfg.get("backend") != "detection":
+        raise ValueError("该预览入口需要backend=detection的阶段1实验模型")
+    if args.report and Path(args.report).exists():
+        raise FileExistsError("预览报告已存在，请换新文件名保留历史")
+    replay_clock = [1000.0]
+    tracker = PartTracker(cfg, clock=(lambda: replay_clock[0]) if args.session else None)
+    classifier = classifier_from_templates(artifact["templates"], policy)
+    source, meta, records = None, None, None
+    display = not (args.bench or args.no_preview)
+    timings, counts, duplicates, frames, failures = [], [], 0, 0, 0
+    controls_before = controls_after = None
+    try:
+        if args.session:
+            session_path = Path(args.session)
+            meta = read_json(session_path)
+            if meta["fingerprints"]["camera"] != artifact["camera_sha256"]:
+                raise ValueError("回放会话与模型相机配置不符")
+            if meta["fingerprints"]["workpiece"] != artifact["workpiece_sha256"]:
+                raise ValueError("回放会话与模型分割配置不符")
+            records = iter(meta["samples"])
+            source_name = str(session_path)
+        else:
+            cam = load_config(str(args.camera))
+            if (args.source or cam.get("source")) not in ("d435", "realsense"):
+                raise ValueError("阶段1真机预览仅支持D435；离线请传--session清单")
+            if file_hash(args.camera) != artifact["camera_sha256"]:
+                raise ValueError("当前相机配置与模型采集配置不一致")
+            source = make_source(cam, args.source, args.path)
+            source.open()
+            source.apply_locked_controls()
+            warmed = 0
+            while warmed < int(policy.get("capture.warmup_frames")):
+                frame = source.read(want_full=True)
+                if frame is None:
+                    failures += 1
+                    if failures >= int(policy.get("capture.failed_reads_limit")):
+                        raise RuntimeError("预热连续取帧失败")
+                    continue
+                failures = 0
+                warmed += 1
+            controls_before = actual_controls(source)
+            validation = check_locked(source, controls_before, cam, policy.get("capture.exposure_readback"))
+            meta = dict(intrinsics=source.color_intrinsics(),
+                        distance_mm=policy.get("capture.distance_mm"))
+            source_name = source.name
+        mmpp = sample_scale({"meta": meta})
+        if mmpp is None:
+            raise ValueError("缺SDK内参或工作距离，不能使用近似尺寸模板")
+        print("阶段1开发模型预览：逐帧检测关联；q/ESC退出；此处不作独立精度验收。")
+        while not args.max_frames or frames < args.max_frames:
+            if records is not None:
+                record = next(records, None)
+                if record is None:
+                    break
+                path = session_path.parent / record["image"]
+                if file_hash(path) != record["sha256"]:
+                    raise ValueError("回放原图hash不符：%s" % path)
+                image = imread_safe(str(path))
+                if "elapsed_s" not in record:
+                    raise ValueError("序列回放缺录制时间戳，不能用回放速度代替")
+                replay_clock[0] = 1000.0 + record["elapsed_s"]
+            else:
+                frame = source.read(want_full=True)
+                if frame is None:
+                    failures += 1
+                    if failures >= int(policy.get("capture.failed_reads_limit")):
+                        raise RuntimeError("预览连续取帧失败")
+                    continue
+                failures = 0
+                image = frame.left_full if frame.left_full is not None else frame.left
+            if image is None or (meta.get("image_shape") and list(image.shape) != meta["image_shape"]):
+                raise ValueError("原图无法解码或尺寸与采集清单不符")
+            start = time.perf_counter()
+            mask, blobs, result = segment_variant(image, wp, policy, artifact["variant"])
+            labels = []
+            for blob in blobs:
+                blob.features = extract_features(blob, image, mask, mmpp)
+                labels.append(predict(classifier, blob.features, policy)[0])
+            identified = {pid for pid in labels if pid}
+            unidentified = any(not pid and tracker.min_area_px <= b.area_px <= tracker.max_area_px
+                               for pid, b in zip(labels, blobs))
+            tracks = tracker.update(image, blobs, detect=True,
+                classify=lambda features: predict(classifier, features, policy)[:2],
+                seen_ids=identified, unidentified=unidentified, occluder=result.glove_mask,
+                allow_new=lambda b: predict(classifier, b.features, policy)[0] is not None)
+            timings.append((time.perf_counter() - start) * 1000)
+            counts.append(len(tracks))
+            duplicates += int(any(labels.count(pid) > 1 for pid in identified))
+            frames += 1
+            if display:
+                canvas = image.copy()
+                for track in tracks:
+                    color = (0, 255, 0) if track.state == "detected" else (0, 180, 255)
+                    cv2.drawContours(canvas, [track.contour], -1, color, 1)
+                    x, y = track.last_bbox[:2]
+                    cv2.putText(canvas, "%s %s" % (track.part_id or "?", track.state),
+                                (x, max(15, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, .4, color, 1)
+                cv2.putText(canvas, "DEV model | tracks=%d | %.1fms | Q exit" % (len(tracks), timings[-1]),
+                            (5, 20), cv2.FONT_HERSHEY_SIMPLEX, .45, (255,255,255), 1)
+                cv2.imshow(WIN, canvas)
+                if cv2.waitKey(1) & 0xff in (ord("q"), 27):
+                    break
+                if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+        if not frames:
+            raise ValueError("未处理任何帧")
+        if source is not None:
+            controls_after = actual_controls(source)
+            if check_locked(source, controls_after, cam, policy.get("capture.exposure_readback")) != validation:
+                raise RuntimeError("预览结束时相机实际控件发生变化")
+        report = dict(frames=frames, source=source_name, template_sha256=file_hash(args.dataset_model),
+            tracker_config=cfg, raw_duplicate_identity_frames=duplicates,
+            track_count_range=[min(counts), max(counts)],
+            algorithm_ms=dict(median=float(np.median(timings)), p95=float(np.percentile(timings,95))),
+            controls_before=controls_before, controls_after=controls_after,
+            final_tracks=[dict(part=t.part_id, state=t.state, bbox=list(t.last_bbox)) for t in tracker.tracks],
+            note="开发模型预览，不是独立精度验收；算法计时不含读图/取帧、显示及落盘。")
+        if args.report:
+            write_json(args.report, report)
+        print("阶段1预览：%d帧；轨迹数%d～%d；算法中位%.2fms / P95 %.2fms。" % (
+            frames, min(counts), max(counts), report["algorithm_ms"]["median"], report["algorithm_ms"]["p95"]))
+        return report
+    finally:
+        if source is not None:
+            source.close()
+        if display:
+            cv2.destroyAllWindows()
+
+
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser("part_track_demo")
     ap.add_argument("--workpiece", default=os.path.join(ROOT, "config", "workpiece.yaml"))
     ap.add_argument("--calibration", default=os.path.join(ROOT, "config", "calibration.yaml"))
@@ -127,7 +276,17 @@ def main() -> int:
     ap.add_argument("--bench", action="store_true", help="只测帧率，不开窗口")
     ap.add_argument("--no-preview", action="store_true")
     ap.add_argument("--save", default="", help="把带标注的画面录成视频")
-    args = ap.parse_args()
+    ap.add_argument("--dataset-model", default="", help="阶段1独立模型，使用其分割及追踪参数，不读旧标定")
+    ap.add_argument("--session", default="", help="阶段1原图序列的session.json；不传则使用D435实时画面")
+    ap.add_argument("--report", default="", help="阶段1预览统计JSON；不覆盖已有文件")
+    args = ap.parse_args(argv)
+    if args.dataset_model:
+        if args.save:
+            ap.error("阶段1模型预览不使用--save；保留原图请运行阶段1采集工具")
+        run_dataset_model(args)
+        return 0
+    if args.session or args.report:
+        ap.error("--session/--report需要同时指定--dataset-model")
 
     wp = load_config(args.workpiece)
     cal = load_config(args.calibration)

@@ -19,6 +19,8 @@ import dataclasses
 import os
 import sys
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -29,8 +31,9 @@ from _common import check                                    # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2                                                    # noqa: E402
+import assemvision.core.part_tracker as tracker_module
 from assemvision.core.part_tracker import (KalmanXY, PartTracker,   # noqa: E402
-                                           _iou, make_tracker)
+                                           _iou, make_tracker, identity_relink_pairs)
 from assemvision.types import Blob                            # noqa: E402
 
 
@@ -59,6 +62,74 @@ def mk_blob(cx: float, cy: float, area_px: float, aspect: float = 1.0) -> Blob:
 
 def main() -> int:
     frame = np.full((480, 640, 3), 90, np.uint8)
+    print("== 单件身份的远距离关联与逐帧检测模式 ==")
+    refs = [("P1_base", 4000.0)]
+    check(identity_relink_pairs(refs, [("P1_base", .9, 4000)], .85, (.8, 1.25)) == [(0, 0)],
+          "唯一高分同身份、完整面积候选可重关联")
+    for candidates in [[("P1_base", .6, 4000)], [("P1_base", .9, 1000)],
+                       [("P1_base", .9, 4000), ("P1_base", .9, 4000)],
+                       [("P1_base", .9, float("nan"))]]:
+        check(not identity_relink_pairs(refs, candidates, .85, (.8, 1.25)),
+              "低分、部分可见、多同类或非有限面积不能远距离猜测")
+    check(not identity_relink_pairs(refs * 2, [("P1_base", .9, 4000)], .85, (.8, 1.25)),
+          "多条同身份历史轨迹有歧义，不强行挑一条")
+    cfg = dict(backend="detection", detect_every_n=1, min_area_px=100,
+               identity_relink=True, identity_relink_min_score=.85,
+               identity_relink_area_ratio=[.8, 1.25])
+    detector = PartTracker(cfg)
+    classifier = lambda features: ("P1_base", .95)
+    detector.update(frame, [mk_blob(100, 120, 4000)], classify=classifier,
+                    seen_ids={"P1_base"})
+    original_track = detector.tracks[0]
+    detector.update(frame, [mk_blob(450, 300, 4000)], classify=classifier,
+                    seen_ids={"P1_base"})
+    check(len(detector.tracks) == 1 and detector.tracks[0] is original_track
+          and original_track.last_centroid == (450, 300) and original_track.lost_frames == 0,
+          "跨越空间闸门后恢复同一对象，未新建重复轨迹且缺观测归零")
+    covered = np.full(frame.shape[:2], 255, np.uint8)
+    detector.update(frame, [], classify=classifier, seen_ids=set(), occluder=covered)
+    check(original_track.state == "occluded" and original_track.covered,
+          "逐帧检测缺观测但手仍覆盖时保持遮挡状态")
+    detector.update(frame, [mk_blob(100, 120, 4000)], classify=classifier,
+                    seen_ids={"P1_base"}, occluder=np.zeros(frame.shape[:2], np.uint8))
+    check(len(detector.tracks) == 1 and detector.tracks[0] is original_track
+          and original_track.state == "detected" and not original_track.covered,
+          "遮挡后跨位置放回仍为同一轨迹并恢复检测状态")
+    detector.update(frame, [mk_blob(100, 120, 4000), mk_blob(450, 300, 4000)],
+                    classify=classifier, seen_ids={"P1_base"})
+    check(len(detector.tracks) == 1 and detector.tracks[0] is original_track,
+          "单件策略遇到两个同身份候选时保留原轨迹，不新建第二条")
+    old_position = original_track.last_centroid
+    detector.update(frame, [mk_blob(450, 300, 7000)], classify=classifier,
+                    seen_ids={"P1_base"})
+    check(len(detector.tracks) == 1 and original_track.last_centroid == old_position
+          and original_track.state == "occluded" and original_track.visible_ratio == 0,
+          "远处同身份但面积不符时不冒认位置，也不把历史轨迹标成当帧已检测")
+    for call in [lambda: PartTracker(dict(cfg, detect_every_n=8)),
+                 lambda: detector.update(frame, detect=False)]:
+        try:
+            call()
+        except ValueError:
+            check(True, "逐帧检测模式拒绝跳帧配置或调用")
+        else:
+            raise AssertionError("逐帧检测模式跳帧应报错")
+    clock_value = [100.0]
+    with patch.object(tracker_module, "time", SimpleNamespace(perf_counter=lambda: 500.0)):
+        missing = PartTracker(dict(cfg, lost_grace_seconds=.5), clock=lambda: clock_value[0])
+        missing.update(frame, [mk_blob(100, 120, 4000)], classify=classifier,
+                       seen_ids={"P1_base"})
+        missing_track = missing.tracks[0]
+        clock_value[0] = 100.1
+        missing.update(frame, [], classify=classifier, seen_ids=set())
+        check(missing_track.state == "occluded", "手移开后缺观测先进入搜索宽限期")
+        clock_value[0] = 100.8
+        missing.update(frame, [], classify=classifier, seen_ids=set())
+        check(missing_track.state == "lost", "逐帧检测模式按时间判丢，不因缺相关滤波器永远假定可见")
+        missing.update(frame, [mk_blob(450, 300, 4000)], classify=classifier,
+                       seen_ids={"P1_base"})
+        check(len(missing.tracks) == 1 and missing.tracks[0] is missing_track
+              and missing_track.state == "detected" and missing_track.clear_seconds == 0,
+              "被判丢后完整零件出现可恢复同一轨迹并清掉搜索计时")
 
     print("== 追踪器可用性（两套 API 都要能走，树莓派上常只有 4.x 的 create()）==")
     for kind in ("kcf", "mosse", "medianflow"):

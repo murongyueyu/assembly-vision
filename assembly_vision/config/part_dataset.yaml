@@ -15,6 +15,11 @@ capture:
 annotation:
   clip_interval_s: 1.0          # 连续视频的标注按时间戳抽样，避免把相邻帧当独立样本
 experiment:
+  # 可选追踪实验覆盖仅由离线诊断读取，正式tracking配置保持原样。
+  tracking_overrides: {}
+  # ★ 可选像素跨度闸门，在最终候选算特征前生效；换分辨率须重新实测。
+  # 本轮640x480开发件跨度约100px，顶部背景可达248~317px；正式默认关闭。
+  max_candidate_extent_px: null
   # 正式配置不变；离线实验另存policy时可覆盖segment.*，默认不覆盖。
   segmentation_overrides: {}
   variants: [brass, seeded_metal, seeded_metal_close, seeded_color]

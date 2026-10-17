@@ -247,12 +247,14 @@ def segment_variant(image, wp, policy, variant):
                 raise ValueError("实验覆盖只允许segment分割参数：%s" % key)
             wp.set(key, value)
     seg = Segmenter(wp)
-    result = seg.segment(image, mm_per_px=None, work_roi=None)
+    # 本工具稍后只对最终候选算特征；原始黄铜块不必重复计算一遍。
+    result = seg.segment(image, mm_per_px=None, work_roi=None, want_features=False)
     mask = result.brass_mask.copy()
     if variant != "brass":
         # ★ metal 依赖 brass 种子；这是候选补全实验，不是独立检测能力。
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        metal = seg._metal_mask(hsv)
+        # segment已生成相同参数的金属掩膜，不再重复转色域/分割。
+        metal = result.metal_mask
         radius = int(policy.get("experiment.seed_margin_px"))
         seed = cv2.dilate(mask, np.ones((2 * radius + 1, 2 * radius + 1), np.uint8))
         mask = cv2.bitwise_or(mask, cv2.bitwise_and(metal, seed))
@@ -274,6 +276,12 @@ def segment_variant(image, wp, policy, variant):
             k = int(policy.get("experiment.close_kernel_px"))
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
     blobs = seg._blobs(mask, min_area_px=float(seg.brass.get("min_area_px", 500)))
+    extent = policy.get("experiment.max_candidate_extent_px")
+    if extent is not None:
+        if not np.isfinite(extent) or extent <= 0:
+            raise ValueError("候选最大像素跨度必须为正的有限值")
+        # 在昂贵形状特征之前挡掉明显超长背景；掩膜保留，诊断不会隐藏原始分割。
+        blobs = [b for b in blobs if max(b.bbox[2:]) <= extent]
     for blob in blobs:
         blob.features = contour_features(blob.contour, mask)
     return mask, blobs, result
@@ -337,8 +345,13 @@ def classifier_from_templates(data, policy, allowed=None):
 
 
 def predict(clf, features, policy):
-    part, score, _ = clf.classify(features)
     ranked = clf.rank(features)
+    # rank与classify使用同一组模板得分；复用排序，避免每个候选重复判分。
+    if not ranked:
+        return None, -1.0, 1.0
+    part, score, _ = ranked[0]
+    if score < clf.min_score:
+        part = None
     margin = float(ranked[0][1] - ranked[1][1]) if len(ranked) > 1 else 1.0
     if margin < float(policy.get("experiment.min_margin")):
         part = None

@@ -19,6 +19,7 @@ from part_dataset import (ROOT, POLICY, PARTS, bbox_iou, capture_tasks, file_has
 from part_dataset import remaining_tasks, selected_tasks, classifier_from_templates
 from part_dataset import required_features_match, predict
 from measure_part_dataset import fit, evaluate, mask_iou_score
+from part_track_demo import run_dataset_model
 from capture_part_dataset import main as capture_main, check_locked, windows_mf_exposure
 from annotate_part_dataset import mask_view_geometry, mask_view_point, MASK_TOOLBAR
 from annotate_part_dataset import main as annotate_main
@@ -86,6 +87,14 @@ def main():
     _, after, _ = segment_variant(image, original_wp, Config(experiment), "brass")
     check(not before and len(after) == 1 and original_wp.data == original_data,
           "独立面积实验可保留小件但不修改正式配置对象")
+    experiment["experiment"]["max_candidate_extent_px"] = 15
+    visible_mask, rejected, _ = segment_variant(image, original_wp, Config(experiment), "brass")
+    check(not rejected and np.any(visible_mask),
+          "像素跨度闸门拒绝过大候选但保留原始分割掩膜供诊断")
+    experiment["experiment"]["max_candidate_extent_px"] = 0
+    raises(lambda: segment_variant(image, original_wp, Config(experiment), "brass"),
+           "候选跨度配置不得为零或负值")
+    experiment["experiment"]["max_candidate_extent_px"] = None
     experiment["experiment"]["segmentation_overrides"] = {"capture.exposure": 10}
     raises(lambda: segment_variant(image, original_wp, Config(experiment), "brass"),
            "分割实验禁止覆盖相机采集参数")
@@ -124,6 +133,16 @@ def main():
     required_policy.set("experiment.required_features", ["short_side_mm"])
     raises(lambda: classifier_from_templates(example_templates, required_policy),
            "模板缺少必检区间时提前报错，不静默放行")
+    compatibility_policy = Config(copy.deepcopy(load_config(str(POLICY)).data))
+    tie_clf = classifier_from_templates({
+        "P1_base": dict(ranges={"length_mm": [50, 60]}),
+        "P2_column": dict(ranges={"length_mm": [50, 60]})}, compatibility_policy)
+    check(predict(tie_clf, {"length_mm": 55}, compatibility_policy) == (None, 1.0, 0.0),
+          "复用模板得分后并列高分仍按余量拒识，不由模板顺序决定身份")
+    low_clf = classifier_from_templates({"P1_base": dict(ranges={"length_mm": [50, 60]})},
+                                       compatibility_policy)
+    check(predict(low_clf, {"length_mm": 500}, compatibility_policy)[0] is None,
+          "复用排序不能绕过分类最低分门槛")
     silhouette = np.zeros((30, 30), np.uint8)
     cv2.circle(silhouette, (15, 15), 10, 255, -1)
     ring = silhouette.copy()
@@ -436,6 +455,49 @@ def main():
               "holes" in read_json(model)["templates"]["P1_base"]["ranges"],
               "新顶盖模板不使用孔数区分身份，其他类别特征保持配置")
         check(all(r["session"] == "dev_a" for r in read_json(model)["source"]), "模板来源不包含验收会话")
+        demo_artifact = read_json(model)
+        demo_artifact["policy"]["experiment"]["tracking_overrides"] = dict(backend="detection", detect_every_n=1)
+        demo_model = base / "demo_model.json"
+        write_json(demo_model, demo_artifact)
+        replay_meta = read_json(base / "dev_a" / "session.json")
+        for index, record in enumerate(replay_meta["samples"]):
+            record["elapsed_s"] = index * .1  # 合成测试时钟，不是真机帧率证据。
+        replay_path = base / "dev_a" / "demo_session.json"
+        write_json(replay_path, replay_meta)
+        demo_args = SimpleNamespace(dataset_model=demo_model, workpiece=wp,
+            camera=ROOT / "config/camera.yaml", session=replay_path,
+            report=base / "demo_report.json", bench=True, no_preview=False,
+            max_frames=2, source=None, path=None)
+        demo_report = run_dataset_model(demo_args)
+        check(demo_report["frames"] == 2 and demo_report["tracker_config"]["backend"] == "detection"
+              and (base / "demo_report.json").exists(),
+              "独立模型预览实际入口可按清单时钟回放并生成报告，不读取旧标定")
+        raises(lambda: run_dataset_model(demo_args), "模型预览报告禁止覆盖")
+        demo_args.report = ""
+        replay_meta["samples"][0]["sha256"] = "broken"
+        write_json(replay_path, replay_meta)
+        raises(lambda: run_dataset_model(demo_args), "预览也拒绝原图hash失配")
+        demo_artifact["camera_sha256"] = file_hash(demo_args.camera)
+        write_json(demo_model, demo_artifact)
+        demo_args.session, demo_args.max_frames = "", 1
+        live_source = FakeSource()
+        with patch("assemvision.sources.factory.make_source", return_value=live_source):
+            live_report = run_dataset_model(demo_args)
+        check(live_report["frames"] == 1 and live_source.applied and live_source.closed
+              and live_report["controls_before"] == live_report["controls_after"],
+              "模型真机入口契约：锁参数、预热、首尾校验并关闭源；模拟SDK不代表真机已验收")
+        class DriftingSource(FakeSource):
+            reads = 0
+            def read(self, want_full=False):
+                frame = super().read(want_full)
+                self.reads += 1
+                if self.reads > int(demo_artifact["policy"]["capture"]["warmup_frames"]):
+                    self.sensor.values["option.enable_auto_exposure"] = 1.0
+                return frame
+        drifting_source = DriftingSource()
+        with patch("assemvision.sources.factory.make_source", return_value=drifting_source):
+            raises(lambda: run_dataset_model(demo_args), "预览结束发现相机参数漂移必须报错")
+        check(drifting_source.closed, "预览异常退出也关闭相机源")
         args = SimpleNamespace(dataset=base, policy=cfg_path, workpiece=wp, templates=model,
                                split="test", baseline=False, scope="full", clips=False, output=base / "report")
         evaluate(args)
