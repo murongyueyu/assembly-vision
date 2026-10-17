@@ -127,6 +127,12 @@ def run_dataset_model(args):
         raise ValueError("该预览入口需要backend=detection的阶段1实验模型")
     if args.report and Path(args.report).exists():
         raise FileExistsError("预览报告已存在，请换新文件名保留历史")
+    diagnostics = bool(getattr(args, "diagnostics", False))
+    slow_ms = float(getattr(args, "diagnostic_slow_ms", 33.0))
+    auto_limit = getattr(args, "diagnostic_limit", 10)
+    if diagnostics and (not args.report or not np.isfinite(slow_ms) or slow_ms <= 0
+                        or not isinstance(auto_limit, int) or auto_limit < 1):
+        raise ValueError("自动诊断需要--report、正数耗时预算及正整数保存上限")
     replay_clock = [1000.0]
     tracker = PartTracker(cfg, clock=(lambda: replay_clock[0]) if args.session else None)
     classifier = classifier_from_templates(artifact["templates"], policy)
@@ -134,6 +140,9 @@ def run_dataset_model(args):
     display = not (args.bench or args.no_preview)
     timings, counts, duplicates, frames, failures = [], [], 0, 0, 0
     phases, snapshots, snapshot_errors = [], [], 0
+    frame_trace, auto_snapshots = [], []
+    auto_attempts = dict(slow=0, duplicate_identity=0)
+    auto_errors = 0
     snapshot_folder = getattr(args, "snapshot_dir", "")
     if not snapshot_folder:
         snapshot_folder = (Path(args.report).with_name(Path(args.report).stem + "_snapshots")
@@ -179,6 +188,9 @@ def run_dataset_model(args):
         if mmpp is None:
             raise ValueError("缺SDK内参或工作距离，不能使用近似尺寸模板")
         print("阶段1开发模型预览：s保存诊断快照，q/ESC退出；此处不作独立精度验收。")
+        if diagnostics:
+            print("自动诊断已开启：慢帧>%.2fms/重复身份，各最多尝试保存%d次；逐帧记录写入报告。" % (
+                slow_ms, auto_limit))
         preview_started = time.perf_counter()
         while not args.max_frames or frames < args.max_frames:
             if records is not None:
@@ -203,6 +215,7 @@ def run_dataset_model(args):
                 image = frame.left_full if frame.left_full is not None else frame.left
             if image is None or (meta.get("image_shape") and list(image.shape) != meta["image_shape"]):
                 raise ValueError("原图无法解码或尺寸与采集清单不符")
+            cpu_start = time.process_time() if diagnostics else None
             start = time.perf_counter()
             mask, blobs, result = segment_variant(image, wp, policy, artifact["variant"])
             after_seg = time.perf_counter()
@@ -222,15 +235,40 @@ def run_dataset_model(args):
                 seen_ids=identified, unidentified=unidentified, occluder=result.glove_mask,
                 allow_new=lambda b: predict(classifier, b.features, policy)[0] is not None)
             after_tracking = time.perf_counter()
+            cpu_ms = (time.process_time() - cpu_start) * 1000 if diagnostics else None
             timings.append((after_tracking - start) * 1000)
             phase = dict(segmentation_ms=(after_seg-start)*1000,
                          features_classify_ms=(after_features-after_seg)*1000,
                          association_ms=(after_tracking-after_features)*1000)
             phases.append(phase)
             counts.append(len(tracks))
-            duplicates += int(any(labels.count(pid) > 1 for pid in identified))
+            duplicate = any(labels.count(pid) > 1 for pid in identified)
+            duplicates += int(duplicate)
             frames += 1
-            if display:
+            elapsed_s = record["elapsed_s"] if records is not None else start-preview_started
+            reasons = []
+            if diagnostics:
+                if timings[-1] > slow_ms:
+                    reasons.append("slow")
+                if duplicate:
+                    reasons.append("duplicate_identity")
+            auto_reasons = [reason for reason in reasons if auto_attempts[reason] < auto_limit]
+            track_details = []
+            if diagnostics:
+                # 每帧登记稳定key，避免第一次快照时才决定编号。
+                for track in tracks:
+                    if id(track) not in track_keys:
+                        track_keys[id(track)] = len(track_refs)
+                        track_refs.append(track)
+                    track_details.append(dict(key=track_keys[id(track)], part=track.part_id,
+                        state=track.state, bbox=list(track.last_bbox), score=float(track.id_score),
+                        covered=bool(track.covered), visible_ratio=float(track.visible_ratio)))
+                frame_trace.append(dict(frame=frames, elapsed_s=elapsed_s,
+                    algorithm_ms=timings[-1], stages_ms=phase, process_cpu_ms=cpu_ms,
+                    reasons=reasons, predictions=[{k: p[k] for k in ("part", "bbox", "score")}
+                                                  for p in predictions], tracks=track_details))
+            key = None
+            if display or auto_reasons:
                 canvas = image.copy()
                 for track in tracks:
                     color = (0, 255, 0) if track.state == "detected" else (0, 180, 255)
@@ -241,10 +279,12 @@ def run_dataset_model(args):
                 cv2.putText(canvas, "DEV | tracks=%d shots=%d | %.1fms | S save / Q exit" % (
                     len(tracks), len(snapshots), timings[-1]),
                             (5, 20), cv2.FONT_HERSHEY_SIMPLEX, .45, (255,255,255), 1)
+            if display:
                 cv2.imshow(WIN, canvas)
                 key = cv2.waitKey(1) & 0xff
-                if key in (ord("s"), ord("S")):
-                    track_details = []
+            manual_save = key in (ord("s"), ord("S"))
+            if manual_save or auto_reasons:
+                if not diagnostics:
                     for track in tracks:
                         if id(track) not in track_keys:
                             track_keys[id(track)] = len(track_refs)
@@ -252,22 +292,31 @@ def run_dataset_model(args):
                         track_details.append(dict(key=track_keys[id(track)], part=track.part_id,
                             state=track.state, bbox=list(track.last_bbox), score=float(track.id_score),
                             covered=bool(track.covered), visible_ratio=float(track.visible_ratio)))
-                    details = dict(frame=frames, source=source_name, template_sha256=model_hash,
-                        elapsed_s=record["elapsed_s"] if records is not None else start-preview_started,
+                details = dict(frame=frames, source=source_name, template_sha256=model_hash,
+                        elapsed_s=elapsed_s,
                         source_ts=record.get("source_ts") if records is not None else getattr(frame, "ts", None),
                         intrinsics=meta.get("intrinsics"), distance_mm=meta.get("distance_mm"),
                         controls_at_start=meta.get("actual_controls") if records is not None else controls_before,
                         predictions=predictions, tracks=track_details,
-                        algorithm_ms=timings[-1], stages_ms=phase,
-                        note="人工按s保留的开发诊断证据，不是自动真值。保存耗时不计入算法计时。")
-                    try:
-                        saved = save_preview_snapshot(snapshot_folder, image, canvas, mask, details)
-                    except OSError as error:
-                        snapshot_errors += 1
-                        print("快照保存失败：%s；此前快照保留。" % error)
-                    else:
+                        algorithm_ms=timings[-1], stages_ms=phase, process_cpu_ms=cpu_ms,
+                        triggers=(["manual"] if manual_save else []) + reasons,
+                        note="开发诊断证据，不是自动真值。保存耗时不计入算法计时；自动写盘会影响后续采集节奏。")
+                # 每类异常分别限次；失败也消耗额度，防止持续拒绝访问导致每帧重试。
+                for reason in auto_reasons:
+                    auto_attempts[reason] += 1
+                try:
+                    saved = save_preview_snapshot(snapshot_folder, image, canvas, mask, details)
+                except OSError as error:
+                    snapshot_errors += int(manual_save)
+                    auto_errors += int(bool(auto_reasons))
+                    print("快照保存失败：%s；此前快照保留。" % error)
+                else:
+                    if manual_save:
                         snapshots.append(str(saved))
-                        print("快照已保存：%s" % saved)
+                    if auto_reasons:
+                        auto_snapshots.append(str(saved))
+                    print("快照已保存：%s" % saved)
+            if display:
                 if key in (ord("q"), 27):
                     break
                 if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
@@ -288,12 +337,20 @@ def run_dataset_model(args):
             controls_before=controls_before, controls_after=controls_after,
             final_tracks=[dict(part=t.part_id, state=t.state, bbox=list(t.last_bbox)) for t in tracker.tracks],
             note="开发模型预览，不是独立精度验收；算法计时不含读图/取帧、显示及落盘。")
+        if diagnostics:
+            report["diagnostics"] = dict(slow_ms=slow_ms, limit_per_reason=auto_limit,
+                attempts=auto_attempts, snapshots=auto_snapshots, save_errors=auto_errors,
+                opencv_version=cv2.__version__, opencv_threads=cv2.getNumThreads(),
+                frame_trace=frame_trace,
+                note="CPU时间是全进程CPU累计量，非单核墙钟；不据此单独归因。自动写盘影响后续节奏，不能视为无诊断性能验收。")
         if args.report:
             write_json(args.report, report)
         print("阶段1预览：%d帧；轨迹数%d～%d；算法中位%.2fms / P95 %.2fms。" % (
             frames, min(counts), max(counts), report["algorithm_ms"]["median"], report["algorithm_ms"]["p95"]))
         if display:
-            print("诊断快照：成功%d次，失败%d次；目录：%s" % (len(snapshots), snapshot_errors, snapshot_folder))
+            print("人工快照：成功%d次，失败%d次；目录：%s" % (len(snapshots), snapshot_errors, snapshot_folder))
+        if diagnostics:
+            print("自动快照：成功%d次，失败%d次；目录：%s" % (len(auto_snapshots), auto_errors, snapshot_folder))
         return report
     finally:
         if source is not None:
@@ -344,13 +401,16 @@ def main(argv=None) -> int:
     ap.add_argument("--session", default="", help="阶段1原图序列的session.json；不传则使用D435实时画面")
     ap.add_argument("--report", default="", help="阶段1预览统计JSON；不覆盖已有文件")
     ap.add_argument("--snapshot-dir", default="", help="s诊断快照目录；默认放在报告同名_snapshots目录")
+    ap.add_argument("--diagnostics", action="store_true", help="阶段1逐帧诊断并限量自动保存慢帧/重复身份，需要--report")
+    ap.add_argument("--diagnostic-slow-ms", type=float, default=33.0, help="自动诊断慢帧预算，默认33ms")
+    ap.add_argument("--diagnostic-limit", type=int, default=10, help="每类异常最多尝试保存次数，默认10次")
     args = ap.parse_args(argv)
     if args.dataset_model:
         if args.save:
             ap.error("阶段1模型预览不使用--save；保留原图请运行阶段1采集工具")
         run_dataset_model(args)
         return 0
-    if args.session or args.report or args.snapshot_dir:
+    if args.session or args.report or args.snapshot_dir or args.diagnostics:
         ap.error("--session/--report/--snapshot-dir需要同时指定--dataset-model")
 
     wp = load_config(args.workpiece)

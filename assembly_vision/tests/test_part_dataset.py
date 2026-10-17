@@ -506,6 +506,54 @@ def main():
             failed_snapshot = run_dataset_model(demo_args)
         check(failed_snapshot["snapshot_save_errors"] == 1 and not failed_snapshot["snapshots"]
               and all(p.exists() for p in paths), "快照失败明确记录且预览可退出，先前快照保持完整")
+        # 自动诊断使用真实分割，再制造同一帧重复候选，验证原始错误不会被轨迹去重吞掉。
+        from part_dataset import segment_variant as original_segment
+        def duplicate_candidates(*args):
+            mask, blobs, result = original_segment(*args)
+            return mask, blobs + blobs, result
+        demo_args.bench, demo_args.max_frames = True, 3
+        demo_args.diagnostics = True
+        demo_args.diagnostic_slow_ms = 1e-9
+        demo_args.diagnostic_limit = 1
+        demo_args.report = base / "自动诊断报告.json"
+        with patch("part_dataset.segment_variant", side_effect=duplicate_candidates), \
+                patch("part_track_demo.cv2.imshow") as show:
+            automatic = run_dataset_model(demo_args)
+        diagnostic = automatic["diagnostics"]
+        trace = diagnostic["frame_trace"]
+        check(len(trace) == 3 and automatic["raw_duplicate_identity_frames"] == 3
+              and all(t["reasons"] == ["slow", "duplicate_identity"] for t in trace)
+              and [t["elapsed_s"] for t in trace] == [0, .1, .2]
+              and all(t["process_cpu_ms"] >= 0 and t["tracks"] for t in trace),
+              "逐帧保留真实清单时间、分段/CPU耗时、原始重复身份与轨迹，限量后仍记录异常")
+        check(diagnostic["attempts"] == {"slow": 1, "duplicate_identity": 1}
+              and len(diagnostic["snapshots"]) == 1 and not show.called
+              and not automatic["snapshots"],
+              "无窗口也自动保留异常，同帧两原因共用一份快照，各类独立限量且不混入人工计数")
+        evidence_path = Path(diagnostic["snapshots"][0])
+        evidence = read_json(evidence_path)
+        check(evidence["triggers"] == ["slow", "duplicate_identity"]
+              and evidence["frame"] == trace[0]["frame"]
+              and evidence["tracks"] == trace[0]["tracks"]
+              and evidence["stages_ms"] == trace[0]["stages_ms"]
+              and np.array_equal(imread_safe(str(evidence_path.parent / "raw.png")), first_original)
+              and all(file_hash(evidence_path.parent / n) == h for n,h in evidence["files"].items()),
+              "自动快照和触发帧一致，保留原像素、完整预测、稳定key及hash")
+        demo_args.report = base / "自动诊断失败.json"
+        with patch("part_track_demo.save_preview_snapshot", side_effect=OSError("拒绝访问")) as saving:
+            automatic_failure = run_dataset_model(demo_args)
+        check(saving.call_count == 1 and automatic_failure["diagnostics"]["save_errors"] == 1
+              and len(automatic_failure["diagnostics"]["frame_trace"]) == 3
+              and evidence_path.exists(), "自动保存失败也消耗额度，后续帧继续记账且旧证据保留")
+        demo_args.report = ""
+        raises(lambda: run_dataset_model(demo_args), "自动诊断必须指定可保存的报告")
+        demo_args.report = base / "invalid_diagnostic.json"
+        demo_args.diagnostic_slow_ms = float("nan")
+        raises(lambda: run_dataset_model(demo_args), "拒绝非有限慢帧阈值")
+        demo_args.diagnostic_slow_ms = 33
+        demo_args.diagnostic_limit = 0
+        raises(lambda: run_dataset_model(demo_args), "拒绝无效自动保存上限")
+        demo_args.diagnostics = False
         demo_args.report = base / "demo_report.json"
         demo_args.bench, demo_args.max_frames = True, 2
         raises(lambda: run_dataset_model(demo_args), "模型预览报告禁止覆盖")
