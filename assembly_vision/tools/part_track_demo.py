@@ -51,6 +51,7 @@ import argparse
 import os
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from uuid import uuid4
 
@@ -109,6 +110,60 @@ def save_preview_snapshot(folder, image, canvas, mask, details):
     return target / "snapshot.json"
 
 
+class TrackJournal:
+    """稳定编号、可见轨迹与状态记录；不把遮挡期间的历史位置当成当前观测。"""
+
+    def __init__(self, trail_points=30):
+        if type(trail_points) is not int or trail_points < 0:
+            raise ValueError("轨迹线点数必须为非负整数")
+        self.trail_points = trail_points
+        self.keys, self.refs, self.records, self.trails = {}, [], [], {}
+
+    def observe(self, tracks, frame, elapsed_s):
+        details, active = [], set()
+        for track in tracks:
+            identity = id(track)
+            if identity not in self.keys:
+                self.keys[identity] = len(self.refs)
+                self.refs.append(track)  # 保留引用，避免对象释放后id复用。
+                self.records.append(dict(key=self.keys[identity], first_frame=frame,
+                    first_elapsed_s=elapsed_s, part=track.part_id, identity_changes=[],
+                    state_changes=[], state_frames={}, last_observed_frame=None,
+                    last_observed_elapsed_s=None, last_observed_center_px=None))
+                self.trails[self.keys[identity]] = deque(maxlen=self.trail_points)
+            key = self.keys[identity]
+            active.add(key)
+            record, trail = self.records[key], self.trails[key]
+            if record["part"] != track.part_id:
+                record["identity_changes"].append(dict(frame=frame, elapsed_s=elapsed_s,
+                    previous=record["part"], current=track.part_id))
+                record["part"] = track.part_id
+            if not record["state_changes"] or record["state_changes"][-1]["state"] != track.state:
+                record["state_changes"].append(dict(frame=frame, elapsed_s=elapsed_s, state=track.state))
+            counts = record["state_frames"]
+            counts[track.state] = counts.get(track.state, 0) + 1
+            record["last_frame"], record["last_elapsed_s"] = frame, elapsed_s
+            if track.state == "detected":
+                x,y,w,h = track.last_bbox
+                center = (float(x+w/2), float(y+h/2))
+                record["last_observed_frame"] = frame
+                record["last_observed_elapsed_s"] = elapsed_s
+                record["last_observed_center_px"] = list(center)
+                trail.append(center)
+            else:
+                trail.clear()  # 恢复后重新画线，不跨遮挡区间连接历史点。
+            last_time = record["last_observed_elapsed_s"]
+            details.append(dict(key=key, part=track.part_id, state=track.state,
+                bbox=list(track.last_bbox), score=float(track.id_score), covered=bool(track.covered),
+                visible_ratio=float(track.visible_ratio), observation_current=track.state=="detected",
+                last_observed_frame=record["last_observed_frame"],
+                observation_age_s=None if last_time is None else max(0.0,elapsed_s-last_time)))
+        for key, trail in self.trails.items():
+            if key not in active:
+                trail.clear()
+        return details
+
+
 def run_dataset_model(args):
     """阶段1独立模型预览；不读取旧单应/槽位，支持真实清单时间戳回放。"""
     from part_dataset import (read_json, write_json, file_hash, sample_scale,
@@ -149,7 +204,7 @@ def run_dataset_model(args):
         snapshot_folder = (Path(args.report).with_name(Path(args.report).stem + "_snapshots")
                            if args.report else Path(args.dataset_model).parent / "preview_snapshots")
     model_hash = file_hash(args.dataset_model)
-    track_keys, track_refs = {}, []
+    journal = TrackJournal(getattr(args, "trail_points", 30))
     controls_before = controls_after = None
     try:
         if args.session:
@@ -261,16 +316,8 @@ def run_dataset_model(args):
                 if duplicate:
                     reasons.append("duplicate_identity")
             auto_reasons = [reason for reason in reasons if auto_attempts[reason] < auto_limit]
-            track_details = []
+            track_details = journal.observe(tracks, frames, elapsed_s)
             if diagnostics:
-                # 每帧登记稳定key，避免第一次快照时才决定编号。
-                for track in tracks:
-                    if id(track) not in track_keys:
-                        track_keys[id(track)] = len(track_refs)
-                        track_refs.append(track)
-                    track_details.append(dict(key=track_keys[id(track)], part=track.part_id,
-                        state=track.state, bbox=list(track.last_bbox), score=float(track.id_score),
-                        covered=bool(track.covered), visible_ratio=float(track.visible_ratio)))
                 frame_trace.append(dict(frame=frames, elapsed_s=elapsed_s,
                     algorithm_ms=timings[-1], stages_ms=phase, process_cpu_ms=cpu_ms,
                     rejected_candidates=result.detail.get("rejected_candidates", []),
@@ -281,11 +328,19 @@ def run_dataset_model(args):
             key = None
             if display or auto_reasons:
                 canvas = image.copy()
-                for track in tracks:
+                for track, detail in zip(tracks, track_details):
                     color = (0, 255, 0) if track.state == "detected" else (0, 180, 255)
+                    trail = journal.trails[detail["key"]]
+                    if len(trail) > 1:
+                        cv2.polylines(canvas, [np.rint(trail).astype(np.int32).reshape(-1,1,2)],
+                                      False, color, 1)
                     cv2.drawContours(canvas, [track.contour], -1, color, 1)
                     x, y = track.last_bbox[:2]
-                    cv2.putText(canvas, "%s %s" % (track.part_id or "?", track.state),
+                    label = "#%d %s %s%s" % (detail["key"], track.part_id or "?", track.state,
+                                             "" if detail["observation_current"] else " [last]")
+                    text_width = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, .4, 1)[0][0]
+                    x = max(0, min(x, canvas.shape[1]-text_width-1))
+                    cv2.putText(canvas, label,
                                 (x, max(15, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, .4, color, 1)
                 cv2.putText(canvas, "DEV | tracks=%d shots=%d | %.1fms | S save / Q exit" % (
                     len(tracks), len(snapshots), timings[-1]),
@@ -295,14 +350,6 @@ def run_dataset_model(args):
                 key = cv2.waitKey(1) & 0xff
             manual_save = key in (ord("s"), ord("S"))
             if manual_save or auto_reasons:
-                if not diagnostics:
-                    for track in tracks:
-                        if id(track) not in track_keys:
-                            track_keys[id(track)] = len(track_refs)
-                            track_refs.append(track)
-                        track_details.append(dict(key=track_keys[id(track)], part=track.part_id,
-                            state=track.state, bbox=list(track.last_bbox), score=float(track.id_score),
-                            covered=bool(track.covered), visible_ratio=float(track.visible_ratio)))
                 details = dict(frame=frames, source=source_name, template_sha256=model_hash,
                         elapsed_s=elapsed_s,
                         source_ts=record.get("source_ts") if records is not None else getattr(frame, "ts", None),
@@ -347,6 +394,7 @@ def run_dataset_model(args):
             algorithm_stages_ms={name: dict(median=float(np.median([p[name] for p in phases])),
                 p95=float(np.percentile([p[name] for p in phases], 95))) for name in phases[0]},
             snapshots=snapshots, snapshot_save_errors=snapshot_errors,
+            track_history=journal.records, trail_points=journal.trail_points,
             controls_before=controls_before, controls_after=controls_after,
             final_tracks=[dict(part=t.part_id, state=t.state, bbox=list(t.last_bbox)) for t in tracker.tracks],
             note="开发模型预览，不是独立精度验收；算法计时不含读图/取帧、显示及落盘。")
@@ -414,6 +462,7 @@ def main(argv=None) -> int:
     ap.add_argument("--session", default="", help="阶段1原图序列的session.json；不传则使用D435实时画面")
     ap.add_argument("--report", default="", help="阶段1预览统计JSON；不覆盖已有文件")
     ap.add_argument("--snapshot-dir", default="", help="s诊断快照目录；默认放在报告同名_snapshots目录")
+    ap.add_argument("--trail-points", type=int, default=30, help="阶段1可见移动轨迹最多保留多少点，0关闭线条")
     ap.add_argument("--diagnostics", action="store_true", help="阶段1逐帧诊断并限量自动保存慢帧/重复身份，需要--report")
     ap.add_argument("--diagnostic-slow-ms", type=float, default=33.0, help="自动诊断慢帧预算，默认33ms")
     ap.add_argument("--diagnostic-limit", type=int, default=10, help="每类异常最多尝试保存次数，默认10次")

@@ -103,6 +103,29 @@ def main() -> int:
     cfg = dict(backend="detection", detect_every_n=1, min_area_px=100,
                identity_relink=True, identity_relink_min_score=.85,
                identity_relink_area_ratio=[.8, 1.25])
+    away_clock = [1000.0]
+    away = PartTracker(cfg, clock=lambda: away_clock[0])
+    stable_classify = lambda features: ("P1_base", .95)
+    away.update(frame,[mk_blob(100,120,4000)],classify=stable_classify,seen_ids={"P1_base"})
+    original_away = away.tracks[0]
+    for i in range(1,241):
+        away_clock[0] = 1000+i/30
+        away.update(frame,[],classify=stable_classify,seen_ids=set())
+    check(len(away.tracks)==1 and away.tracks[0] is original_away and original_away.state=="lost",
+          "已确认身份离画8秒且超过幻影帧数仍保留lost历史，不提前删除导致回来换编号")
+    away.update(frame,[mk_blob(450,300,4000)],classify=stable_classify,seen_ids={"P1_base"})
+    check(len(away.tracks)==1 and away.tracks[0] is original_away
+          and original_away.state=="detected" and original_away.last_centroid==(450,300),
+          "离画数秒后在远处放回，恢复同一对象与新位置，不新建重复身份")
+    # 保留并非永不清理：gone后的时间到期必须能释放。
+    away_clock[0] = 1009.0
+    away.update(frame,[],classify=stable_classify,seen_ids=set())
+    away_clock[0] = 1030.0
+    away.update(frame,[],classify=stable_classify,seen_ids=set())
+    check(original_away.state=="gone", "长期离画进入gone状态")
+    away_clock[0] = 1091.0
+    away.update(frame,[],classify=stable_classify,seen_ids=set())
+    check(not away.tracks, "gone保留时间到期才清理，避免已确认轨迹无限存活")
     detector = PartTracker(cfg)
     classifier = lambda features: ("P1_base", .95)
     detector.update(frame, [mk_blob(100, 120, 4000)], classify=classifier,

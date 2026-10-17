@@ -19,7 +19,7 @@ from part_dataset import (ROOT, POLICY, PARTS, bbox_iou, capture_tasks, file_has
 from part_dataset import remaining_tasks, selected_tasks, classifier_from_templates
 from part_dataset import required_features_match, predict
 from measure_part_dataset import fit, evaluate, mask_iou_score
-from part_track_demo import run_dataset_model
+from part_track_demo import run_dataset_model, TrackJournal
 from capture_part_dataset import main as capture_main, check_locked, windows_mf_exposure
 from annotate_part_dataset import mask_view_geometry, mask_view_point, MASK_TOOLBAR
 from annotate_part_dataset import main as annotate_main
@@ -73,6 +73,41 @@ def make_session(folder, split, wp_path, policy_path, count):
 
 
 def main():
+    # 只画真正看见的移动：遮挡/离画后保留key，不把历史位置串成虚假的当前轨迹。
+    journal = TrackJournal(3)
+    first = SimpleNamespace(part_id="P1_base", state="detected", last_bbox=(10,20,20,20),
+                            id_score=.95, covered=False, visible_ratio=1)
+    second = SimpleNamespace(part_id="P2_column", state="detected", last_bbox=(80,20,30,10),
+                             id_score=.95, covered=False, visible_ratio=1)
+    journal.observe([first,second], 1, 0)
+    first.last_bbox = (20,20,20,20)
+    journal.observe([first,second], 2, .1)
+    first.state, first.covered = "occluded", True
+    hidden = journal.observe([first,second], 3, .2)
+    check(hidden[0]["key"] == 0 and not hidden[0]["observation_current"]
+          and abs(hidden[0]["observation_age_s"]-.1)<1e-9
+          and journal.records[0]["last_observed_center_px"] == [30,30]
+          and not journal.trails[0] and len(journal.trails[1]) == 3,
+          "遮挡保留身份与最后观测/时间，清空该对象轨迹线，不伪造移动或影响其他对象")
+    first.state, first.covered, first.last_bbox = "detected", False, (300,200,20,20)
+    recovered = journal.observe([first,second], 4, .3)
+    check(recovered[0]["key"] == 0 and recovered[0]["observation_current"]
+          and list(journal.trails[0]) == [(310,210)]
+          and [s["state"] for s in journal.records[0]["state_changes"]] == ["detected","occluded","detected"],
+          "远处恢复仍同key，但从新点起画，不跨遮挡连接；状态切换保留源时间")
+    journal.observe([], 5, .4)
+    returned = journal.observe([first], 6, .5)
+    check(returned[0]["key"] == 0 and len(journal.trails[0]) == 1
+          and journal.records[0]["state_frames"] == {"detected":4,"occluded":1},
+          "列表暂时不包含目标后仍认回同对象，不将缺失帧计入观测次数或补画路径")
+    first.part_id = "P3_wheel"
+    journal.observe([first], 7, .6)
+    check(journal.records[0]["identity_changes"][0]["previous"] == "P1_base",
+          "诊断必须记录实际标签变化，不能始终显示旧标签掩盖跳变")
+    no_trail = TrackJournal(0)
+    no_trail.observe([first], 1, 0)
+    check(not no_trail.trails[0] and len(no_trail.records)==1, "关闭轨迹线仍保留身份与状态记录")
+    raises(lambda: TrackJournal(-1), "拒绝负数轨迹线长度")
     # 小件面积实验必须只改内存副本，不能污染工位配置或采集快照。
     from assemvision.config import Config
     from part_dataset import segment_variant

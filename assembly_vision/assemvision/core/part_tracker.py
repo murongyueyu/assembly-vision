@@ -350,7 +350,7 @@ class PartTracker:
         #   那个条件**永远不成立**（删除逻辑从来没跑到过）。
         #   也不能在遮挡期间计数 —— 否则“手盖住真零件”会把轨迹删掉。
         # ★ 默认从宽限期推：**至少 3 倍宽限期，且不少于 90 帧**（约 3 秒）。
-        #   这样在生产配置（宽限 2s）下就是 90 帧；在测试的短宽限配置下会自动收紧，
+        #   宽限2s、假设30fps时是180帧（约6秒）；短宽限配置会收紧到90帧下限，
         #   不会因为一个写死的数字而让测试永远跑不到那个条件。
         self.phantom_miss_frames = int(c.get(
             "phantom_miss_frames", max(90, self.lost_grace_frames * 3)))   # 60 帧 ≈ 2 秒
@@ -833,7 +833,10 @@ class PartTracker:
             # ★ 幻影：从未跟踪成功过的轨迹，活过短限就删（不让它白吃 KCF）
             # ★ 幻影：**已 gone + 未被遮挡 + 长时间没拿到检测结果**
             #   三个条件同时成立才删 —— 保证“挡一下就能恢复”的轨迹不会被误删。
-            if not t.covered and t.miss_streak > self.phantom_miss_frames:
+            # ★ 逐帧检测模式的已确认身份可能只是被拿离画面，不能按帧数当幻影删。
+            # 保留其lost/gone历史，直到下面的gone_keep_seconds按真实时间到期。
+            retained_identity = self.backend == "detection" and t.ever_seen and bool(t.part_id)
+            if not retained_identity and not t.covered and t.miss_streak > self.phantom_miss_frames:
                 self._trackers.pop(id(t), None)
                 self._kf.pop(id(t), None)
                 self._frame_ref.pop(id(t), None)
