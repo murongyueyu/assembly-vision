@@ -5,16 +5,30 @@ from __future__ import annotations
 import os
 import sys
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _common import check, make_env                     # noqa: E402
 from make_synthetic import SLOTS, render_scene           # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from assemvision.core.segment import glove_hits          # noqa: E402
+from assemvision.core.segment import glove_hits, overexposed_ratio  # noqa: E402
 
 
 def main() -> int:
+    # 与旧定义逐像素对照，覆盖混合通道、阈值边界、步长及非标准输入。
+    rng = np.random.default_rng(20261017)
+    image = rng.integers(240, 256, (37, 43, 3), dtype=np.uint8)
+    image[0, :6] = [[249,255,255], [250,250,250], [255,255,255],
+                    [255,249,255], [255,255,249], [0,0,0]]
+    for array in (image, image[::2, ::2], image.astype(np.float32),
+                  rng.integers(0, 256, (9, 11, 4), dtype=np.uint8)):
+        for threshold in (-1, 0, 249, 249.5, 250, 255, 256, float("nan"), float("inf")):
+            expected = float((array.min(axis=2) >= threshold).mean())
+            check(overexposed_ratio(array, threshold) == expected,
+                  "过曝比例与原定义一致：dtype=%s shape=%s 阈值=%s" % (
+                      array.dtype, array.shape, threshold))
     wp, tray, seg, q = make_env()
     print("== 场景 1：全部就位 ==")
     img = render_scene()

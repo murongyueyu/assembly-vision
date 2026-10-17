@@ -22,6 +22,21 @@ from .features import contour_features
 from .roi import polygon_mask
 
 
+def overexposed_ratio(bgr: np.ndarray, threshold: float) -> float:
+    """所有通道达到原阈值的像素比例；uint8 BGR避免逐像素三通道归约。"""
+    if (bgr.dtype == np.uint8 and bgr.ndim == 3 and bgr.shape[2] == 3
+            and np.isfinite(threshold)):
+        # 对uint8输入，inRange与min(axis=2)>=threshold逐像素等价。
+        # threshold可为非整数；先向上取整，避免OpenCV的标量四舍五入改变边界。
+        level = float(np.ceil(threshold))
+        if level > 255:
+            return 0.0
+        white = cv2.inRange(bgr, (level, level, level), (255, 255, 255))
+        return float(cv2.countNonZero(white) / white.size)
+    # 非标准输入保留原语义，不能把float或四通道图像强转uint8。
+    return float((bgr.min(axis=2) >= threshold).mean())
+
+
 class Segmenter:
     def __init__(self, wp_cfg: Config) -> None:
         seg = wp_cfg.get("segment", {}) or {}
@@ -188,7 +203,7 @@ class Segmenter:
         #   完全看不出判据已经废了。
         #   所以这里把过曝量记进 detail，让上层能报警而不是默默出错。
         #   依据：曝光 -6.0 时近全白像素 0.00%，-5.0 时 7.96%。
-        blown = float((bgr.min(axis=2) >= 250).mean())
+        blown = overexposed_ratio(bgr, 250)
         res.detail["blown_ratio"] = blown
         res.detail["v_mean"] = float(hsv[..., 2].mean())
         return res
