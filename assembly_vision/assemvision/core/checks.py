@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -752,6 +753,252 @@ class Qualifier:
 
 
 # ──────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class EvidenceStamp:
+    """D专用来源协议；采集monotonic不能用发布时刻或文件ts替代。"""
+    index: int
+    captured_at: float
+    shape: tuple
+
+
+@dataclass
+class IdentityObject:
+    part: str
+    contour: np.ndarray
+    confirmed: bool = False
+    current: bool = True
+    source: str = 'unknown'
+
+
+@dataclass
+class PrestartSlot:
+    expected: str
+    observed: str = ''
+    state: str = 'unknown'
+    reason: str = ''
+    object_index: Optional[int] = None
+
+
+@dataclass
+class PrestartResult:
+    stamp: EvidenceStamp
+    slots: dict = field(default_factory=dict)
+    state: str = 'wait'
+    allow_start: bool = False
+    reason: str = ''
+    valid: bool = False
+    stable_frames: int = 0
+
+
+def prestart_unknown(stamp, expected, reason):
+    return PrestartResult(stamp, {sid: PrestartSlot(pid, reason=reason)
+                                for sid, pid in expected.items()}, reason=reason)
+
+
+def evaluate_prestart(expected, polygons, observation, objects, a_stamp, c_stamp,
+                      now, settings, error=''):
+    """单帧纯判据：只消费当前独立身份及C占用，不估位姿、不按槽猜身份。"""
+    fail = lambda why: prestart_unknown(a_stamp, expected, why)
+    if error:
+        return fail(error)
+    if a_stamp != c_stamp:
+        return fail('A/C跨帧或采集来源不一致')
+    age = now - a_stamp.captured_at
+    if (not np.isfinite(age) or age < 0 or age > settings['freshness']['max_age_s']):
+        return fail('观测过期或采集时间无效')
+    if len(expected) != 4 or len(set(expected.values())) != 4:
+        return fail('四槽身份绑定不完整')
+    if (observation is None or not observation.observed_current
+            or not observation.orientation_ok or observation.pose is None
+            or not observation.found or set(observation.slots) != set(expected)):
+        return fail('C无盘、方向拒识或当前观察不完整：' + (observation.reason if observation else '无当前C观察'))
+    if polygons is None or set(polygons) != set(expected):
+        return fail('当前C槽位几何不完整')
+    try:
+        shape = tuple(a_stamp.shape)
+        if len(shape) != 2 or min(shape) <= 0:
+            return fail('原图尺寸无效')
+        masks = {}
+        for sid, poly in polygons.items():
+            poly = np.asarray(poly)
+            if poly.ndim < 2 or poly.size < 6 or not np.isfinite(poly).all():
+                return fail('槽位多边形无效')
+            masks[sid] = np.zeros(shape, 'uint8')
+            cv2.fillPoly(masks[sid], [np.rint(poly).astype('int32')], 1)
+            if not masks[sid].any():
+                return fail('槽位多边形不在原图')
+        cfg = settings['association']
+        associations = {sid: [] for sid in expected}
+        duplicate_ids = {o.part for o in objects if o.current and o.confirmed and o.part
+                         and sum(x.current and x.confirmed and x.part == o.part for x in objects) > 1}
+        for object_index, obj in enumerate(objects):
+            if not obj.current:
+                continue  # 历史轮廓完全不提供当前空间证据。
+            contour = np.asarray(obj.contour)
+            if contour.size < 6 or not np.isfinite(contour).all():
+                return fail('A当前物体轮廓异常')
+            points = contour.reshape(-1, 2)
+            if (points < 0).any() or (points[:, 0] >= shape[1]).any() or (points[:, 1] >= shape[0]).any():
+                return fail('A轮廓越出原图')
+            mask = np.zeros(shape, 'uint8')
+            cv2.fillPoly(mask, [np.rint(contour).astype('int32')], 1)
+            area = int(mask.sum())
+            if not area:
+                return fail('A当前轮廓为空')
+            fractions = {sid: float((mask & slotmask).sum()) / area for sid, slotmask in masks.items()}
+            touched = [sid for sid, frac in fractions.items() if frac > cfg['other_slot_fraction']]
+            for sid in touched:
+                moments = cv2.moments(mask, binaryImage=True)
+                center = (moments['m10']/moments['m00'], moments['m01']/moments['m00'])
+                center_inside = cv2.pointPolygonTest(np.asarray(polygons[sid], 'float32'), center, False) >= 0
+                slot_covered = float((mask & masks[sid]).sum()) / float(masks[sid].sum())
+                contained = fractions[sid] >= cfg['min_object_inside']
+                oversized = (center_inside and slot_covered >= cfg['min_slot_covered']
+                             and fractions[sid] >= cfg['min_object_overlap'])
+                unique = len(touched) == 1 and (contained or oversized)
+                associations[sid].append((obj, unique, object_index))
+        out = PrestartResult(a_stamp, valid=True)
+        for sid, pid in expected.items():
+            row = observation.slots[sid]
+            items = associations[sid]
+            slot = PrestartSlot(pid)
+            out.slots[sid] = slot
+            glove = row.get('glove_fraction')
+            if glove is None or not np.isfinite(glove) or glove < 0:
+                slot.reason = '缺少可靠手套遮挡证据'
+            elif glove > cfg['max_glove_fraction']:
+                slot.reason = '手套遮挡，不能确认身份与占用'
+            elif row['state'] == 'empty':
+                if items:
+                    slot.reason = 'C空槽与A当前物体证据冲突'
+                else:
+                    slot.state, slot.reason = 'missing', '可靠当前空槽，缺少预期零件'
+            elif row['state'] not in ('occupied', 'unknown'):
+                slot.reason = 'C占用状态无效'
+            elif len(items) != 1:
+                slot.reason = '槽内无唯一A物体或存在多个物体'
+            else:
+                obj, unique, object_index = items[0]
+                slot.object_index = object_index if unique else None
+                if not unique:
+                    slot.reason = '跨槽或物体未可靠位于槽内'
+                elif not obj.confirmed or not obj.part:
+                    slot.reason = 'A当前身份未知或未确认'
+                elif obj.part in duplicate_ids:
+                    slot.reason = '重复身份或多候选歧义'
+                elif row['state'] == 'unknown':
+                    slot.observed = obj.part
+                    coverage = row.get('occupancy_fraction')
+                    band_evidence = (row.get('evidence') in ('metal', 'metal_or_brass')
+                                     and coverage is not None and np.isfinite(coverage) and 0 < coverage < 1)
+                    if obj.part != pid and band_evidence:
+                        # ★ C覆盖率不确定带不否定当前独立A身份；仅用于明确错放报警，绝不据此放行。
+                        slot.observed, slot.state = obj.part, 'wrong'
+                        slot.reason = 'C方向有效且无遮挡；当前独立身份明确错放，C覆盖率处于不确定带'
+                    else:
+                        slot.reason = 'C占用不确定，不能确认匹配或缺件'
+                else:
+                    slot.observed = obj.part
+                    slot.state = 'match' if obj.part == pid else 'wrong'
+                    slot.reason = '独立身份与当前槽位匹配' if slot.state == 'match' else '槽内身份与预期不符'
+        _prestart_summary(out)
+        return out
+    except (ValueError, TypeError, KeyError, cv2.error):
+        return fail('联检输入异常')
+
+
+def _prestart_summary(out):
+    states = [s.state for s in out.slots.values()]
+    out.state = ('alarm' if any(s in ('missing', 'wrong') for s in states)
+                 else 'ready' if len(states) == 4 and all(s == 'match' for s in states) else 'wait')
+
+
+class PrestartGate:
+    """D时序门禁；只在新采集帧累计，失效立即撤销，不锁存工序开始。"""
+    def __init__(self, expected, settings):
+        self.expected, self.settings = dict(expected), settings
+        for key in ('max_age_s', 'max_gap_s'):
+            value = settings['freshness'][key]
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError('D新鲜度/帧间隔须为有限正数')
+        for key in ('min_object_inside', 'min_slot_covered', 'min_object_overlap',
+                    'other_slot_fraction', 'max_glove_fraction'):
+            value = settings['association'][key]
+            if not np.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError('D关联比例必须在0到1内')
+        if settings['association']['min_object_inside'] <= settings['association']['other_slot_fraction']:
+            raise ValueError('D主槽门槛必须大于跨槽门槛')
+        for key in ('match_frames', 'alarm_frames'):
+            value = settings['stability'][key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError('D稳定帧须为正整数')
+        hold = settings['stability']['match_hold_s']
+        if not np.isfinite(hold) or hold < 0:
+            raise ValueError('D稳定时间必须为非负有限值')
+        self.last_index = -1
+        self.last_capture = None
+        self.since = None
+        self.count = 0
+        self.alarms = {}
+        self.last = None
+        self.raw_signature = None
+
+    def invalidate(self, stamp, reason):
+        self.count, self.since, self.alarms = 0, None, {}
+        if stamp.index > self.last_index:
+            self.last_index = stamp.index
+            if np.isfinite(stamp.captured_at):
+                self.last_capture = stamp.captured_at
+        self.raw_signature = None
+        self.last = prestart_unknown(stamp, self.expected, reason)
+        return self.last
+
+    def update(self, result, now):
+        stamp = result.stamp
+        age = now - stamp.captured_at
+        if (not result.valid or not np.isfinite(age) or age < 0
+                or age > self.settings['freshness']['max_age_s']):
+            return self.invalidate(stamp, result.reason or '观测过期')
+        if stamp.index < self.last_index:
+            return self.invalidate(stamp, '帧号倒退')
+        if stamp.index == self.last_index:
+            # 同一帧重复读取不能追加稳定帧；调用方原子快照为不可变结果。
+            signature = tuple((sid, s.state, s.observed, s.reason) for sid, s in result.slots.items())
+            if signature != self.raw_signature:
+                return self.invalidate(stamp, '重复帧证据变化，取消旧确认')
+            return self.last or self.invalidate(stamp, '重复帧无有效缓存')
+        gap = None if self.last_capture is None else stamp.captured_at - self.last_capture
+        if gap is not None and gap <= 0:
+            return self.invalidate(stamp, '采集时间未前进')
+        if gap is not None and gap > self.settings['freshness']['max_gap_s']:
+            self.count, self.since, self.alarms = 0, None, {}
+        self.last_index, self.last_capture = stamp.index, stamp.captured_at
+        self.raw_signature = tuple((sid, s.state, s.observed, s.reason) for sid, s in result.slots.items())
+        out = replace(result, slots={sid: replace(row) for sid, row in result.slots.items()})
+        for sid, slot in out.slots.items():
+            signature = (slot.state, slot.observed)
+            old, n = self.alarms.get(sid, (None, 0))
+            n = n + 1 if old == signature else 1
+            self.alarms[sid] = signature, n
+            if slot.state in ('missing', 'wrong') and n < self.settings['stability']['alarm_frames']:
+                slot.state, slot.reason = 'unknown', '正在确认缺件/错放证据'
+        _prestart_summary(out)
+        if result.state == 'ready':
+            self.count += 1
+            if self.since is None:
+                self.since = stamp.captured_at
+            out.stable_frames = self.count
+            stable = self.settings['stability']
+            out.allow_start = (self.count >= stable['match_frames']
+                               and stamp.captured_at - self.since >= stable['match_hold_s'])
+            if not out.allow_start:
+                out.state, out.reason = 'wait', '四槽匹配，等待稳定确认'
+        else:
+            self.count, self.since = 0, None
+        self.last = out
+        return out
+
+
 def spoke_vs_baseline(count: int, baseline, slack: int = 2) -> Tuple[bool, str]:
     """把实测辐条数与 c5 标定的基线比较。返回 (是否异常, 理由文字)。
 

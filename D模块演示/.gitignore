@@ -1,0 +1,4 @@
+# 生成视频本机交付，需单独复制；脚本与说明入Git。
+*.mp4
+*.png
+demo_manifest.json

@@ -42,6 +42,8 @@ def parse_args(argv=None):
                     help="显式开启独立C占用观察；当前候选选config/tray_observation_v2.yaml")
     ap.add_argument("--tray-observer-runtime", default="config/tray_observer_runtime.yaml",
                     help="C显示运行配置（不改匹配/占用参数）")
+    ap.add_argument('--prestart-check', default=None,
+                    help='显式D开工身份与槽位联检：config/prestart_check.yaml；不启动E')
     return ap.parse_args(argv)
 
 
@@ -61,14 +63,17 @@ def main(argv=None) -> int:
     pipe = Pipeline(cam, wp, calib,
                     source_override=args.source, path_override=args.path,
                     tray_observer_path=_p(args.tray_observer) if args.tray_observer else None,
-                    tray_observer_runtime_path=_p(args.tray_observer_runtime))
+                    tray_observer_runtime_path=_p(args.tray_observer_runtime),
+                    prestart_check_path=_p(args.prestart_check) if args.prestart_check else None)
     rc = 0
     renderer = None
     try:
         W, H = (int(v) for v in args.display.lower().split("x"))
         pipe.start()
         print("[app] 已启动：%s" % pipe.source.name)
-        if pipe.c_mode:
+        if pipe.d_mode:
+            print('[app] D开工身份/槽位联检；未启动工序、深度或终检')
+        elif pipe.c_mode:
             print("[app] 独立C占用观察；模型=%s；未启用生产流程" % _p(args.tray_observer))
         if args.no_ui:
             t_last = 0.0
@@ -79,7 +84,7 @@ def main(argv=None) -> int:
                 if now - t_last > 0.5:
                     t_last = now
                     if pipe.c_mode:
-                        print("[C] %s | %s" % (st.title, " / ".join(st.detail)))
+                        print("[%s] %s | %s" % ('D' if pipe.d_mode else 'C', st.title, " / ".join(st.detail)))
                     else:
                         print("[%s] %s | 步 %d/%d | %s"
                               % (st.level, st.title, st.step, st.total,
@@ -90,7 +95,7 @@ def main(argv=None) -> int:
                     break
         else:
             renderer = make_renderer(
-                args.renderer, window="C料盘占用观察" if pipe.c_mode else "装配流程检查",
+                args.renderer, window='D Prestart Check' if pipe.d_mode else "C料盘占用观察" if pipe.c_mode else "装配流程检查",
                 fullscreen=not args.windowed, display=(W, H),
                 panel_ratio=float(wp.get("ui.panel_ratio", 0.20)),
                 font_path=str(wp.get("ui.font_path", "")),
@@ -112,7 +117,7 @@ def main(argv=None) -> int:
         finally:
             pipe.stop()
     if pipe.c_error:
-        print("[app] C模式失败：" + pipe.c_error)
+        print(("[app] D模式失败：" if pipe.d_mode else "[app] C模式失败：") + pipe.c_error)
         return 1
     return rc
 

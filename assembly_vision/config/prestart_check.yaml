@@ -1,0 +1,30 @@
+# ★ D初始工程门槛；需实物联检验证，不能作为已验收的响应时间或定位精度。
+freshness:
+  max_age_s: 1.0
+  max_gap_s: 0.5
+association:
+  min_object_inside: 0.80
+  # ★ 大件压在小槽上：中心在唯一槽内且覆盖充分才关联，不按槽位赋身份。
+  min_slot_covered: 0.80
+  min_object_overlap: 0.15
+  other_slot_fraction: 0.05
+  max_glove_fraction: 0.0
+stability:
+  match_frames: 3
+  match_hold_s: 0.3
+  alarm_frames: 3
+# ★ 显式绑定冻结候选；路径相对本配置，加载失败禁止回退旧分类器。
+identity:
+  model: ../../ai_测试工具/阶段1数据/offline_20261017_visible_follow_v5.json
+  model_sha256: ad320176bdd520aef392ad6c81a31fcd67f64f82199d50a62ec96d3a2046eaa4
+  policy: ../../ai_测试工具/阶段1数据/offline_policy_20261017_visible_follow_v5.json
+  policy_sha256: 7c7da2757fb5b4999e6383c411c439344be70036fa086bf73c23d1a5a27bc57a
+  observer: tray_observation_v2.yaml
+  # ★ A交付后只有C几何获授权更新，当前整份正式配置按C23冻结绑定。
+  workpiece_sha256: 12bdba31fe55e63834c6760b32f68edd228f219b38e4d686ce054a9da7902530
+  camera_sha256: ea607c8d614a0e1e45f9ad6d3506b393ac9e1ba2abd8856c5fec6ceb1db74b68
+  # ★ 仅同工位旧图回放使用；真机必须读取SDK当前内参，不外推分辨率。
+  replay_intrinsics:
+    fx: 603.8248
+    width: 640
+    height: 480

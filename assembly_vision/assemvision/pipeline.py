@@ -73,22 +73,40 @@ class Pipeline:
                  source_override: Optional[str] = None,
                  path_override: Optional[str] = None,
                  tray_observer_path: Optional[str] = None,
-                 tray_observer_runtime_path: Optional[str] = None) -> None:
+                 tray_observer_runtime_path: Optional[str] = None,
+                 prestart_check_path: Optional[str] = None) -> None:
         self.cam = cam_cfg
         self.wp = wp_cfg
         self.calib = calib
         self.sh = Shared()
         self.native_depth = None
         self._depth_index = -1
-        self.c_mode = tray_observer_path is not None
+        self.d_mode = prestart_check_path is not None
+        if self.d_mode and tray_observer_path is not None:
+            raise ValueError('D开工模式与独立C观察模式互斥')
+        self.c_mode = tray_observer_path is not None or self.d_mode
         self.c_error = ""
         self._threads = []
         if self.c_mode:
-            # ★ 独立C初始化：不构造旧D/E、深度、自检或身份追踪。
+            # ★ C/D独立分支：不构造旧D/E、深度或自检；仅D增加冻结v5身份适配层。
             from .core.tray_observer import TrayObserver
+            if self.d_mode:
+                from .core.checks import PrestartGate
+                from .core.part_identity import FrozenPartIdentity
+                self.d_settings = load_config(prestart_check_path).data
+                self.d_expected = {s['id']: s['part'] for s in wp_cfg.get('slots')}
+                self.d_gate = PrestartGate(self.d_expected, self.d_settings)
+                self.identity = FrozenPartIdentity(wp_cfg, cam_cfg, prestart_check_path, self.d_settings)
+                tray_observer_path = str((Path(prestart_check_path).resolve().parent /
+                                          self.d_settings['identity']['observer']).resolve())
+                self._d_snapshot = None
+                self._d_intrinsics = None
+                self._d_source_kind = source_override or cam_cfg.get('source')
             runtime = tray_observer_runtime_path or str(
                 Path(__file__).resolve().parents[1] / "config/tray_observer_runtime.yaml")
             self.c_max_age_s = float(load_config(runtime).get("display.max_age_s"))
+            if self.d_mode:
+                self.c_max_age_s = self.d_settings['freshness']['max_age_s']
             if not np.isfinite(self.c_max_age_s) or self.c_max_age_s <= 0:
                 raise ValueError("C显示有效期必须为有限正数")
             self.observer = TrayObserver.from_file(wp_cfg, calib, tray_observer_path)
@@ -194,9 +212,19 @@ class Pipeline:
                     self.source.apply_locked_controls()
                     for _ in range(int(self.cam.get("capture.warmup_frames", 12))):
                         self.source.read(want_full=False)
+                if self.d_mode:
+                    if self._d_source_kind in ('images', 'image', 'video'):
+                        self._d_intrinsics = self.d_settings['identity']['replay_intrinsics']
+                    else:
+                        self._d_intrinsics = self.source.color_intrinsics()
+                    if not self._d_intrinsics or self._d_intrinsics.get('fx', 0) <= 0:
+                        raise ValueError('D缺少当前SDK内参或显式同工位回放内参')
+                    expected = tuple(self.observer.settings['image_size'])
+                    if (self._d_intrinsics.get('width'), self._d_intrinsics.get('height')) != expected:
+                        raise ValueError('D内参分辨率与C模板不一致，禁止外推')
                 self._threads = [
-                    threading.Thread(target=self._c_acq_loop, name="C-acq", daemon=True),
-                    threading.Thread(target=self._c_loop, name="C-observe", daemon=True)]
+                    threading.Thread(target=self._c_acq_loop, name="D-acq" if self.d_mode else "C-acq", daemon=True),
+                    threading.Thread(target=self._c_loop, name="D-check" if self.d_mode else "C-observe", daemon=True)]
                 for thread in self._threads:
                     thread.start()
             except Exception:
@@ -242,7 +270,7 @@ class Pipeline:
             self.c_error = reason
             self._c_snapshot = (frame, captured_at, None, reason)
             self.sh.quit = True
-        print("[C] " + reason, flush=True)
+        print(("[D] " if self.d_mode else "[C] ") + reason, flush=True)
 
     def _c_acq_loop(self):
         try:
@@ -261,6 +289,8 @@ class Pipeline:
             self._c_fail("采集异常：" + str(exc))
 
     def _c_process_once(self):
+        if self.d_mode:
+            return self._d_process_once()
         with self.sh.lock:
             item = self._c_input
             if self.c_error or item is None or item[0].index == self._c_last_index:
@@ -294,6 +324,113 @@ class Pipeline:
                 # ★ 一次发布对应帧和全部观测；UI绝不读取最新采集帧作底图。
                 self._c_snapshot = (frame, captured_at, observation, reason)
         return True
+
+    def _d_process_once(self):
+        from .core.checks import EvidenceStamp, evaluate_prestart, prestart_unknown
+        with self.sh.lock:
+            item = self._c_input
+            if self.c_error or item is None or item[0].index == self._c_last_index:
+                return False
+            frame, captured_at = item
+            self._c_last_index = frame.index
+        shape = frame.left.shape[:2] if frame.left is not None else (0, 0)
+        stamp = EvidenceStamp(frame.index, captured_at, shape)
+        observation, polygons, audit = None, {}, None
+        try:
+            expected = tuple(self.observer.settings['image_size'])
+            if (frame.left is None or frame.left.dtype != np.uint8 or frame.left.ndim != 3
+                    or frame.left.shape[2] != 3 or frame.size != expected or frame.scale != 1.0):
+                result = prestart_unknown(stamp, self.d_expected, 'D需要绑定分辨率的原始BGR及scale=1')
+                self.identity.reset()
+            else:
+                # ★ 同一原图两套冻结分割分别使用；C不能改用v5实验掩膜。
+                seg = self.segmenter.segment(frame.left, ts=frame.ts, scale=1.,
+                                               mm_per_px=self.tray.mm_per_px())
+                if any(m is None or m.shape != shape or m.dtype != np.uint8
+                       for m in (seg.metal_mask, seg.glove_mask, seg.brass_mask)):
+                    raise ValueError('缺少同帧同尺寸C三掩膜')
+                objects, audit = self.identity.observe(frame.left, stamp, self._d_intrinsics)
+                # ★ 手只用同帧冻结分割的矩形框显示，不拟合或绘制手的轮廓。
+                audit['glove_bbox'] = seg.glove_bbox
+                observation = self.observer.observe(frame.left, seg.metal_mask, seg.glove_mask,
+                                                     brass_mask=seg.brass_mask)
+                if observation.orientation_ok and observation.pose is not None:
+                    for slot in self.tray.slots:
+                        center = observation.pose.apply([slot['center']])[0]
+                        polygons[slot['id']] = self.tray.slot_polygon_px(slot['id'], center_override=center,
+                                                    angle_offset_deg=observation.pose.theta_deg)
+                result = evaluate_prestart(self.d_expected, polygons, observation, objects,
+                                            stamp, stamp, time.monotonic(), self.d_settings)
+            with self.sh.lock:
+                if not self.c_error:
+                    result = self.d_gate.update(result, time.monotonic())
+                    self._d_snapshot = (frame, result, observation, polygons, audit)
+        except Exception as exc:
+            self._c_fail('D处理异常：' + str(exc), frame, captured_at)
+        return True
+
+    def _d_current_snapshot(self):
+        from .core.checks import EvidenceStamp
+        with self.sh.lock:
+            if self._d_snapshot is None:
+                stamp = EvidenceStamp(-1, 0., (0, 0))
+                return None, self.d_gate.invalidate(stamp, self.c_error or '等待首帧'), None, {}, None
+            frame, result, observation, polygons, audit = self._d_snapshot
+            age = time.monotonic() - result.stamp.captured_at
+            if self.c_error or not np.isfinite(age) or not 0 <= age <= self.c_max_age_s:
+                result = self.d_gate.invalidate(result.stamp, self.c_error or '观测过期')
+                self._d_snapshot = (frame, result, None, {}, None)
+                return self._d_snapshot
+            return self._d_snapshot
+
+    def get_prestart_result(self):
+        """仅D开工信号；E尚未消费。读取时重新检查新鲜度，禁止沿用旧放行。"""
+        if not self.d_mode:
+            raise RuntimeError('未启用D开工模式')
+        return copy.deepcopy(self._d_current_snapshot()[1])
+
+    def _build_d_ui_state(self):
+        frame, result, observation, polygons, audit = self._d_current_snapshot()
+        st = UIState(frame=frame.left if frame else None)
+        st.level = OK if result.allow_start else ERROR if result.state == 'alarm' else WARN
+        st.title = ('D：可以开始组装' if result.allow_start else
+                    'D：错放/缺件报警' if result.state == 'alarm' else 'D：等待确认')
+        names = self.wp.get('parts')
+        label = lambda pid: names.get(pid, {}).get('name', pid) if pid else '未知'
+        states = {'match': '匹配', 'missing': '缺件', 'wrong': '错件', 'unknown': '不确定'}
+        alarms = []
+        for sid, row in result.slots.items():
+            st.detail.append('%s槽：%s' % (label(row.expected), states[row.state]))
+            st.detail.append('当前：空槽' if row.state == 'missing' else '当前身份：' + label(row.observed))
+            if row.state in ('missing', 'wrong'):
+                alarms.append(('缺少' + label(row.expected)) if row.state == 'missing' else
+                              ('应为%s，实为%s' % (label(row.expected), label(row.observed))))
+            if result.valid and sid in polygons:
+                # C槽位细灰线，A当前真实轮廓另画粗线，避免把槽形当零件轮廓。
+                st.polygons.append((polygons[sid], IDLE, 1))
+        if audit:
+            for index, obj in enumerate(audit.get('objects', [])):
+                if not obj.current:
+                    continue
+                rows = [r for r in result.slots.values() if r.object_index == index]
+                state = rows[0].state if len(rows) == 1 else 'unknown'
+                color = ERROR if state == 'wrong' else OK if state == 'match' else WARN
+                st.polygons.append((obj.contour.copy(), color, 3))
+                identity_label = label(obj.part) if obj.confirmed else '身份待确认'
+                if obj.source == 'partial':
+                    identity_label += '（当前残片）'
+                st.boxes.append((cv2.boundingRect(obj.contour), identity_label, color))
+            if audit.get('glove_bbox') is not None:
+                st.boxes.append((audit['glove_bbox'], '手套遮挡', WARN))
+        if result.reason:
+            st.detail.insert(0, result.reason)
+        st.detail.append('仅开工联检，未启动工序')
+        unknown_reasons = [row.reason for row in result.slots.values() if row.state == 'unknown']
+        st.banner = '；'.join(alarms) or result.reason or (unknown_reasons[0] if unknown_reasons else '')
+        st.source_name = self.source.name
+        st.stats = {'帧号': result.stamp.index, '稳定帧': result.stable_frames,
+                    '允许开始': '是' if result.allow_start else '否'}
+        return st
 
     def _c_loop(self):
         while not self.sh.quit:
@@ -662,6 +799,8 @@ class Pipeline:
     # UI 数据组装
     # ══════════════════════════════════════════════════════════
     def build_ui_state(self) -> UIState:
+        if self.d_mode:
+            return self._build_d_ui_state()
         if self.c_mode:
             return self._build_c_ui_state()
         with self.sh.lock:
