@@ -1,0 +1,153 @@
+# ★ C几何/占用；与当前c3及槽几何绑定，多方向参考须独立实测复核。
+reference_image: tray_observation_reference.png
+reference_sha256: 71afd084823753ceb8e7dc6731964f2809a3a0b9dbd1c726d1023e8a45fcfe0e
+reference_source: ai_测试工具\C模块几何\20261018_01\empty_02\d435_640x480@30.png
+reference_source_sha256: 6bd45fe31ffff3ad89f6079d4896f6e9160434f3c0079b9f1bee14ab373b61ad
+image_size:
+- 640
+- 480
+canonical_pixels_per_mm: 1.0
+geometry_binding:
+  homography:
+  - - 1.3373059153622207
+    - 0.17686437281127312
+    - 222.00000000000003
+  - - -0.12147087675625474
+    - 1.4446692650099144
+    - 137.00000000000003
+  - - -0.00012684063963545734
+    - 0.0002681848867136388
+    - 1.0
+  ref_scale: 1.0
+  tray_size_mm:
+  - 160.0
+  - 160.0
+  slots:
+  - id: slot_wheel
+    type: circle
+    center:
+    - 120.7
+    - 119.4
+    diameter: 75.0
+    length: null
+    width: null
+    angle_deg: null
+  - id: slot_column
+    type: capsule
+    center:
+    - 40.2
+    - 119.6
+    diameter: null
+    length: 91.0
+    width: 28.0
+    angle_deg: 44.4
+  - id: slot_cap
+    type: circle
+    center:
+    - 120.3
+    - 39.8
+    diameter: 25.0
+    length: null
+    width: null
+    angle_deg: null
+  - id: slot_base
+    type: circle
+    center:
+    - 40.1
+    - 39.9
+    diameter: 65.0
+    length: null
+    width: null
+    angle_deg: null
+slot_order:
+- slot_base
+- slot_column
+- slot_wheel
+- slot_cap
+rim_geometry:
+  slot_base:
+    center_mm:
+    - 40.10660260611833
+    - 39.877830833423744
+    rim_diameter_mm: 59.18469267714751
+  slot_cap:
+    center_mm:
+    - 120.31242565584144
+    - 39.83536574326936
+    rim_diameter_mm: 18.93935395491758
+  slot_wheel:
+    center_mm:
+    - 120.72403837215445
+    - 119.42082736092269
+    rim_diameter_mm: 73.3877002531004
+  slot_column:
+    center_mm:
+    - 40.184226989746094
+    - 119.57551574707031
+    rim_length_mm: 86.61540222167969
+    rim_width_mm: 16.77346420288086
+    angle_deg: 44.37384033203125
+outline:
+  v_max: 140
+  s_max: 170
+  min_area_ratio: 0.01
+  aspect_tol: 0.35
+  fill_min: 0.55
+matching:
+  feature: gradient
+  angle_offsets_deg:
+  - -3
+  - -2
+  - -1
+  - 0
+  - 1
+  - 2
+  - 3
+  blur_kernel: 5
+  blur_sigma: 1.0
+  occlusion_dilate_px: 7
+  border_mm: 8.0
+  translation_search_mm: 5.0
+  min_visible_fraction: 0.4
+  min_std: 1.0
+  min_score: 0.45
+  min_margin: 0.15
+  min_frame_coverage: 0.98
+occupancy:
+  inset_mm: 2.0
+  present_fraction: 0.12
+  # ★ 窄立柱实测金属覆盖最低约0.115；空槽为0，0.03～0.10仍拒绝判定。
+  present_fraction_by_slot:
+    slot_column: 0.10
+  empty_fraction: 0.03
+  max_glove_fraction: 0.05
+basis: '2026-10-18 rotation_01 development: eight empty-tray directions, five frames
+  averaged after individually recorded canonical pose; source hashes and poses in
+  view_source_scene_09..16.json. Independent new capture required. A/B unchanged.'
+semantics: occupied means slot contains visible metal evidence; not part identity,
+  quality, assembly step or semi-finished recognition
+reference_views:
+- image: tray_view_09.png
+  theta_deg: 100.11617003644723
+  sha256: 569608c3d7d796a70b90f025fe72a4fc1af53198c234e121fccc8ea3fa23fd1a
+- image: tray_view_10.png
+  theta_deg: 160.1886596498069
+  sha256: bce1bc3da2158886c41c496a06b190b951cd8df895e03a3393ca8c1642c9731e
+- image: tray_view_11.png
+  theta_deg: 193.90435084573105
+  sha256: c312b99934d10b952b407b3f0d7f47c5359272214872ee18bb39fda3fcc07454
+- image: tray_view_12.png
+  theta_deg: 224.27400359951315
+  sha256: 0684267882a63ac6dd8ca4b8cdff4fd40d7232eb2067a641062117691b3b34a4
+- image: tray_view_13.png
+  theta_deg: 277.3444249839679
+  sha256: b08e0bf8911cf363fce2c31171ad7ad48b08f2fe0d8a017d23b2d4820554fc03
+- image: tray_view_14.png
+  theta_deg: 308.32162579302275
+  sha256: aabda66f5ff69e9c01041ba7daafd7cf01edf659436617b5be6117d42bca1fa7
+- image: tray_view_15.png
+  theta_deg: 1.4480477027048237
+  sha256: 52ea9d355efc8449f78e4efe1eb5110cba269438bc0d32e0ef360fabe65a0faa
+- image: tray_view_16.png
+  theta_deg: 40.887761609213854
+  sha256: 4dacc88735d3114fa5a920b611e749173d0e82750563cf882682f197b0b44515
