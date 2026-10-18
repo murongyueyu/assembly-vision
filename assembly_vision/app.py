@@ -38,6 +38,10 @@ def parse_args(argv=None):
     ap.add_argument("--display", default="1920x1080")
     ap.add_argument("--windowed", action="store_true", help="不占全屏")
     ap.add_argument("--save-video", default="", help="把界面录成视频，便于写报告")
+    ap.add_argument("--tray-observer", default=None,
+                    help="显式开启独立C占用观察；当前候选选config/tray_observation_v2.yaml")
+    ap.add_argument("--tray-observer-runtime", default="config/tray_observer_runtime.yaml",
+                    help="C显示运行配置（不改匹配/占用参数）")
     return ap.parse_args(argv)
 
 
@@ -51,17 +55,21 @@ def main(argv=None) -> int:
     cam = load_config(_p(args.camera))
     wp = load_config(_p(args.workpiece))
     calib = load_config(_p(args.calibration), required=False)
-    if not calib.data:
+    if not calib.data and not args.tray_observer:
         print("[app] 没找到标定文件 %s —— 将以兜底 ROI 运行（只能看连通性）" % args.calibration)
 
     pipe = Pipeline(cam, wp, calib,
-                    source_override=args.source, path_override=args.path)
-    pipe.start()
-    print("[app] 已启动：%s" % pipe.source.name)
-
-    W, H = (int(v) for v in args.display.lower().split("x"))
+                    source_override=args.source, path_override=args.path,
+                    tray_observer_path=_p(args.tray_observer) if args.tray_observer else None,
+                    tray_observer_runtime_path=_p(args.tray_observer_runtime))
     rc = 0
+    renderer = None
     try:
+        W, H = (int(v) for v in args.display.lower().split("x"))
+        pipe.start()
+        print("[app] 已启动：%s" % pipe.source.name)
+        if pipe.c_mode:
+            print("[app] 独立C占用观察；模型=%s；未启用生产流程" % _p(args.tray_observer))
         if args.no_ui:
             t_last = 0.0
             frames = 0
@@ -70,32 +78,42 @@ def main(argv=None) -> int:
                 now = time.time()
                 if now - t_last > 0.5:
                     t_last = now
-                    print("[%s] %s | 步 %d/%d | %s"
-                          % (st.level, st.title, st.step, st.total,
-                             " / ".join(st.detail[-2:])))
+                    if pipe.c_mode:
+                        print("[C] %s | %s" % (st.title, " / ".join(st.detail)))
+                    else:
+                        print("[%s] %s | 步 %d/%d | %s"
+                              % (st.level, st.title, st.step, st.total,
+                                 " / ".join(st.detail[-2:])))
                 time.sleep(0.02)
                 frames += 1
                 if args.max_frames and frames >= args.max_frames:
                     break
         else:
             renderer = make_renderer(
-                args.renderer, window="装配流程检查",
+                args.renderer, window="C料盘占用观察" if pipe.c_mode else "装配流程检查",
                 fullscreen=not args.windowed, display=(W, H),
                 panel_ratio=float(wp.get("ui.panel_ratio", 0.20)),
                 font_path=str(wp.get("ui.font_path", "")),
                 colors=wp.get("ui.colors", None),
                 video_fps=int(wp.get("ui.video_fps", 30)),
-                actions={"inspect": pipe.request_inspection,
-                         "reset": pipe.reset_process})
+                actions={} if pipe.c_mode else {"inspect": pipe.request_inspection,
+                                                "reset": pipe.reset_process})
             rc = renderer.run(pipe.build_ui_state,
                               fps=int(wp.get("ui.video_fps", 30)),
                               save_video=args.save_video,
                               max_frames=args.max_frames)
-            renderer.close()
+
     except KeyboardInterrupt:
         print("\n[app] 用户中断")
     finally:
-        pipe.stop()
+        try:
+            if renderer is not None:
+                renderer.close()
+        finally:
+            pipe.stop()
+    if pipe.c_error:
+        print("[app] C模式失败：" + pipe.c_error)
+        return 1
     return rc
 
 

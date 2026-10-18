@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 import threading
 import copy
 import time
@@ -70,13 +71,38 @@ class Pipeline:
     def __init__(self, cam_cfg: Config, wp_cfg: Config,
                  calib: Optional[Config] = None,
                  source_override: Optional[str] = None,
-                 path_override: Optional[str] = None) -> None:
+                 path_override: Optional[str] = None,
+                 tray_observer_path: Optional[str] = None,
+                 tray_observer_runtime_path: Optional[str] = None) -> None:
         self.cam = cam_cfg
         self.wp = wp_cfg
         self.calib = calib
         self.sh = Shared()
         self.native_depth = None
         self._depth_index = -1
+        self.c_mode = tray_observer_path is not None
+        self.c_error = ""
+        self._threads = []
+        if self.c_mode:
+            # ★ 独立C初始化：不构造旧D/E、深度、自检或身份追踪。
+            from .core.tray_observer import TrayObserver
+            runtime = tray_observer_runtime_path or str(
+                Path(__file__).resolve().parents[1] / "config/tray_observer_runtime.yaml")
+            self.c_max_age_s = float(load_config(runtime).get("display.max_age_s"))
+            if not np.isfinite(self.c_max_age_s) or self.c_max_age_s <= 0:
+                raise ValueError("C显示有效期必须为有限正数")
+            self.observer = TrayObserver.from_file(wp_cfg, calib, tray_observer_path)
+            self.segmenter = Segmenter(wp_cfg)
+            self.tray = self.observer.tray
+            source_cfg = Config(copy.deepcopy(cam_cfg.data))
+            # 只覆盖C来源的内存参数，不改正式相机控件/配置，也不启动深度流。
+            source_cfg.set("depth.enabled", False)
+            self.source = make_source(source_cfg, source_override, path_override)
+            self.depth = None
+            self._c_input = None
+            self._c_snapshot = None
+            self._c_last_index = None
+            return
         if (bool(cam_cfg.get("depth.enabled", False))
                 and cam_cfg.get("depth.backend", "") == "realsense"):
             self.native_depth = NativeHeightEstimator(cam_cfg)
@@ -161,6 +187,22 @@ class Pipeline:
 
     # ══════════════════════════════════════════════════════════
     def start(self) -> None:
+        if self.c_mode:
+            try:
+                self.source.open()
+                if hasattr(self.source, "apply_locked_controls"):
+                    self.source.apply_locked_controls()
+                    for _ in range(int(self.cam.get("capture.warmup_frames", 12))):
+                        self.source.read(want_full=False)
+                self._threads = [
+                    threading.Thread(target=self._c_acq_loop, name="C-acq", daemon=True),
+                    threading.Thread(target=self._c_loop, name="C-observe", daemon=True)]
+                for thread in self._threads:
+                    thread.start()
+            except Exception:
+                self.stop()
+                raise
+            return
         self.source.open()
         if hasattr(self.source, "apply_locked_controls"):
             self.source.apply_locked_controls()          # type: ignore[attr-defined]
@@ -183,8 +225,121 @@ class Pipeline:
     def stop(self) -> None:
         self.sh.quit = True
         for t in self._threads:
-            t.join(timeout=1.0)
+            if t.ident is not None:
+                t.join(timeout=1.0)
         self.source.close()
+        if self.c_mode:
+            # 读帧可能阻塞到SDK超时；关闭来源后再确认全部退出。
+            for t in self._threads:
+                if t.ident is not None:
+                    t.join(timeout=1.0)
+            if any(t.is_alive() for t in self._threads):
+                raise RuntimeError("C线程未正常退出")
+
+    def _c_fail(self, reason, frame=None, captured_at=0.0):
+        # ★ 异常覆盖成功快照；采集失败不与正在计算的旧成功竞争发布。
+        with self.sh.lock:
+            self.c_error = reason
+            self._c_snapshot = (frame, captured_at, None, reason)
+            self.sh.quit = True
+        print("[C] " + reason, flush=True)
+
+    def _c_acq_loop(self):
+        try:
+            while not self.sh.quit:
+                frame = self.source.read(want_full=False)
+                captured_at = time.monotonic()
+                if frame is None:
+                    time.sleep(0.005)
+                    continue
+                # 所有权归本次采集，避免SDK或来源复用缓冲区改写待处理画面。
+                frame = copy.copy(frame)
+                frame.left = None if frame.left is None else frame.left.copy()
+                with self.sh.lock:
+                    self._c_input = (frame, captured_at)
+        except Exception as exc:
+            self._c_fail("采集异常：" + str(exc))
+
+    def _c_process_once(self):
+        with self.sh.lock:
+            item = self._c_input
+            if self.c_error or item is None or item[0].index == self._c_last_index:
+                return False
+            frame, captured_at = item
+            self._c_last_index = frame.index
+        observation, reason = None, ""
+        try:
+            expected = tuple(self.observer.settings['image_size'])
+            if (frame.left is None or frame.left.dtype != np.uint8
+                    or frame.left.ndim != 3 or frame.left.shape[2] != 3
+                    or frame.size != expected or frame.scale != 1.0):
+                reason = "输入无效：C模式需要绑定分辨率的原始BGR图像及scale=1"
+            else:
+                seg = self.segmenter.segment(
+                    frame.left, ts=frame.ts, scale=1.0,
+                    mm_per_px=self.observer.tray.mm_per_px())
+                masks = (seg.metal_mask, seg.glove_mask, seg.brass_mask)
+                if any(mask is None or mask.shape != frame.left.shape[:2]
+                       or mask.dtype != np.uint8 for mask in masks):
+                    reason = "输入无效：缺少同帧、同尺寸的金属/手套/黄铜掩膜"
+                else:
+                    observation = self.observer.observe(
+                        frame.left, seg.metal_mask, seg.glove_mask, brass_mask=seg.brass_mask)
+                    reason = observation.reason
+        except Exception as exc:
+            self._c_fail("处理异常：" + str(exc), frame, captured_at)
+            return True
+        with self.sh.lock:
+            if not self.c_error:
+                # ★ 一次发布对应帧和全部观测；UI绝不读取最新采集帧作底图。
+                self._c_snapshot = (frame, captured_at, observation, reason)
+        return True
+
+    def _c_loop(self):
+        while not self.sh.quit:
+            if not self._c_process_once():
+                time.sleep(0.005)
+
+    def _build_c_ui_state(self):
+        with self.sh.lock:
+            snapshot = self._c_snapshot
+        st = UIState(source_name=self.source.name, level=WARN)
+        st.title = "C观察：不确定"
+        labels = {'empty': '空', 'occupied': '有件', 'unknown': '不确定'}
+        totals = {'empty': '空盘', 'full': '满盘', 'partial': '部分占用', 'unknown': '不确定'}
+        names = {'slot_base': '底座槽', 'slot_column': '立柱槽',
+                 'slot_wheel': '轮盘槽', 'slot_cap': '顶盖槽'}
+        observation, valid = None, False
+        reason = "等待首帧观测"
+        if snapshot is not None:
+            frame, captured_at, observation, reason = snapshot
+            st.frame = frame.left if frame is not None else None
+            age = max(0.0, time.monotonic() - captured_at)
+            st.stats = {"帧号": frame.index if frame else "-", "观测年龄": "%.2fs" % age}
+            if self.c_error:
+                reason = self.c_error
+            elif age > self.c_max_age_s:
+                reason = "观测过期"
+            else:
+                valid = bool(observation is not None and observation.observed_current
+                             and observation.orientation_ok and observation.pose is not None)
+            if valid:
+                st.title = "C观察：" + totals[observation.state]
+                st.stats["方向估计"] = "%.1f°" % (observation.pose.theta_deg % 360)
+        for slot in self.tray.slots:
+            sid = slot['id']
+            state = observation.slots.get(sid, {}).get('state', 'unknown') if valid else 'unknown'
+            st.detail.append(names.get(sid, sid) + "：" + labels[state])
+            if valid:
+                center = observation.pose.apply([slot['center']])[0]
+                polygon = self.tray.slot_polygon_px(
+                    sid, center_override=center, angle_offset_deg=observation.pose.theta_deg)
+                # 用空/有件文字说明；颜色不承担合格或身份判据。
+                st.polygons.append((polygon, IDLE if state == 'empty' else WARN, 2))
+        if reason:
+            st.detail.append(reason)
+        st.detail.extend(["有件仅表示占用", "不代表身份正确或合格"])
+        return st
 
     # ══════════════════════════════════════════════════════════
     # T1 采集 —— 唯一读相机的人
@@ -478,6 +633,8 @@ class Pipeline:
     # ══════════════════════════════════════════════════════════
     def request_inspection(self, kind: str = "assembly") -> None:
         """手动触发一次全分辨率抽检（等操作者按空格，或演示时救场用）。"""
+        if self.c_mode:
+            return
         with self.sh.lock:
             self.sh.full_request = kind
         self._inspect_waiting = True
@@ -486,6 +643,8 @@ class Pipeline:
 
     def reset_process(self) -> None:
         """复位：清空装配状态记忆、事件与终检结果，等待下一次装配。"""
+        if self.c_mode:
+            return
         self.net.reset()
         self.deb.reset()
         self.detector = EventDetector()
@@ -503,6 +662,8 @@ class Pipeline:
     # UI 数据组装
     # ══════════════════════════════════════════════════════════
     def build_ui_state(self) -> UIState:
+        if self.c_mode:
+            return self._build_c_ui_state()
         with self.sh.lock:
             f = self.sh.frame_small
             seg = self.sh.seg
