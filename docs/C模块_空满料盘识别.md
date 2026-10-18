@@ -2,6 +2,8 @@
 
 2026-10-18，当前D435固定相机、160×160mm黑盘工位。用户要求优先不加标记，用现有槽形解决完整朝向和四槽占用；A/B保持冻结，半成品和工序识别留到其他对话。
 
+**当前修订rev.3t.4：使用另存的tray_observation_v2.yaml。** 原候选在本轮新图15帧全拒识，失败保留；C修正候选冻结后独立主验收21组/105帧全部匹配，空/满/三件占用各7个离散方向，0未知、0错误。原配置及9张参考PNG未覆盖。下文早期记录的metal单掩膜规则属于原候选，v2的输入和验收边界见末节。新C仍未接主程序，[具体接线提案](C模块_新观察器主程序接线方案.md)尚未实施。
+
 ## 交付范围与入口
 
 新入口为`assembly_vision/assemvision/core/tray_observer.py`的`TrayObserver`及独立检查工具。**旧app.py/pipeline/checks.py尚未接入此观察器**，仍保留原有方盘模90°方向入口；不能用主界面或旧live_geometry_check.py验证本候选。此次不新增跨模块修改，也不推翻原来两处已授权配套修改的范围。
@@ -9,7 +11,7 @@
 在`assembly_vision`目录运行，输出目录必须是尚不存在的新目录：
 
 ```powershell
-& 'D:\miniconda\envs\yolov11\python.exe' tools/tray_observation_demo.py --plan free --out '../ai_测试工具/C模块几何/manual_check_01'
+& 'D:\miniconda\envs\yolov11\python.exe' tools/tray_observation_demo.py --model config/tray_observation_v2.yaml --plan free --out '../ai_测试工具/C模块几何/manual_v2_check_01'
 ```
 
 相机/窗口需普通桌面权限；点击窗口后按S，每次采5帧原图、叠加及观测JSON；Q退出并生成report.json。中文提示和明显的保存反馈用于避免反复按S但未按目标取放。`--plan gray16`从满盘开始，每组只增减一件，覆盖16种占用组合，采完自动退出。报告中的目标声明不是人工真值，必须另看原图复核。
@@ -71,3 +73,44 @@ API输入当前640×480原图、冻结A的同尺寸metal_mask和可选glove_mask
 - rotation_02中冻结A分割+C观测耗时P50约68.4ms、P95约75.1ms，不含读帧/绘图/保存；没有声称30fps或树莓派性能通过。
 
 全部新证据在20261018_02/final_replay_reviewed.json、rotation_02/evaluation_reviewed.json、tests_19_final.txt、app_windowed_final.txt和freeze_verification_final.json。开工65文件复核无新增越界变化，A/B源码、模型、基线仍冻结。独立C观察器受控候选交接完成；旧主链集成、其端到端2/4问题及未覆盖角度保留待办，半成品/工序另开对话。本地提交、不push。
+
+## rev.3t.4：新方向失败定位、v2独立补测与接线准备
+
+本轮从d2c4989/9a0a928继续，只做C。开工Git干净，原冻结21文件全匹配；A/B历史冻结清单差异仅此前C几何workpiece与C测试登记，65文件的8项差异与前次已授权C记录一致。用户确认工位未变，D435 SN262322070302、USB3.2、640×480@30、13项控件均正常回读，曝光126请求/156实际。设备设置一致不保证各时刻图像色域完全相同。
+
+### 原候选失败与最小C修正
+
+原配置现场rotation_03两组满盘、empty_check_01一组空盘，共15帧全部方向拒识，0正确、15未知、0确定性错误；逐帧原图确认实际摆放，不把拒识算正确。scene_01最大暗色连通域面积88576px，框为[352,0,288,480]，中值HSV[66,144,127]：绿垫并入黑盘。满盘即使只收紧轮廓，匹配也仅约0.18～0.21，原金属掩膜未排除黄铜亮纹；恢复位姿后轮盘覆盖约0.080～0.087、立柱约0.047～0.067，仍处于原门槛的不确定带。
+
+先将原21文件完整备份到20261018_03/original_candidate/，保留原tray_observation.yaml及参考图，再另建v2：
+
+- 仅C轮廓s_max由170收紧到120，避免本批绿垫混入；其余轮廓、匹配分数/差距、角度/平移搜索及占用门槛不改。
+- observe新增可选brass_mask，来自同一帧冻结A的现有brass_mask。matching.exclude_brass=true时额外排除黄铜干扰纹理；occupancy.evidence=metal_or_brass时显式用metal/brass并集作为C占用证据。两项分别配置，匹配遮挡不能自动成为占用真值。
+- 逐槽记录metal_fraction、brass_fraction、occupancy_fraction、evidence及glove_fraction。原配置默认metal模式保持原判定，显式v2才启用双证据；缺少所需当前帧输入即未知。双掩膜不提供零件身份或合格性。
+
+A/B源码、模型、阈值、基线、正式camera/workpiece/calibration及D/E均未改。旧validation_02 80/80、rotation_01 80/80、rotation_02 60/60，加本轮失败图15/15，v2共235帧匹配；**这些全部是开发/回归，不是v2独立验收**。没有重建或替换方向参考PNG。
+
+### 冻结后独立新图及真实标签
+
+修正后23文件冻结于20261018_03/frozen_before_rotation_04.json，随后不再调参；三次独立采集结束及最终核验全部一致。每组5帧是连续观测，21组不是105次独立摆盘。
+
+| 主验收 | 来源 | 组/帧 | 正确/未知/错误 |
+|---|---|---|---|
+| 满盘7方向 | rotation_04的scene_01～06 + left_rotation_06/scene_03 | 7/35 | 35/0/0 |
+| 空盘7方向 | empty_rotation_05的scene_02/03/05/06/07/08 + left_rotation_06/scene_02 | 7/35 | 35/0/0 |
+| 部分占用7方向 | empty_rotation_05的scene_09～14 + left_rotation_06/scene_01 | 7/35 | 35/0/0 |
+| 合计 | 独立新图，原图及槽位叠加逐帧复核 | 21/105 | 105/0/0 |
+
+主验收方向估计分布约39.5～41.8、85.0～89.9、132.0～134.4、223.8～226.5、264.9～267.2、307.4～311.5、356.9～358.7度；这些是程序角度估计及槽形人工归属核对，**不是外部角度计量真值，也不是连续全周验收**。部分占用本次独立覆盖mask11（底座/立柱/顶盖有件，轮盘空），其余组合只有旧图回归和合成测试，未重新独立采完16组合。原rotation_02的60帧对v2仅属于回归，不能移作v2的新独立成绩。
+
+rotation_04窗口虽提示18组取放目标，实际18组始终满盘；按原图登记，绝不按目标标签报空/部分。scene_07～18为额外12组/60帧重复满盘，empty_rotation_05的scene_01/04为额外2组/10帧；均匹配但另列，不扩大主验收计数。全部新图共175帧匹配，主结论仍为105/105，额外70帧不能冒充新增覆盖。已改用free分段、先确认取放再采集；rotation18提示计划不作为自动验收依据。
+
+主验收分数下限0.531、差距下限0.411；冻结A分割+C观测P50约86.0ms、P95约99.1ms，排除读帧/绘图/保存。此轮不是PC时延或Pi验收。现场受控功能通过不等于30fps。
+
+### 主程序、检查和交付边界
+
+完整19模块通过，C原入口和v2入口各192种合成组合通过，并测两类掩膜解耦、缺输入与错尺寸拒绝。旧主程序--windowed离线12帧退出0；本轮单次旧合成（同一路径45张图，200次UI轮询）跑到4/4。主链没有代码改动，前轮两次2/4证据保留且未定位原因；**此次单次4/4不证明历史卡顿已修复，不是新C接入通过，也不是真实完整流程通过**。
+
+最小接线提案建议先新增app.py显式C观察模式，pipeline.py仅采集/同帧分割/观察/显示，不触发D/E或旧装配ROI；连同两处测试配套及C显示配置，文件与调用关系已列清。未获得本轮跨文件实施授权，因此只准备方案，未修改app/pipeline/types/checks/ui，不沿用旧两处例外。
+
+证据统一在ai_测试工具/C模块几何/20261018_03/：original_candidate_failure_reviewed.json、v2_development_replay.json、independent_evaluation_reviewed.json、冻结清单、三份独立采集report、原图/叠加联系表及final_checks.json/日志。数据和硬件calibration被Git忽略，迁移需另复制；代码和v2配置入Git，仅本地提交、不push。默认不传--model仍是旧候选；运行当前候选必须显式指定v2。

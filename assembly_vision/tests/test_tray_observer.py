@@ -33,6 +33,14 @@ def main():
         cv2.fillPoly(reference,[poly],55)
         cv2.polylines(reference,[poly],True,25,2)
     observer = TrayObserver(wp, cal, data, reference)
+    revised_data = copy.deepcopy(data)
+    revised_data['outline']['s_max'] = 120
+    revised_data['matching']['exclude_brass'] = True
+    revised_data['occupancy']['evidence'] = 'metal_or_brass'
+    revised = TrayObserver(wp, cal, revised_data, reference)
+    matching_only_data = copy.deepcopy(revised_data)
+    matching_only_data['occupancy']['evidence'] = 'metal'
+    matching_only = TrayObserver(wp, cal, matching_only_data, reference)
     checked = 0
     for bits in range(16):
         canonical = cv2.cvtColor(reference,cv2.COLOR_GRAY2BGR)
@@ -60,8 +68,31 @@ def main():
             expected_rotation = cv2.getRotationMatrix2D((0.,0.),turn,1.)[:,:2]
             np.testing.assert_allclose(result.pose.R,expected_rotation,atol=.03)
             checked += 1
+            # ★ 新匹配遮挡入口必须保留全组合朝向/占用，不只测满盘数量。
+            current = revised.observe(image, current_metal,
+                                      brass_mask=current_metal)
+            assert current.orientation_ok, (bits, turn, current.to_dict())
+            assert current.state == result.state
+            assert {s:r['state'] for s,r in current.slots.items()} == {
+                s:r['state'] for s,r in result.slots.items()}
+            np.testing.assert_allclose(current.pose.R, expected_rotation, atol=.03)
     blank = np.full((480,640,3),(25,180,25),'uint8')
     no_mask = np.zeros((480,640),'uint8')
+    # 附加黄铜掩膜不可以偷偷成为「有件」证据；占用仍只读原金属掩膜。
+    isolated = matching_only.observe(frame, no_mask, brass_mask=metal)
+    assert isolated.orientation_ok and isolated.state == 'empty', isolated.to_dict()
+    combined = revised.observe(frame, no_mask, brass_mask=metal)
+    assert combined.orientation_ok and combined.state == 'full', combined.to_dict()
+    assert all(r['metal_fraction'] == 0 and r['brass_fraction'] > 0
+               and r['occupancy_fraction'] == r['brass_fraction'] for r in combined.slots.values())
+    assert revised.observe(frame, metal).state == 'unknown'
+    assert '黄铜观测掩膜' in revised.observe(frame, metal).reason
+    try:
+        revised.observe(frame, metal, brass_mask=np.zeros((10,10),'uint8'))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('匹配遮挡掩膜也必须与当前原图同尺寸')
     assert not observer.observe(blank,no_mask).found
     blank[80:400,160:480] = 72
     bad = observer.observe(blank,no_mask)

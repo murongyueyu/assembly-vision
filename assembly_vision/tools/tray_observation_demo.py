@@ -60,7 +60,7 @@ def main():
     parser=argparse.ArgumentParser(__doc__)
     parser.add_argument('--out',required=True)
     parser.add_argument('--model',default=str(ROOT/'config/tray_observation.yaml'))
-    parser.add_argument('--plan',choices=['free','gray16'],default='free')
+    parser.add_argument('--plan',choices=['free','gray16','rotation18'],default='free')
     parser.add_argument('--image',default='',help='离线单图冒烟，不打开相机')
     parser.add_argument('--max-frames',type=int,default=0)
     args=parser.parse_args()
@@ -72,6 +72,10 @@ def main():
     cfg=observer.settings; order=cfg['slot_order']
     names={'slot_base':'底座','slot_column':'立柱','slot_wheel':'轮盘','slot_cap':'顶盖'}
     targets=[15^(i^(i>>1)) for i in range(16)] if args.plan=='gray16' else []
+    # ★ 补测计划只声明摆盘目标，必须另看原图，不把提示当人工真值。
+    directions=['右下','正下','左下','正上','右上','正右']
+    if args.plan=='rotation18':
+        targets=[15]*6+[0]*6+[1,2,4,8,5,10]
     protected=[ROOT/'config'/name for name in ['camera.yaml','workpiece.yaml','calibration.yaml']]
     protected += [Path(args.model),Path(args.model).parent/cfg['reference_image']]
     protected += [Path(args.model).parent/view['image'] for view in cfg.get('reference_views', [])]
@@ -79,6 +83,7 @@ def main():
     report={'config_sha256':hashes,'plan':args.plan,'slot_order':order,'targets':targets,
             'labels_reviewed':False,'scenes':[],'frames':0,'error':None,
             'scope':'C geometry/occupancy only; frozen A masks; no assembly identity/steps/quality'}
+    if args.plan=='rotation18': report['direction_targets']=directions*3
     source=None; scene=None; remaining=0; index=0; frame_index=0; last_arm=-1e9
     feedback='尚未保存；先点击图像窗口，让键盘焦点进入窗口'
     window='C TRAY OBSERVATION | s=sample  q=quit | no assembly verdict'
@@ -89,6 +94,10 @@ def main():
         if not targets: return
         target=targets[index]
         occupied=[names[s] for i,s in enumerate(order) if target&(1<<i)]
+        if args.plan=='rotation18':
+            print('第%d/18组：轮盘槽朝画面%s；有件：%s；其余槽空，手退出按S。'%(
+                index+1,directions[index%6],'、'.join(occupied) or '全部为空'),flush=True)
+            return
         action='四件都在各自槽内'
         if index:
             changed=target^targets[index-1]; i=changed.bit_length()-1
@@ -110,16 +119,19 @@ def main():
             frame_index+=1
             start=time.perf_counter()
             segmentation=segmenter.segment(bgr,scale=1.,mm_per_px=observer.tray.mm_per_px())
-            observation=observer.observe(bgr,segmentation.metal_mask,segmentation.glove_mask)
+            observation=observer.observe(bgr,segmentation.metal_mask,segmentation.glove_mask,
+                                         brass_mask=segmentation.brass_mask)
             duration=(time.perf_counter()-start)*1000
             vis=paint(bgr,observation,observer)
             if targets:
                 goal='  '.join(names[s]+('：有件' if targets[index]&(1<<i) else '：空') for i,s in enumerate(order))
                 action='保持四件都在正确槽内'
-                if index:
+                if index and args.plan!='rotation18':
                     changed=targets[index]^targets[index-1]; bit=changed.bit_length()-1
                     action=('放回' if targets[index]&changed else '取走')+'【'+names[order[bit]]+'】'
                 prompt='第%d/16组：%s；手退出后按 S'%(index+1,action)
+                if args.plan=='rotation18':
+                    prompt='第%d/18组：轮盘槽朝%s；手退出后按 S'%(index+1,directions[index%6])
             else:
                 goal='青框：空槽  绿框：有物体  黄框：不确定'
                 prompt='自由检查：手退出后按 S 保存'
@@ -140,7 +152,7 @@ def main():
                 report['scenes'][-1]['samples'].append(row)
                 remaining-=1
                 if not remaining:
-                    feedback='第%d组已保存（5帧）；请按上方提示取放下一件'%len(report['scenes'])
+                    feedback='第%d组已保存（5帧）；请按上方提示摆放下一组'%len(report['scenes'])
                     print('保存成功：'+scene.name+'，5帧；预测='+observation.state,flush=True)
                     if targets:
                         index+=1
@@ -156,6 +168,8 @@ def main():
                 target=targets[index] if targets else None
                 report['scenes'].append({'directory':scene.name,'user_declared_mask':target,
                                          'samples':[],'labels_reviewed':False})
+                if args.plan=='rotation18':
+                    report['scenes'][-1]['direction_target']=directions[index%6]
                 (scene/'label.json').write_text(json.dumps({'slot_order':order,'user_declared_mask':target,
                     'source':'user pressed s after arranging target; raw QA required'},ensure_ascii=False,indent=2),encoding='utf-8')
             if args.max_frames and frame_index>=args.max_frames: break

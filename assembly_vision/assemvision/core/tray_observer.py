@@ -167,17 +167,24 @@ class TrayObserver:
         return cv2.warpPerspective(image, matrix, self.canvas,
                                    flags=cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR)
 
-    def observe(self, bgr, metal_mask, glove_mask=None):
+    def observe(self, bgr, metal_mask, glove_mask=None, brass_mask=None):
         result = TrayObservation()
         expected = tuple(self.settings['image_size'])
         if bgr is None or (bgr.shape[1], bgr.shape[0]) != expected:
             result.reason = '图像分辨率与C模板不一致'
             return result
-        for mask in (metal_mask, glove_mask):
+        for mask in (metal_mask, glove_mask, brass_mask):
             if mask is not None and mask.shape != bgr.shape[:2]:
                 raise ValueError('C输入掩膜必须与当前原图同尺寸')
         if metal_mask is None:
             result.reason = '缺少当前帧金属观测'
+            return result
+        exclude_brass = bool(self.settings['matching'].get('exclude_brass', False))
+        evidence = self.settings['occupancy'].get('evidence', 'metal')
+        if evidence not in ('metal', 'metal_or_brass'):
+            raise ValueError('未知C占用证据模式：'+str(evidence))
+        if (exclude_brass or evidence == 'metal_or_brass') and brass_mask is None:
+            result.reason = '缺少当前帧黄铜观测掩膜'
             return result
         detect = self.settings['outline']
         det = detect_tray(bgr, **detect)
@@ -195,6 +202,9 @@ class TrayObserver:
         gray = cv2.GaussianBlur(gray, (int(match['blur_kernel']),)*2, float(match['blur_sigma']))
         glove = np.zeros_like(metal_mask) if glove_mask is None else glove_mask
         blocked = cv2.bitwise_or(metal_mask, glove)
+        if exclude_brass:
+            # ★ 黄铜反光纹理不能当槽形；附加掩膜只用于匹配，不改下方占用输入。
+            blocked = cv2.bitwise_or(blocked, brass_mask)
         blocked = cv2.dilate(blocked, np.ones((int(match['occlusion_dilate_px']),)*2, 'uint8'))
         valid_image = np.full(bgr.shape[:2], 255, 'uint8')
         candidates = []
@@ -231,10 +241,13 @@ class TrayObserver:
         result.orientation_ok, result.pose = True, pose
         pose.used = ['tray_slot_template']
         metal = self._warp(metal_mask, pose, True)>0
+        brass = self._warp(brass_mask, pose, True)>0 if brass_mask is not None else None
+        occupied_evidence = metal | brass if evidence == 'metal_or_brass' else metal
         hand = self._warp(glove, pose, True)>0
         thresholds = self.settings['occupancy']
         for sid, mask in self.slot_masks.items():
-            coverage, occlusion = float(metal[mask].mean()), float(hand[mask].mean())
+            coverage = float(occupied_evidence[mask].mean())
+            occlusion = float(hand[mask].mean())
             if occlusion > thresholds['max_glove_fraction']:
                 state = 'unknown'
             elif coverage >= thresholds.get('present_fraction_by_slot', {}).get(sid, thresholds['present_fraction']):
@@ -243,7 +256,10 @@ class TrayObserver:
                 state = 'empty'
             else:
                 state = 'unknown'
-            result.slots[sid] = {'state': state, 'metal_fraction': coverage, 'glove_fraction': occlusion}
+            result.slots[sid] = {'state': state, 'metal_fraction': float(metal[mask].mean()),
+                                 'brass_fraction': float(brass[mask].mean()) if brass is not None else None,
+                                 'occupancy_fraction': coverage, 'evidence': evidence,
+                                 'glove_fraction': occlusion}
         states = [row['state'] for row in result.slots.values()]
         if 'unknown' in states:
             result.reason = '存在遮挡或占用证据处于不确定带'
