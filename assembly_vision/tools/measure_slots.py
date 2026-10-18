@@ -104,7 +104,8 @@ def main() -> int:
     #   把零件识别和面积测量全带偏。见 config/workpiece.yaml 的 work_roi_margin_mm。
     from assemvision.core.checks import Qualifier as _Q
     _q = _Q(wp, tray, cal)
-    src = make_source(cam, "uvc", None)
+    # ★ 来源由正式配置决定，不能写死 uvc 绕过 D435 的 SDK 取流。
+    src = make_source(cam, None, None)
     src.open()
     if hasattr(src, "apply_locked_controls"):
         src.apply_locked_controls()          # type: ignore[attr-defined]

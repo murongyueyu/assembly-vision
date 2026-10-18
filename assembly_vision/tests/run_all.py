@@ -31,7 +31,8 @@ for _stream in (sys.stdout, sys.stderr):
 MODULES = ["test_features", "test_segment", "test_d435_source", "test_polar",
            "test_fsm", "test_part_id", "test_part_id_tol", "test_tray_pose",
            "test_work_roi", "test_size_gate", "test_assembly", "test_ui_renderer",
-           "test_tracker", "test_tracking_e2e", "test_tracking_roi", "test_part_dataset", "test_depth"]
+           "test_tracker", "test_tracking_e2e", "test_tracking_roi", "test_part_dataset", "test_depth",
+           "test_tray_geometry"]
 # ★ 三个追踪相关模块的分工（2026-10）：
 #     `test_tracker`       —— core 的**单元**覆盖（遮挡三档 / 身份余量 / 形状冻结 /
 #                            判丢 / 防幽灵 / 最优认领 / 拿走放回），用自造 Blob，很快。

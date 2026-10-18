@@ -133,11 +133,11 @@ class Qualifier:
 
         ★ 直接用 c3 单应把料盘四角投出来算 —— 不需要额外标定。
         """
+        size = np.asarray(self.cfg.get("tray.size", [160.0, 160.0]), dtype=float)
         quad = self.tray.mm_to_px(
-            np.array([[0.0, 0.0], [160.0, 0.0], [160.0, 160.0], [0.0, 160.0]]),
-            scale)
-        cx = float(quad[:, 0].mean())
-        cy = float(quad[:, 1].mean())
+            np.array([[0.0, 0.0], [size[0], 0.0], size, [0.0, size[1]]]), scale)
+        # ★ C几何配套：透视下盘中心的投影不等于四角像素的平均。
+        cx, cy = self.tray.mm_to_px((size / 2.0).reshape(1, 2), scale)[0]
         side = float((np.linalg.norm(quad[1] - quad[0])
                       + np.linalg.norm(quad[2] - quad[1])) / 2.0)
         return (cx, cy), side
@@ -164,7 +164,8 @@ class Qualifier:
         pose = pose_from_tray_detect(
             det, (ncx, ncy), nside, self.tray.mm_per_px(scale),
             nominal_angle_deg=float(cfg.get("nominal_angle_deg", det.angle_deg)),
-            use_scale=bool(cfg.get("use_scale", False)))
+            use_scale=bool(cfg.get("use_scale", False)),
+            pixel_to_mm=lambda points: self.tray.px_to_mm(points, scale))
         return det, pose
 
     def detect_outline_pose(self, bgr, scale: float = 1.0):

@@ -151,6 +151,7 @@ def apply_pose_to_slot(slot: dict, pose: TrayPose) -> dict:
     c = np.asarray(slot.get("center", [0.0, 0.0]), dtype=np.float64)
     out["center"] = [float(v) for v in pose.apply(c.reshape(1, 2))[0]]
     if str(slot.get("type", "circle")) != "circle":
-        out["angle_deg"] = float(slot.get("angle_deg", 0.0)) + pose.theta_deg
+        # ★ 长轴角按X右/Y下定义，须与TrayPose.R的正角取相反符号。
+        out["angle_deg"] = float(slot.get("angle_deg", 0.0)) - pose.theta_deg
     out["_pose_corrected"] = True
     return out

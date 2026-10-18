@@ -194,9 +194,11 @@ def main() -> int:
     check(abs(float(gate_on.get("max_diam_mm", 0)) - maxd) < 1e-6,
           "闸门用的是配置里的上限 %.0fmm" % maxd)
     check(r_on.brass_mask[cen[1], cen[0]] == 0, "假木桌中心**不再**是黄铜了")
-    check(float(gate_on.get("dropped_px", 0)) >= 0.9 * blob_off.area_px,
-          "被剔除的像素数 ≈ 那块木桌的面积（%.0f / %.0f）"
-          % (gate_on.get("dropped_px", 0), blob_off.area_px))
+    # ★ C几何夹具更新后，补全连通域可能大于实际画入的木桌；
+    #   尺寸闸门在补全前执行，应与已数出的木桌真值像素比较。
+    check(float(gate_on.get("dropped_px", 0)) >= 0.9 * got_area,
+          "被剔除的像素数 ≈ 已画木桌的真实面积（%.0f / %.0f）"
+          % (gate_on.get("dropped_px", 0), got_area))
     d_on = max((_diam_mm(b.area_px, mmpp) for b in r_on.brass_blobs), default=0.0)
     print("   闸门后最大块的等效直径 %.0fmm（上限 %.0fmm）" % (d_on, maxd))
     check(d_on <= maxd + 1e-6, "闸门后**所有** brass blobs 都在上限以内")

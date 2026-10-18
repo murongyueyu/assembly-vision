@@ -126,7 +126,7 @@ def main() -> int:
     print("   胶囊槽 angle %.0f -> %.0f   center %s -> %s"
           % (caps["angle_deg"], k2["angle_deg"], caps["center"],
              [round(v, 1) for v in k2["center"]]))
-    check(abs(k2["angle_deg"] - (-44.0 + 10.0)) < 1e-6, "胶囊槽朝向随料盘一起转")
+    check(abs(k2["angle_deg"] - (-44.0 - 10.0)) < 1e-6, "胶囊槽朝向与TrayPose旋转矩阵一致")
     check("angle_deg" not in c2 or c2.get("angle_deg") is None or
           c2.get("angle_deg") == circle.get("angle_deg"), "圆槽不受朝向影响")
     check(circle["center"] == [22.0, 132.0], "不修改原槽位字典（避免污染配置）")

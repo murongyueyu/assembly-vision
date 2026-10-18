@@ -58,20 +58,21 @@ POCKET = (34, 34, 34)             # 槽底
 # ★ 实测值来源：用 c3 单应把空料盘图正交化成 160x160mm 正视图（4 px/mm），
 #   再做凹陷检测拟合 minAreaRect。实测与零件名义尺寸交叉吻合：
 #     轮盘 Ø74.4 ↔ 槽 Ø75；底座 Ø59.3 ↔ 槽 Ø65；立柱长 85 ↔ 槽 91
-# ★ 实测布局（用户确认）：左上=轮盘 / 右上=立柱 / 左下=顶盖 / 右下=底座。
-#   旧值把四个槽的零件归属全搞错了（左上=立柱 …），导致覆盖率全错。
+# ★ 2026-10-18 C模块参考姿态（用户确认、空槽拟合）：
+#   左上=底座 / 右上=顶盖 / 左下=立柱 / 右下=轮盘；运行时料盘仍可移动。
+#   中心与长轴方向同步本轮workpiece.yaml，尺寸仍保留既有ROI/零件渲染口径。
 # ══════════════════════════════════════════════════════════════════════════
 SLOTS = {
-    "slot_wheel":  dict(kind="circle", center=(24.0, 53.0), diameter=75.0,
+    "slot_wheel":  dict(kind="circle", center=(120.7, 119.4), diameter=75.0,
                         part="P3_wheel"),
     # ★ 立柱：真实零件是约 85x15 的细杆，槽是 91x28 的胶囊（有富余）。
     #   早期把立柱画成 91x28（正好等于槽尺寸），结果**一旋转就超出槽口被截断**，
     #   形状变形 -> 特征识别失败（实测踩过：转 23°/45°/67°/203° 时认不出立柱）。
-    "slot_column": dict(kind="capsule", center=(105.0, 54.0), length=85.0,
-                        width=16.0, angle=-44.0, part="P2_column"),
-    "slot_cap":    dict(kind="circle", center=(22.0, 132.0), diameter=25.0,
+    "slot_column": dict(kind="capsule", center=(40.2, 119.6), length=85.0,
+                        width=16.0, angle=44.4, part="P2_column"),
+    "slot_cap":    dict(kind="circle", center=(120.3, 39.8), diameter=25.0,
                         part="P4_cap"),
-    "slot_base":   dict(kind="circle", center=(105.0, 130.0), diameter=65.0,
+    "slot_base":   dict(kind="circle", center=(40.1, 39.9), diameter=65.0,
                         part="P1_base"),
 }
 TRAY_SIZE = (160.0, 160.0)

@@ -32,7 +32,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -120,7 +120,8 @@ def detect_tray(bgr: np.ndarray,
 
 def pose_from_tray_detect(det: TrayDetect, nominal_center_px, nominal_side_px: float,
                           mm_per_px: float, nominal_angle_deg: float = 90.0,
-                          use_scale: bool = False) -> TrayPose:
+                          use_scale: bool = False,
+                          pixel_to_mm: Optional[Callable] = None) -> TrayPose:
     """把"检测到的料盘"换算成 tray-mm 坐标系下的刚体变换。
 
     参数
@@ -136,6 +137,8 @@ def pose_from_tray_detect(det: TrayDetect, nominal_center_px, nominal_side_px: f
         **只取"中心 + 朝向"更稳**：中心由整个连通域的质心决定，
         对边缘膨胀不敏感（对称膨胀时质心不动）。
         只有在确认"相机距离变了"的场合才开 use_scale。
+      pixel_to_mm         C标定逆映射（含当前scale）；有此输入时在同一平面
+        解中心/方向，不再使用局部GSD或use_scale近似。外轮廓仍有90°歧义。
 
     返回 TrayPose（在 **tray-mm** 坐标系里表达，与零件星座的结果可直接互换）
 
@@ -147,6 +150,22 @@ def pose_from_tray_detect(det: TrayDetect, nominal_center_px, nominal_side_px: f
         return TrayPose(ok=False)
     ncx, ncy = float(nominal_center_px[0]), float(nominal_center_px[1])
     cx, cy = det.center_px
+    if pixel_to_mm is not None:
+        # ★ 有单应时，先把中心和方向投回同一平面再解刚体；
+        #   不能把全视野的像素位移乘盘中心一个GSD，远距离移动会累积偏差。
+        ref_angle, now_angle = np.radians([nominal_angle_deg, det.angle_deg])
+        points = np.array([[ncx, ncy], [cx, cy],
+                           [ncx + np.cos(ref_angle), ncy + np.sin(ref_angle)],
+                           [cx + np.cos(now_angle), cy + np.sin(now_angle)]], dtype=float)
+        plane = np.asarray(pixel_to_mm(points), dtype=float).reshape(4, 2)
+        ref_axis, now_axis = plane[2] - plane[0], plane[3] - plane[1]
+        da = float(np.degrees(np.arctan2(now_axis[1], now_axis[0])
+                             - np.arctan2(ref_axis[1], ref_axis[0])))
+        da = (da + 45.0) % 90.0 - 45.0
+        pose = TrayPose(theta_deg=-da, used=["tray_outline_homography"], ok=True)
+        translation = plane[1] - pose.R @ plane[0]
+        pose.tx, pose.ty = map(float, translation)
+        return pose
     # 平移：像素差 -> mm，方向与 tray-mm 一致（x 右、y 下）
     k = float(mm_per_px)
     if use_scale and nominal_side_px > 1.0 and det.size_px[0] > 1.0:
@@ -162,5 +181,15 @@ def pose_from_tray_detect(det: TrayDetect, nominal_center_px, nominal_side_px: f
         da += 90.0
     # ★ y 轴向下，图像里的"逆时针"在 tray-mm 里是"顺时针"，取负以匹配 TrayPose.R
     theta = -da
-    return TrayPose(theta_deg=float(theta), tx=float(tx), ty=float(ty),
-                    n_used=0, residual_mm=0.0, used=["tray_outline"], ok=True)
+    pose = TrayPose(theta_deg=float(theta), n_used=0, residual_mm=0.0,
+                    used=["tray_outline"], ok=True)
+    # ★ 检测到的位移是【盘中心】的位移；TrayPose.apply却绕tray原点旋转。
+    #   必须加上 c-Rc，才能表达绕自身中心转动，避免旋转时整盘ROI被甩开。
+    #   本入口只有边长和单一GSD，参考中心以半边长换算，仍是局部尺度近似；
+    #   ★ 透视较大/跨视野长距离移动时须用独立角点复核，不能称精确单应更新。
+    half_mm = float(nominal_side_px) * float(mm_per_px) / 2.0
+    center_mm = np.array([half_mm, half_mm], dtype=np.float64)
+    offset = center_mm - pose.R @ center_mm
+    pose.tx = float(tx + offset[0])
+    pose.ty = float(ty + offset[1])
+    return pose

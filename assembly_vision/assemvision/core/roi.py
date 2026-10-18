@@ -147,6 +147,8 @@ class TrayMap:
         ★ center_override / angle_offset_deg 是给**料盘位姿补偿**用的：
           料盘被挪动或旋转后，用 tray_pose.estimate_pose() 解出刚体变换，
           再把每个槽的中心/朝向改到"当前料盘坐标系"下的实际位置。
+          angle_offset_deg遵循TrayPose.theta_deg（正为图像逆时针），
+          与槽长轴角的符号相反，不是直接加到angle_deg。
           ★ 必须在 **mm 空间**里改中心再映射到像素 ——
             透视投影下"先平移 mm 再投影"与"投影后平移像素"并不等价。
         """
@@ -157,7 +159,8 @@ class TrayMap:
             return circle_polygon(center, s["diameter"], m)
         if s.get("type") == "capsule":
             return capsule_polygon(center, s["length"], s["width"],
-                                   float(s.get("angle_deg", 0.0)) + float(angle_offset_deg), m)
+                                   # ★ TrayPose正角为图像逆时针，槽长轴角的正角却为顺时针。
+                                   float(s.get("angle_deg", 0.0)) - float(angle_offset_deg), m)
         raise ValueError("未知槽型 %r（应为 circle / capsule）" % s.get("type"))
 
     def slot_polygon_px(self, slot_id: str, scale: float = 1.0,
