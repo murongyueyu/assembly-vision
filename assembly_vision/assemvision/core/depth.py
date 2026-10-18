@@ -34,7 +34,8 @@ class NativeHeightEstimator:
     """仅处理数组的 B 模块：显式桌面参考区 -> 三维平面 -> 法向高度。
 
     points_mm 必须来自 SDK 对同一对齐深度帧的反投影，不能套旧相机内参。
-    ★ 参考区只能包含裸桌面；目标区应选轮盘可见顶面小片，避开孔洞/背景/手。
+    ★ 参考区只能包含裸桌面；目标区选约定表面的同一小片，避开孔洞/背景/手。
+    正常装配也可能倾斜；局部代表高度不能当整片轮盘统一高度。
     """
 
     def __init__(self, cfg: Config):
@@ -128,7 +129,7 @@ class NativeHeightEstimator:
         spread = float(np.percentile(heights, 90) - np.percentile(heights, 10))
         result["height_spread_mm"] = spread
         if spread > self.spread_limit:
-            result["reason"] = "目标高度散布超限，请避开孔洞、背景和手"
+            result["reason"] = "目标高度散布超限，请缩小同一表面测区并避开孔洞、背景和手"
             return result
         result.update(ok=True, height_mm=float(np.median(heights)), reason="ok")
         return result

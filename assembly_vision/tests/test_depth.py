@@ -57,6 +57,20 @@ def main():
     result = estimator.measure(xyz, ref, target)
     check(result["ok"] and abs(result["height_mm"] - 35) < .001,
           "倾斜桌面法向高度35mm准确，目标不参与平面拟合")
+    # 正常工件本身也可能倾斜，不能把所有目标高度梯度都当成错误。
+    tilted = xyz.copy()
+    small = rectangle_mask(target.shape, [65, 30, 8, 8])
+    vv, uu = np.mgrid[:80, :100]
+    rx, ry = (uu-50)/110., (vv-40)/110.
+    normal = np.array([-.2, .15, 1.])
+    norm = np.linalg.norm(normal)
+    normal /= norm
+    z = (440/norm-35)/(normal[0]*rx + normal[1]*ry + normal[2] + .2*rx)
+    tilted[small] = np.stack((rx*z, ry*z, z), axis=-1)[small]
+    answer = 35 + .2*tilted[..., 0][small]
+    result = estimator.measure(tilted, ref, small)
+    check(result["ok"] and abs(result["height_mm"] - float(np.median(answer))) < .001,
+          "倾斜工件的小测区输出局部代表高度，不要求目标水平")
     noisy = xyz.copy()
     ids = np.argwhere(ref)[::15]
     noisy[ids[:, 0], ids[:, 1], 2] += 50
@@ -208,6 +222,7 @@ def test_calibration_workflow():
         args = SimpleNamespace(native_depth="calibrate", out=str(folder / "full"),
                                camera=str(ROOT / "config/camera.yaml"), depth_policy=str(policy),
                                frames=3, no_preview=False, native_label="full", native_reference="")
+        args.measurement_surface = "cap_region"
         with patch("assemvision.sources.d435.RealSenseSource", Source), \
              patch("cv2.selectROI", side_effect=[(5, 5, 35, 65), (65, 30, 20, 20)]), \
              patch("cv2.destroyAllWindows"), patch("cv2.imshow"), patch("cv2.waitKey", return_value=-1):
@@ -222,12 +237,19 @@ def test_calibration_workflow():
             normal /= np.linalg.norm(normal)
             current[0][target] += 30 * normal
             args.native_depth, args.native_reference = "check", str(runtime)
-            args.out, args.no_preview, args.native_label = str(folder / "missing"), True, "missing-column"
-            check(c5.run_native_depth(args) == 0, "c5独立检查复用同设备ROI和基线")
+            args.out, args.no_preview, args.native_label = str(folder / "missing"), False, "missing-column"
+            args.reselect_target = True
+            with patch("cv2.selectROI", return_value=(65, 30, 20, 20)):
+                check(c5.run_native_depth(args) == 0, "c5独立检查允许手动重定位相同物理表面")
             report = json.loads((folder / "missing/report.json").read_text(encoding="utf-8"))
             check(report["height_matches_baseline"] is False and report["label"] == "missing-column",
                   "缺立柱高度偏差记为不符合，场景标签单独保留")
+            check(report["target_selection"] == "manual_reselection"
+                  and report["measurement_surface"] == "cap_region"
+                  and load_config(str(runtime)).get("native_depth.baseline_height_mm") == saved.get("native_depth.baseline_height_mm"),
+                  "人工重选记录来源，不改原基线")
             args.out = str(folder / "failed")
+            args.reselect_target, args.no_preview = False, True
             current[0] = np.full_like(xyz, np.nan)
             check(c5.run_native_depth(args) == 1 and not (folder / "failed/camera.native-depth.json").exists(),
                   "坏深度不生成基线且退出失败")

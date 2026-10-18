@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """c5 装配位基线 + 辐条环带自动扫优。
 
+B模块原生模式独立运行，不使用旧单应、不执行辐条扫描：
+    --native-depth calibrate --measurement-surface cap_region --out 新目录
+    --native-depth check --native-reference 候选配置 --reselect-target --out 新目录
+产生独立运行配置和报告，surface区分轮盘金属/顶盖测点；不把顶盖高度称为轮盘顶面。
+
 产出（写进 calibration.yaml）
     assembly.wheel_height_mm        立柱装好时轮盘的高度基线（深度）
     assembly.base_height_mm         只装底座时中心的高度（用于深度判立柱）
@@ -110,6 +115,7 @@ def run_native_depth(args):
         cam = Config(copy.deepcopy(cam.data))
         policy = load_config(args.depth_policy or str(root / "config/depth_d435.yaml"))
         cam.set("native_depth", copy.deepcopy(policy.get("native_depth")))
+        cam.set("native_depth.measurement_surface", getattr(args, "measurement_surface", None) or "wheel_patch")
     if cam.get("source", "") != "d435":
         raise ValueError("原生深度模式仅支持 D435")
     cam.set("depth.enabled", True)
@@ -143,15 +149,23 @@ def run_native_depth(args):
             raise RuntimeError("预热后仍没有同步彩色和原生深度")
         if args.native_depth == "calibrate":
             if args.no_preview:
-                raise ValueError("首次原生标定必须可视选择桌面和轮盘顶面区域")
-            print("先选裸桌面矩形（避开料盘、工件、手），回车确认；再选轮盘可见顶面小片（避开孔洞），回车确认。")
+                raise ValueError("首次原生标定必须可视选择桌面和被测表面区域")
+            print("先选裸桌面矩形（避开料盘、工件、手），回车确认；随后选择约定的测量表面。")
             reference = list(map(int, cv2.selectROI("B depth: TABLE only", first.left_full, False, False)))
-            target = list(map(int, cv2.selectROI("B depth: WHEEL top patch", first.left_full, False, False)))
-            cv2.destroyAllWindows()
             cam.set("native_depth.reference_rect", reference)
-            cam.set("native_depth.target_rect", target)
             cam.set("native_depth.profile", first.depth_profile)
+        if args.native_depth == "calibrate" or getattr(args, "reselect_target", False):
+            if args.no_preview:
+                raise ValueError("重新选择测点需要窗口，请去掉 --no-preview")
+            surface = cam.get("native_depth.measurement_surface", "wheel_patch")
+            print("测量表面：%s；请选择同一物理表面的小片区域，避开边缘、孔洞和背景。" % surface)
+            target = list(map(int, cv2.selectROI("B depth: SAME surface patch", first.left_full, False, False)))
+            cam.set("native_depth.target_rect", target)
+            cv2.destroyAllWindows()
         report["profile"] = first.depth_profile
+        report["measurement_surface"] = cam.get("native_depth.measurement_surface", "wheel_patch")
+        report["target_selection"] = ("calibration" if args.native_depth == "calibrate" else
+                                      "manual_reselection" if getattr(args, "reselect_target", False) else "inherited")
         report["reference_rect"] = cam.get("native_depth.reference_rect")
         report["target_rect"] = cam.get("native_depth.target_rect")
         heights = []
@@ -238,6 +252,10 @@ def main() -> int:
     ap.add_argument("--depth-policy", default="")
     ap.add_argument("--native-reference", default="", help="check 使用的 camera.native-depth.json")
     ap.add_argument("--native-label", choices=("full", "missing-column", "base", "other"), default="full")
+    ap.add_argument("--measurement-surface", choices=("wheel_patch", "cap_region"), default=None,
+                    help="标定时声明测量轮盘金属或顶盖区域；check沿用原配置，不改变物理表面")
+    ap.add_argument("--reselect-target", action="store_true",
+                    help="独立check时手动重定位同一物理测点；不修改原基线和参考选区，不代表自动识别")
     # ★ 单帧诊断：跳过采集，直接把装配位的**中间量**打出来后退出。
     #   为什么要它：c5 第二步的产出（ring/hub/cap 覆盖率、辐条峰数）
     #   全是"黑盒数字" —— 一旦是 0 或 nan，完全看不出是
