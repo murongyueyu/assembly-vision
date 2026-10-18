@@ -1,0 +1,18 @@
+# B 模块独立配置。★ 质量阈值为初始工程门禁，必须以当前工位实测确认。
+# 不修改冻结的 camera.yaml，避免 A 模块模型来源 hash 失效。
+native_depth:
+  min_distance_mm: 150.0
+  max_distance_mm: 1000.0
+  min_points: 50
+  min_valid_ratio: 0.6
+  max_plane_residual_mm: 2.0
+  max_height_spread_mm: 8.0
+  max_fit_points: 5000
+  fit_iterations: 5
+  warmup_frames: 30
+  sample_frames: 30
+  max_sample_attempts: 150
+  max_temporal_spread_mm: 4.0
+  min_baseline_height_mm: 5.0
+  height_tolerance_mm: 15.0
+  max_age_s: 2.0

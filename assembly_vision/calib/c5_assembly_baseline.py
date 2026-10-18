@@ -22,6 +22,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import copy
+import json
+import time
+from pathlib import Path
 
 import numpy as np
 
@@ -32,6 +36,9 @@ from _util import (PREVIEW_WIN_NAME, ask, ask_or_preview, grab_full,  # noqa: E4
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from assemvision.core.checks import Qualifier                          # noqa: E402
 from assemvision.core.depth import DepthEstimator                      # noqa: E402
+from assemvision.core.depth import NativeHeightEstimator, compare_native_height  # noqa: E402
+from assemvision.config import Config, load_config                       # noqa: E402
+from assemvision.imgio import imwrite_safe                               # noqa: E402
 from assemvision.core.polar import count_peaks, polar_profile           # noqa: E402
 from assemvision.core.roi import circle_polygon, polygon_mask, TrayMap  # noqa: E402
 from assemvision.core.segment import Segmenter                          # noqa: E402
@@ -84,6 +91,139 @@ def sweep_band(mask, center_px, mmpp: float, required: int = 8,
     return best or {}
 
 
+def run_native_depth(args):
+    """B 模块原生深度专用模式；不读旧单应、不覆盖正式相机和 c5 基线。"""
+    from assemvision.sources.d435 import RealSenseSource
+    import cv2
+    root = Path(__file__).resolve().parents[1]
+    if not args.out:
+        raise ValueError("原生深度模式必须用 --out 指定一个新的报告目录")
+    folder = Path(args.out).resolve()
+    if folder.exists():
+        raise FileExistsError("报告目录已存在，请换名称保留原证据")
+    if args.native_depth == "check":
+        if not args.native_reference:
+            raise ValueError("check 必须传 --native-reference 指向原生深度运行配置")
+        cam = load_config(args.native_reference)
+    else:
+        cam = load_config(args.camera or str(root / "config/camera.yaml"))
+        cam = Config(copy.deepcopy(cam.data))
+        policy = load_config(args.depth_policy or str(root / "config/depth_d435.yaml"))
+        cam.set("native_depth", copy.deepcopy(policy.get("native_depth")))
+    if cam.get("source", "") != "d435":
+        raise ValueError("原生深度模式仅支持 D435")
+    cam.set("depth.enabled", True)
+    cam.set("depth.backend", "realsense")
+    estimator = NativeHeightEstimator(cam)
+    if args.native_depth == "calibrate" and args.native_label != "full":
+        raise ValueError("高度基线必须采完整装配体，其他标签请用 check")
+    count = args.frames
+    if count < 2:
+        raise ValueError("原生深度稳定性检查至少需要两帧")
+    attempts = max(count, int(cam.get("native_depth.max_sample_attempts")))
+    src = RealSenseSource(cam)
+    folder.mkdir(parents=True, exist_ok=False)
+    report = dict(mode=args.native_depth, label=args.native_label, status="incomplete",
+                  measurements=[], height_mm=None, started_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    try:
+        src.open()
+        src.apply_locked_controls()
+        first = None
+        warmup = int(cam.get("native_depth.warmup_frames"))
+        warmed = 0
+        for _ in range(attempts + warmup):
+            frame = src.read(want_full=True)
+            if frame is None or frame.depth_points_mm is None:
+                continue
+            warmed += 1
+            if warmed > warmup:
+                first = frame
+                break
+        if first is None:
+            raise RuntimeError("预热后仍没有同步彩色和原生深度")
+        if args.native_depth == "calibrate":
+            if args.no_preview:
+                raise ValueError("首次原生标定必须可视选择桌面和轮盘顶面区域")
+            print("先选裸桌面矩形（避开料盘、工件、手），回车确认；再选轮盘可见顶面小片（避开孔洞），回车确认。")
+            reference = list(map(int, cv2.selectROI("B depth: TABLE only", first.left_full, False, False)))
+            target = list(map(int, cv2.selectROI("B depth: WHEEL top patch", first.left_full, False, False)))
+            cv2.destroyAllWindows()
+            cam.set("native_depth.reference_rect", reference)
+            cam.set("native_depth.target_rect", target)
+            cam.set("native_depth.profile", first.depth_profile)
+        report["profile"] = first.depth_profile
+        report["reference_rect"] = cam.get("native_depth.reference_rect")
+        report["target_rect"] = cam.get("native_depth.target_rect")
+        heights = []
+        for index in range(attempts):
+            # 标定选区可能耗时很久；首个样本也重新取帧，不把选区前旧图计入基线。
+            frame = src.read(want_full=True)
+            if frame is None:
+                report["measurements"].append(dict(ok=False, height_mm=None, reason="取帧失败"))
+                continue
+            begin = time.perf_counter()
+            result = estimator.measure_frame(frame)
+            result["algorithm_ms"] = (time.perf_counter() - begin) * 1000
+            result["index"] = frame.index
+            report["measurements"].append(result)
+            if result["ok"]:
+                heights.append(result["height_mm"])
+            # 保存首帧及最后一个有效样本，原始深度/XYZ 可用于独立复算。
+            if index == 0 or (result["ok"] and len(heights) == count):
+                prefix = folder / ("sample_%03d" % index)
+                np.savez_compressed(str(prefix) + ".npz", depth_mm=frame.depth_mm,
+                                    points_mm=frame.depth_points_mm)
+                if not imwrite_safe(str(prefix) + ".png", frame.left_full):
+                    raise IOError("保存彩色证据失败：%s" % prefix)
+            if not args.no_preview:
+                vis = frame.left_full.copy()
+                for rect, color in ((report["reference_rect"], (0, 255, 0)), (report["target_rect"], (0, 0, 255))):
+                    x, y, w, h = rect
+                    cv2.rectangle(vis, (x, y), (x+w, y+h), color, 2)
+                text = "height %.2f mm" % result["height_mm"] if result["ok"] else "depth UNKNOWN"
+                cv2.putText(vis, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, .7, (255, 255, 255), 2)
+                cv2.imshow("B native depth", vis)
+                if cv2.waitKey(1) & 0xff in (27, ord("q")):
+                    raise RuntimeError("用户中止，未写入有效基线")
+            if len(heights) >= count:
+                break
+        if len(heights) < count:
+            raise RuntimeError("有效高度不足 %d 帧，请查看报告中的质量拒绝原因" % count)
+        spread = float(np.percentile(heights, 90) - np.percentile(heights, 10))
+        report["temporal_spread_mm"] = spread
+        if spread > float(cam.get("native_depth.max_temporal_spread_mm")):
+            raise RuntimeError("多帧高度不稳定，拒绝写入基线")
+        height = float(np.median(heights))
+        report["height_mm"] = height
+        if args.native_depth == "calibrate":
+            if height < float(cam.get("native_depth.min_baseline_height_mm")):
+                raise RuntimeError("完整装配高度过低，可能选到桌面或错误表面；拒绝基线")
+            cam.set("native_depth.baseline_height_mm", height)
+            # 数值稳定不代表选中了正确表面；原图与独立实测复核前不用于主流程终检。
+            cam.set("native_depth.baseline_accepted", False)
+            cam.set("native_depth.calibrated_at", report["started_at"])
+            cam.save(str(folder / "camera.native-depth.json"))
+            report["status"] = "baseline_recorded_pending_independent_check"
+        else:
+            report["height_matches_baseline"] = compare_native_height(
+                height, cam.get("native_depth.baseline_height_mm", None),
+                float(cam.get("native_depth.height_tolerance_mm")))
+            report["status"] = "measured"
+        print("原生深度高度 %.2f mm，多帧P90-P10 %.2f mm；标签 %s" % (height, spread, args.native_label))
+        print("标签为人工场景记录；高度符合基线不等于整个装配体合格。")
+        return 0
+    except Exception as exc:
+        report["error"] = str(exc)
+        print("原生深度未完成：%s" % exc)
+        return 1
+    finally:
+        src.close()
+        cv2.destroyAllWindows()
+        with (folder / "report.json").open("w", encoding="utf-8") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2, allow_nan=False)
+        print("报告已保存：%s" % (folder / "report.json"))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default=None)
@@ -93,6 +233,11 @@ def main() -> int:
     ap.add_argument("--frames", type=int, default=20)
     ap.add_argument("--no-depth", action="store_true")
     ap.add_argument("--out", default="")
+    ap.add_argument("--native-depth", choices=("calibrate", "check"), default=None,
+                    help="B 模块独立原生深度，不使用旧单应；--out 为新报告目录")
+    ap.add_argument("--depth-policy", default="")
+    ap.add_argument("--native-reference", default="", help="check 使用的 camera.native-depth.json")
+    ap.add_argument("--native-label", choices=("full", "missing-column", "base", "other"), default="full")
     # ★ 单帧诊断：跳过采集，直接把装配位的**中间量**打出来后退出。
     #   为什么要它：c5 第二步的产出（ring/hub/cap 覆盖率、辐条峰数）
     #   全是"黑盒数字" —— 一旦是 0 或 nan，完全看不出是
@@ -106,6 +251,8 @@ def main() -> int:
     ap.add_argument("--diag", action="store_true",
                     help="单帧诊断装配位：打印检出情况/半径/各半径带峰值后退出")
     args = ap.parse_args()
+    if args.native_depth:
+        return run_native_depth(args)
     preview = not args.no_preview
 
     cam, wp, calib = load_all(args.camera, args.workpiece)
@@ -422,13 +569,18 @@ def main() -> int:
                             print("   ★★ 高度 <5mm 可疑：轮盘顶面物理上应在台面上方 30~40mm。")
                             print("      说明拟合平面贴住了被测面 -> 立柱高度判据**永远不触发**。")
                             print("      见 docs/现状与交接.md 的 P0-2；这条基线暂不可当有效判据用。")
-                    if h is not None:
+                    minimum = float(load_config(args.depth_policy or str(
+                        Path(__file__).resolve().parents[1] / "config/depth_d435.yaml"
+                    )).get("native_depth.min_baseline_height_mm"))
+                    if h is not None and np.isfinite(h) and h >= minimum:
                         print(" 轮盘区域高度基线 = %.1f mm" % h)
                         # ★ 两处都写：checks.py 读的是 assembly.baseline.wheel_height_mm，
                         #   而本脚本历史上只写了 assembly.wheel_height_mm，
                         #   结果运行时段检读不到基线、立柱判据静默失效。
                         calib.set("assembly.baseline.wheel_height_mm", round(float(h), 2))
                         calib.set("assembly.wheel_height_mm", round(float(h), 2))
+                    else:
+                        print(" ★ 深度高度无效或过低，不写入基线；D435 请用 --native-depth calibrate")
         else:
             print(" 深度不可用（没有 c2 双目标定结果），跳过")
 

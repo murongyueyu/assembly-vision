@@ -13,11 +13,9 @@
 
 与工程其它层的分工（分层铁律）：
   * 本文件只回答"图从哪来"，与 `uvc_stereo.py` 同层，**不碰 core/、不碰界面**。
-  * ★ **深度不走这里**：D435 的深度由相机固件用出厂标定算好（不用 SGBM，
-    这是换机最大的收益），读取深度是 **B 模块**（core/depth.py）的活。
-    所以本层只给彩色：`right=None`、`right_full=None`（单目源）。
-    ⇒ 用 D435 时 `camera.yaml` 里 `depth.enabled` 应为 **false**，
-      否则 T5 会一直请求全分辨率帧却永远等不到右眼（白跑）。
+  * B 模块显式设置 depth.enabled=true 且 depth.backend=realsense 时，
+    同流采集原生深度并对齐彩色；仅 want_full 时生成毫米深度和 SDK 三维点。
+    默认仍只开彩色。right/right_full 始终 None，绝不把深度塞进右眼。
   * `pose_check` / 全分辨率抽检照常：见下面 `want_full` 的说明。
 
 分辨率与"全分辨率"：
@@ -130,6 +128,10 @@ class RealSenseSource(CameraSource):
         self.serial = str(cam_cfg.get("realsense.serial", "") or "").strip()
         # 等一帧最多多久（毫秒）。给短一点：相机掉了要能快点让上层发现。
         self.timeout_ms = int(cam_cfg.get("realsense.timeout_ms", 1000))
+        self.native_depth = (bool(cam_cfg.get("depth.enabled", False))
+                             and cam_cfg.get("depth.backend", "") == "realsense")
+        self.depth_scale = None
+        self.align = self.pointcloud = None
         # ★ 开流失败要重试：实测刚插拔/刚复位时 `query_devices()` 会抛
         #   `Mutex_TotalFailure` 或 HResult 0x800703e3，等一两秒重来就好（实录 §2.31）。
         #   ★ 但重试**救不了"相机没插"** —— 那种情况会明确报"看不到相机"。
@@ -188,9 +190,17 @@ class RealSenseSource(CameraSource):
             cfg.enable_device(self.dev_serial)
         # ★ 用 bgr8：SDK 直接给 BGR，省一次 cvtColor，也与 cap.read() 的输出一致
         cfg.enable_stream(rs.stream.color, self.w, self.h, rs.format.bgr8, self.fps)
+        if self.native_depth:
+            cfg.enable_stream(rs.stream.depth, self.w, self.h, rs.format.z16, self.fps)
         self.pipe = rs.pipeline()
         try:
             self.profile = self.pipe.start(cfg)
+            if self.native_depth:
+                self.depth_scale = float(self.profile.get_device().first_depth_sensor().get_depth_scale())
+                if not np.isfinite(self.depth_scale) or self.depth_scale <= 0:
+                    raise ValueError("设备 depth_scale 无效")
+                self.align = rs.align(rs.stream.color)
+                self.pointcloud = rs.pointcloud()
         except Exception as e:                                         # noqa: BLE001
             raise RuntimeError(
                 "开流失败（请求 %dx%d@%d）：%s\n"
@@ -268,14 +278,36 @@ class RealSenseSource(CameraSource):
                          "  ★ 链路 = %s，不是 3.x 时先换 USB 3 口" % self.usb
                          if not usb_is3(self.usb) else ""))
             return None
-        color = frames.get_color_frame() if frames else None
+        # 只在低频全分辨率请求时计算对齐与点云，不占用 A 模块默认彩色路径。
+        aligned = self.align.process(frames) if frames and self.native_depth and want_full else frames
+        color = aligned.get_color_frame() if aligned else None
         if not color:
             return None
         img = np.asanyarray(color.get_data())
         if img is None or img.size == 0:
             return None
         self._read_fail = 0
-        return self._make_frame(img, want_full)
+        frame = self._make_frame(img, want_full)
+        if self.native_depth and want_full:
+            depth = aligned.get_depth_frame()
+            if depth:
+                from ..core.depth import native_depth_mm
+                raw = np.asanyarray(depth.get_data())
+                if raw.shape != img.shape[:2]:
+                    raise ValueError("对齐后深度与彩色尺寸不一致")
+                frame.depth_mm = native_depth_mm(raw, self.depth_scale)
+                points = self.pointcloud.calculate(depth)
+                xyz = np.asanyarray(points.get_vertices()).view(np.float32).reshape(*raw.shape, 3).copy()
+                xyz *= 1000.0
+                xyz[~np.isfinite(frame.depth_mm)] = np.nan
+                frame.depth_points_mm = xyz
+                intr = depth.profile.as_video_stream_profile().get_intrinsics()
+                frame.depth_profile = dict(serial=self.dev_serial, width=int(intr.width),
+                                           height=int(intr.height), fx=float(intr.fx), fy=float(intr.fy),
+                                           ppx=float(intr.ppx), ppy=float(intr.ppy),
+                                           model=str(intr.model), coeffs=list(intr.coeffs),
+                                           depth_scale=self.depth_scale)
+        return frame
 
     def _make_frame(self, bgr: np.ndarray, want_full: bool) -> Frame:
         """组装 Frame。
@@ -301,6 +333,8 @@ class RealSenseSource(CameraSource):
                 pass                            # 已经停了/设备已拔，都属于正常
             self.pipe = None
         self.profile = None
+        self.align = self.pointcloud = None
+        self.depth_scale = None
 
     @property
     def name(self) -> str:

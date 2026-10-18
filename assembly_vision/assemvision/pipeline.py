@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import threading
+import copy
 import time
 from collections import deque
 from typing import Dict, List, Optional, Tuple
@@ -24,7 +25,7 @@ import numpy as np
 
 from .config import Config, load_config, merge
 from .core.checks import Qualifier
-from .core.depth import DepthEstimator
+from .core.depth import DepthEstimator, NativeHeightEstimator
 from .core.events import EventDetector
 from .core.fsm import Debouncer, PreconditionNet, evaluate_predicates
 from .core.pose_check import PoseChecker
@@ -55,6 +56,9 @@ class Shared:
         self.events: List[Event] = []
         self.pose_msg: str = ""
         self.wheel_height_mm: Optional[float] = None
+        self.depth_frame: Optional[Frame] = None
+        self.depth_updated_at = 0.0
+        self.depth_captured_at = 0.0
         self.stats: Dict[str, object] = {}
         self.asm_flags: Dict[str, object] = {}
         self.full_request: str = ""            # "" | "tray" | "assembly"
@@ -71,6 +75,11 @@ class Pipeline:
         self.wp = wp_cfg
         self.calib = calib
         self.sh = Shared()
+        self.native_depth = None
+        self._depth_index = -1
+        if (bool(cam_cfg.get("depth.enabled", False))
+                and cam_cfg.get("depth.backend", "") == "realsense"):
+            self.native_depth = NativeHeightEstimator(cam_cfg)
 
         # ── 组装各模块 ──
         H = None
@@ -84,7 +93,17 @@ class Pipeline:
         self.tray = TrayMap(wp_cfg, homography=H, ref_scale=ref_scale,
                             px_per_mm=1.0, origin_px=(0.0, 0.0))
         self.segmenter = Segmenter(wp_cfg)
-        self.qualifier = Qualifier(wp_cfg, self.tray, calib)
+        qualifier_cfg = wp_cfg
+        if self.native_depth is not None:
+            # B 接口：判据实际读取 workpiece 的 assembly 字段，不能只写 calib。
+            # 只覆盖内存副本的高度基线/容差，不改变正式 YAML 和其他判据。
+            qualifier_cfg = Config(copy.deepcopy(wp_cfg.data))
+            height = (cam_cfg.get("native_depth.baseline_height_mm", None)
+                      if cam_cfg.get("native_depth.baseline_accepted", False) else None)
+            qualifier_cfg.set("assembly.baseline.wheel_height_mm", height)
+            qualifier_cfg.set("assembly.wheel_height_mm", height)
+            qualifier_cfg.set("check.column.wheel_height_tol_mm", cam_cfg.get("native_depth.height_tolerance_mm"))
+        self.qualifier = Qualifier(qualifier_cfg, self.tray, calib)
         self.net = PreconditionNet(wp_cfg,
                                    timeout_s=float(wp_cfg.get("ui.step_timeout_s", 15.0)))
         # 去抖：默认按"连续 N 帧"。★ 低帧率下必须改成按时间 ——
@@ -107,7 +126,7 @@ class Pipeline:
         self.source = make_source(cam_cfg, source_override, path_override)
 
         self.depth: Optional[DepthEstimator] = None
-        if bool(cam_cfg.get("depth.enabled", True)):
+        if bool(cam_cfg.get("depth.enabled", True)) and self.native_depth is None:
             self.depth = DepthEstimator(cam_cfg, calib)
         self.pose = PoseChecker(cam_cfg, wp_cfg, calib)
 
@@ -187,6 +206,9 @@ class Pipeline:
                 self._fps_t = now
             with self.sh.lock:
                 self.sh.frame_small = f
+                if want and self.native_depth is not None:
+                    self.sh.depth_frame = f
+                    self.sh.depth_captured_at = time.monotonic()
                 if want and f.left_full is not None:
                     self.sh.frame_full_left = f.left_full
                     self.sh.frame_full_right = f.right_full
@@ -283,13 +305,16 @@ class Pipeline:
             self.tracker.update(seg.brass_blobs, ts=f.ts)
 
             # 装配位布尔量：流程判断一律判"装配位上有没有"，不判料盘槽里有没有
-            with self.sh.lock:
-                wh = self.sh.wheel_height_mm
+            wh = self._current_height()
             col_depth = None
             if wh is not None:
                 asm_cfg = self.wp.get("assembly", {}) or {}
                 base_h = float((asm_cfg.get("baseline", {}) or {}).get("base_height_mm", 5.0))
-                col_depth = bool(wh > (base_h + 30.0))
+                if self.native_depth is not None:
+                    threshold = self.cam.get("native_depth.column_threshold_mm", None)
+                    col_depth = None if threshold is None else bool(wh > float(threshold))
+                else:
+                    col_depth = bool(wh > (base_h + 30.0))
             # ★★ 必须传 pose：`work_roi_mask()` 里装配位是**跟着位姿修正的**，
             #   如果这里不传，就会出现"ROI 跟着料盘走了、判定用的圈没走"——
             #   圈住的和判的不是同一个地方（实测踩过，见 checks.assembly_polygon_px）。
@@ -352,8 +377,7 @@ class Pipeline:
                                          want_features=False,
                                          # ★ mm_per_px 同理（尺寸闸门 + metal 掩膜裁剪）
                                          mm_per_px=self.tray.mm_per_px(1.0))
-        with self.sh.lock:
-            wh = self.sh.wheel_height_mm
+        wh = self._current_height()
         # ★ 同样要传 pose（理由见 assembly_flags 那处注释）
         asm = self.qualifier.check_assembly(seg_full, scale=1.0, wheel_height_mm=wh,
                                             pose=self._last_pose)
@@ -374,7 +398,7 @@ class Pipeline:
             if now - self._pose_ts >= p_every:
                 self._pose_ts = now
                 self._do_pose()
-            if self.depth is not None and self.depth.ready and now - self._wheel_ts >= d_every:
+            if (self.native_depth is not None or (self.depth is not None and self.depth.ready)) and now - self._wheel_ts >= d_every:
                 self._wheel_ts = now
                 self._do_depth()
             time.sleep(0.05)
@@ -392,6 +416,25 @@ class Pipeline:
             self.sh.stats["位姿"] = "OK" if st.ok else "异常"
 
     def _do_depth(self) -> None:
+        if self.native_depth is not None:
+            with self.sh.lock:
+                f = self.sh.depth_frame
+                captured_at = self.sh.depth_captured_at
+                if not self.sh.full_request:
+                    self.sh.full_request = "depth"
+            if f is None or f.index == self._depth_index:
+                return
+            self._depth_index = f.index
+            try:
+                result = self.native_depth.measure_frame(f)
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                result = dict(ok=False, height_mm=None, reason=str(exc))
+            with self.sh.lock:
+                self.sh.wheel_height_mm = result["height_mm"] if result["ok"] else None
+                self.sh.depth_updated_at = captured_at
+                self.sh.stats["深度状态"] = result["reason"]
+                self.sh.stats["轮盘高度"] = ("%.1fmm" % result["height_mm"] if result["ok"] else "未知")
+            return
         with self.sh.lock:
             lf = self.sh.frame_full_left
             rf = self.sh.frame_full_right
@@ -420,6 +463,16 @@ class Pipeline:
             if h is not None:
                 self.sh.stats["轮盘高度"] = "%.1fmm" % h
 
+    def _current_height(self):
+        """B 接口：深度失效或过期必须为未知，不能沿用旧高度。"""
+        with self.sh.lock:
+            if self.native_depth is not None:
+                age = time.monotonic() - self.sh.depth_updated_at
+                if age > float(self.cam.get("native_depth.max_age_s")):
+                    self.sh.stats["轮盘高度"] = "未知（深度过期）"
+                    return None
+            return self.sh.wheel_height_mm
+
     # ══════════════════════════════════════════════════════════
     # 给界面调用的动作（快捷键：空格 / R）
     # ══════════════════════════════════════════════════════════
@@ -441,6 +494,8 @@ class Pipeline:
             self.sh.events = []
             self.sh.verdict = Verdict()
             self.sh.wheel_height_mm = None
+            self.sh.depth_frame = None
+            self.sh.depth_updated_at = 0.0
         self._inspect_waiting = False
         print("[pipeline] 流程已复位")
 

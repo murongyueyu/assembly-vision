@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""低频深度：只在终检时用一次，判「立柱装没装」。
+"""B 模块：D435 原生深度/三维法向高度，以及保留的旧双目兼容算法。
+
+当前 D435 使用 NativeHeightEstimator，显式选择裸桌面参考区和目标顶面区。
+以下 B=120mm、视差和 work_scale 的说明仅适用于旧 HBV 双目路径。
 
 B=120mm 长基线 → 精度好，但近距离视差很大：
     1280x960 下 30cm 处视差约 395 px，超出 StereoBM 的 256 上限
@@ -16,6 +19,142 @@ import cv2
 import numpy as np
 
 from ..config import Config
+
+
+def native_depth_mm(raw: np.ndarray, meters_per_unit: float) -> np.ndarray:
+    """SDK Z16 -> 毫米；0、负数和非有限值始终表示无观测。"""
+    if raw.ndim != 2 or not np.isfinite(meters_per_unit) or meters_per_unit <= 0:
+        raise ValueError("原生深度必须是二维数组，depth_scale 必须为正数")
+    out = raw.astype(np.float32) * (1000.0 * meters_per_unit)
+    out[~np.isfinite(out) | (raw <= 0)] = np.nan
+    return out
+
+
+class NativeHeightEstimator:
+    """仅处理数组的 B 模块：显式桌面参考区 -> 三维平面 -> 法向高度。
+
+    points_mm 必须来自 SDK 对同一对齐深度帧的反投影，不能套旧相机内参。
+    ★ 参考区只能包含裸桌面；目标区应选轮盘可见顶面小片，避开孔洞/背景/手。
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.min_points = int(cfg.get("native_depth.min_points"))
+        self.min_ratio = float(cfg.get("native_depth.min_valid_ratio"))
+        self.min_z = float(cfg.get("native_depth.min_distance_mm"))
+        self.max_z = float(cfg.get("native_depth.max_distance_mm"))
+        self.residual_limit = float(cfg.get("native_depth.max_plane_residual_mm"))
+        self.spread_limit = float(cfg.get("native_depth.max_height_spread_mm"))
+        self.max_points = int(cfg.get("native_depth.max_fit_points"))
+        self.iterations = int(cfg.get("native_depth.fit_iterations"))
+        if (self.min_points < 3 or self.max_points < self.min_points
+                or not 0 < self.min_ratio <= 1 or self.min_z <= 0
+                or self.max_z <= self.min_z or self.residual_limit <= 0
+                or self.spread_limit <= 0 or self.iterations < 1):
+            raise ValueError("原生深度质量参数无效")
+
+    def measure_frame(self, frame):
+        """运行时绑定设备和对齐内参；缺少本机标定时拒用旧基线。"""
+        if frame is None or frame.depth_points_mm is None:
+            return dict(ok=False, height_mm=None, reason="本帧没有原生深度")
+        if frame.depth_profile != self.cfg.get("native_depth.profile", None):
+            return dict(ok=False, height_mm=None, reason="深度设备/内参与标定不匹配")
+        ref = self.cfg.get("native_depth.reference_rect", None)
+        target = self.cfg.get("native_depth.target_rect", None)
+        if ref is None or target is None:
+            return dict(ok=False, height_mm=None, reason="尚未选择桌面参考区和目标区")
+        shape = frame.depth_points_mm.shape[:2]
+        return self.measure(frame.depth_points_mm, rectangle_mask(shape, ref), rectangle_mask(shape, target))
+
+    def measure(self, points_mm, reference_mask, target_mask):
+        """失败返回 ok=False 和原因，绝不沿用上次高度。"""
+        result = dict(ok=False, height_mm=None, reason="")
+        xyz = np.asarray(points_mm)
+        ref, target = np.asarray(reference_mask, bool), np.asarray(target_mask, bool)
+        if xyz.ndim != 3 or xyz.shape[2] != 3 or ref.shape != xyz.shape[:2] or target.shape != ref.shape:
+            raise ValueError("三维点与参考/目标掩膜尺寸不一致")
+        if np.any(ref & target):
+            result["reason"] = "参考区与目标区重叠"
+            return result
+        valid = np.isfinite(xyz).all(axis=2) & (xyz[..., 2] >= self.min_z) & (xyz[..., 2] <= self.max_z)
+        for name, mask in (("reference", ref), ("target", target)):
+            count = int(np.count_nonzero(mask & valid))
+            ratio = count / max(1, int(mask.sum()))
+            result[name + "_points"] = count
+            result[name + "_valid_ratio"] = ratio
+            if count < self.min_points or ratio < self.min_ratio:
+                result["reason"] = name + " 有效深度不足"
+                return result
+        pts = xyz[ref & valid].astype(np.float64)
+        if len(pts) > self.max_points:
+            pts = pts[np.linspace(0, len(pts) - 1, self.max_points, dtype=int)]
+        original = pts.copy()
+        # Z = ax + by + c 是三维平面；不同于旧版 Z = au + bv + c。
+        # 显式参考区使工件不参与拟合，残差按法向毫米计。
+        for _ in range(self.iterations):
+            A = np.column_stack((pts[:, :2], np.ones(len(pts))))
+            abc, _, rank, _ = np.linalg.lstsq(A, pts[:, 2], rcond=None)
+            if rank < 3:
+                result["reason"] = "参考点共线，无法拟合桌面"
+                return result
+            normal = np.array([-abc[0], -abc[1], 1.0])
+            length = np.linalg.norm(normal)
+            normal /= length
+            offset = float(abc[2] / length)
+            residuals = original @ normal - offset
+            mad = float(np.median(np.abs(residuals - np.median(residuals))))
+            keep = np.abs(residuals - np.median(residuals)) <= max(self.residual_limit, 3.0 * mad)
+            if int(keep.sum()) < self.min_points or float(keep.mean()) < self.min_ratio:
+                result["reason"] = "桌面参考内点不足"
+                return result
+            pts = original[keep]
+        # 最后一次筛选后重新拟合，避免使用上一轮系数。
+        A = np.column_stack((pts[:, :2], np.ones(len(pts))))
+        abc, _, rank, _ = np.linalg.lstsq(A, pts[:, 2], rcond=None)
+        if rank < 3:
+            result["reason"] = "桌面参考退化"
+            return result
+        normal = np.array([-abc[0], -abc[1], 1.0])
+        length = np.linalg.norm(normal)
+        normal /= length
+        offset = float(abc[2] / length)
+        rms = float(np.sqrt(np.mean((pts @ normal - offset) ** 2)))
+        result.update(plane_normal=normal.tolist(), plane_offset_mm=offset,
+                      plane_rms_mm=rms, reference_inliers=int(len(pts)))
+        if rms > self.residual_limit:
+            result["reason"] = "桌面平面残差超限"
+            return result
+        heights = offset - xyz[target & valid].astype(np.float64) @ normal
+        spread = float(np.percentile(heights, 90) - np.percentile(heights, 10))
+        result["height_spread_mm"] = spread
+        if spread > self.spread_limit:
+            result["reason"] = "目标高度散布超限，请避开孔洞、背景和手"
+            return result
+        result.update(ok=True, height_mm=float(np.median(heights)), reason="ok")
+        return result
+
+
+def rectangle_mask(shape, rect):
+    """彩色全分辨率像素矩形 [x,y,w,h]；越界拒绝，避免静默裁剪。"""
+    if len(rect) != 4 or any(not np.isfinite(v) or int(v) != v for v in rect):
+        raise ValueError("ROI 必须为四个整数")
+    x, y, w, h = map(int, rect)
+    if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > shape[1] or y + h > shape[0]:
+        raise ValueError("ROI 越界或为空")
+    mask = np.zeros(shape[:2], bool)
+    mask[y:y+h, x:x+w] = True
+    return mask
+
+
+def compare_native_height(height_mm, baseline_mm, tolerance_mm):
+    """纯高度判据：None 表示未知，不能把空洞当作缺立柱。"""
+    if not np.isfinite(tolerance_mm) or tolerance_mm <= 0:
+        raise ValueError("高度容差必须为正数")
+    if height_mm is None or baseline_mm is None:
+        return None
+    if not np.isfinite(height_mm) or not np.isfinite(baseline_mm):
+        return None
+    return bool(abs(height_mm - baseline_mm) <= tolerance_mm)
 
 
 def _as_dist(d) -> np.ndarray:

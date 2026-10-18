@@ -33,6 +33,9 @@ class Frame:
     left_full: Optional[np.ndarray] = None   # BGR，全分辨率（可能为 None）
     right_full: Optional[np.ndarray] = None  # 全分辨率右眼（低频深度用）
     scale: float = 1.0                       # 实时图相对 left_full 的缩放比
+    depth_mm: Optional[np.ndarray] = None    # B：对齐彩色全分辨率，float32 mm，空洞 nan
+    depth_points_mm: Optional[np.ndarray] = None  # B：SDK 反投影 XYZ，H×W×3，mm
+    depth_profile: Optional[Dict[str, Any]] = None  # B：设备/内参来源，防止误用旧基线
 
     @property
     def size(self) -> Tuple[int, int]:
