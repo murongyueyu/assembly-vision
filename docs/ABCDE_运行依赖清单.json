@@ -1,0 +1,27 @@
+{
+  "revision": "rev.3y.1",
+  "baseline_head": "65cb3326f502920316813f8f26fd9ab617ead15a",
+  "scope": "同一D435与当前工位运行依赖，换设备/工位不得视为已验收标定",
+  "files": [
+    {
+      "path": "ai_测试工具/A轮盘碎孔/20261019/candidate_size_relaxed_01/model.json",
+      "sha256": "214991c9f31d99214d42466b94125242a56c998f599addea92ae66711f11e78a",
+      "bytes": 31090
+    },
+    {
+      "path": "ai_测试工具/A轮盘碎孔/20261019/candidate_size_relaxed_01/policy.json",
+      "sha256": "2af0b26d4969ced04bda10e1fcf670a6c31e276d83cf37465315c9a156e60266",
+      "bytes": 3651
+    },
+    {
+      "path": "assembly_vision/config/calibration.yaml",
+      "sha256": "451b368944c7c288ebbf05e66c2b53b883539f63a459254676b9498111bc9e3c",
+      "bytes": 13507
+    },
+    {
+      "path": "ai_测试工具/B模块深度/20261018_full_baseline_03/camera.native-depth.json",
+      "sha256": "be932cd53865d0abd224f0c2ffb7493c061316b87a34ab91a81d358a99888621",
+      "bytes": 3369
+    }
+  ]
+}

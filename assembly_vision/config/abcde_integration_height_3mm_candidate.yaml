@@ -1,0 +1,13 @@
+# ★ 2026-10-19用户新授权：高度容差最多3mm，紧固性交队友，本程序不实现。
+# 沿用原B基线数值/设备/质量门禁，只接受人工同帧顶盖表面的受控高度判定。
+sequence: process_sequence_size_candidate.yaml
+sequence_sha256: 444c0128dcb20fff07e7ea50e62749ea2298e4ef9f6057fa85af6080c56fbc2a
+native_reference: ../../ai_测试工具/B模块深度/20261018_full_baseline_03/camera.native-depth.json
+native_reference_sha256: be932cd53865d0abd224f0c2ffb7493c061316b87a34ab91a81d358a99888621
+association: manual_same_frame_cap_region
+height_assessment:
+  enabled: true
+  scope: manual_same_frame_cap_region
+  tolerance_mm: 3.0
+  max_tolerance_mm: 3.0
+  authorization: 用户指定容差最多3mm，仅高度项；紧固性由队友完成

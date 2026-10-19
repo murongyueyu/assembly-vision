@@ -46,6 +46,8 @@ def parse_args(argv=None):
                     help='显式D开工身份与槽位联检：config/prestart_check.yaml；不启动E')
     ap.add_argument('--process-sequence', default=None,
                     help='显式E取件顺序推定：config/process_sequence.yaml')
+    ap.add_argument('--integration', default=None,
+                    help='ABCDE集成候选：config/abcde_integration_candidate.yaml')
     return ap.parse_args(argv)
 
 
@@ -67,19 +69,26 @@ def main(argv=None) -> int:
                     tray_observer_path=_p(args.tray_observer) if args.tray_observer else None,
                     tray_observer_runtime_path=_p(args.tray_observer_runtime),
                     prestart_check_path=_p(args.prestart_check) if args.prestart_check else None,
-                    process_sequence_path=_p(args.process_sequence) if args.process_sequence else None)
+                    process_sequence_path=_p(args.process_sequence) if args.process_sequence else None,
+                    integration_path=_p(args.integration) if args.integration else None)
     rc = 0
     renderer = None
     try:
         W, H = (int(v) for v in args.display.lower().split("x"))
         pipe.start()
         print("[app] 已启动：%s" % pipe.source.name)
-        if pipe.e_mode:
+        if pipe.integration is not None:
+            print('[app] ABCDE集成；四步后按i人工选同帧参考区和顶盖测区；高度判定=%s' %
+                  ('受控±%.1fmm' % pipe.integration.height_tolerance
+                   if pipe.integration.height_accepted else '基线未接受'))
+        elif pipe.e_mode:
             print('[app] E取件顺序推定；未验证物理安装、紧固或高度')
         elif pipe.d_mode:
             print('[app] D开工身份/槽位联检；未启动工序、深度或终检')
         elif pipe.c_mode:
             print("[app] 独立C占用观察；模型=%s；未启用生产流程" % _p(args.tray_observer))
+        else:
+            print('[app] 当前为旧主流程兼容模式；ABCDE请显式选择 --integration config/abcde_integration_height_3mm_candidate.yaml')
         if args.no_ui:
             t_last = 0.0
             frames = 0
@@ -100,13 +109,13 @@ def main(argv=None) -> int:
                     break
         else:
             renderer = make_renderer(
-                args.renderer, window='E Pick Sequence' if pipe.e_mode else 'D Prestart Check' if pipe.d_mode else "C料盘占用观察" if pipe.c_mode else "装配流程检查",
+                args.renderer, window='ABCDE Integration' if pipe.integration is not None else 'E Pick Sequence' if pipe.e_mode else 'D Prestart Check' if pipe.d_mode else "C料盘占用观察" if pipe.c_mode else "装配流程检查",
                 fullscreen=not args.windowed, display=(W, H),
                 panel_ratio=float(wp.get("ui.panel_ratio", 0.20)),
                 font_path=str(wp.get("ui.font_path", "")),
                 colors=wp.get("ui.colors", None),
                 video_fps=int(wp.get("ui.video_fps", 30)),
-                actions={"reset": pipe.reset_process} if pipe.e_mode else {} if pipe.c_mode else {"inspect": pipe.request_inspection,
+                actions={"reset": pipe.reset_process, "inspect": pipe.request_inspection} if pipe.integration is not None else {"reset": pipe.reset_process} if pipe.e_mode else {} if pipe.c_mode else {"inspect": pipe.request_inspection,
                                                 "reset": pipe.reset_process})
             rc = renderer.run(pipe.build_ui_state,
                               fps=int(wp.get("ui.video_fps", 30)),

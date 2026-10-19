@@ -75,13 +75,21 @@ class Pipeline:
                  tray_observer_path: Optional[str] = None,
                  tray_observer_runtime_path: Optional[str] = None,
                  prestart_check_path: Optional[str] = None,
-                 process_sequence_path: Optional[str] = None) -> None:
+                 process_sequence_path: Optional[str] = None,
+                 integration_path: Optional[str] = None) -> None:
         self.cam = cam_cfg
         self.wp = wp_cfg
         self.calib = calib
         self.sh = Shared()
         self.native_depth = None
         self._depth_index = -1
+        self.integration = None
+        if integration_path is not None:
+            if any(p is not None for p in (process_sequence_path, prestart_check_path, tray_observer_path)):
+                raise ValueError('ABCDE集成入口与独立C/D/E入口互斥')
+            from .integration import Integration
+            self.integration = Integration(integration_path, cam_cfg)
+            process_sequence_path = self.integration.sequence_path
         self.e_mode = process_sequence_path is not None
         if self.e_mode:
             self.sh.lock = threading.RLock()
@@ -126,7 +134,11 @@ class Pipeline:
             self.tray = self.observer.tray
             source_cfg = Config(copy.deepcopy(cam_cfg.data))
             # 只覆盖C来源的内存参数，不改正式相机控件/配置，也不启动深度流。
-            source_cfg.set("depth.enabled", False)
+            if self.integration is not None:
+                source_cfg = self.integration.camera
+                self.native_depth = self.integration.estimator
+            else:
+                source_cfg.set("depth.enabled", False)
             self.source = make_source(source_cfg, source_override, path_override)
             self.depth = None
             self._c_input = None
@@ -287,7 +299,7 @@ class Pipeline:
     def _c_acq_loop(self):
         try:
             while not self.sh.quit:
-                frame = self.source.read(want_full=False)
+                frame = self.source.read(want_full=self.integration is not None)
                 captured_at = time.monotonic()
                 if frame is None:
                     time.sleep(0.005)
@@ -295,6 +307,11 @@ class Pipeline:
                 # 所有权归本次采集，避免SDK或来源复用缓冲区改写待处理画面。
                 frame = copy.copy(frame)
                 frame.left = None if frame.left is None else frame.left.copy()
+                if self.integration is not None:
+                    frame.depth_mm = None if frame.depth_mm is None else frame.depth_mm.copy()
+                    frame.depth_points_mm = (None if frame.depth_points_mm is None
+                                             else frame.depth_points_mm.copy())
+                    frame.depth_profile = copy.deepcopy(frame.depth_profile)
                 with self.sh.lock:
                     self._c_input = (frame, captured_at)
         except Exception as exc:
@@ -386,6 +403,8 @@ class Pipeline:
                             tracking = (stamp, self.identity.tracker.tracks,
                                         polygons if observation.observed_current else {})
                         self.sequence.update(result, time.monotonic(), tracking=tracking)
+                        if self.integration is not None and len(self.sequence.done) != len(self.sequence.order):
+                            self.integration.reset()
                     self._d_snapshot = (frame, result, observation, polygons, audit)
         except Exception as exc:
             self._c_fail('D处理异常：' + str(exc), frame, captured_at)
@@ -463,7 +482,43 @@ class Pipeline:
             st.detail = verdict.detail + (st.detail[:-1] if not started else [])
             st.banner = verdict.title if verdict.level == ERROR else ''
             st.stats['流程已开工'] = '是' if started else '否'
+            if self.integration is not None:
+                self.integration.decorate(st, started)
         return st
+
+    def inspect_integration(self):
+        """UI主线程选冻结同帧测区；采集和流程窗口保持运行。"""
+        with self.sh.lock:
+            self.integration.reset()
+            frame, result, _, _, _ = self._d_current_snapshot()
+            if (frame is None or not self.sequence.started or len(self.sequence.done) != len(self.sequence.order)
+                    or time.monotonic() - result.stamp.captured_at > self.c_max_age_s):
+                self.integration.reason = '待测：需要当前有效观测及取件4/4'
+                return
+            generation = self._e_generation
+            stamp = result.stamp
+            # 帧对象已归本次采集所有，不用后续画面替换选区底图。
+        if frame.depth_points_mm is None:
+            self.integration.reason = '无法测量：本帧无原生深度'
+            return
+        rects = []
+        for name in ('Reference: bare green mat only', 'Target: current assembly CAP top only'):
+            window = '%s | frame %s | ENTER confirm / C cancel' % (name, frame.index)
+            rect = cv2.selectROI(window, frame.left, showCrosshair=True, fromCenter=False)
+            cv2.destroyWindow(window)
+            if rect[2] <= 0 or rect[3] <= 0:
+                self.integration.reason = '待测：人工选区已取消'
+                return
+            rects.append(rect)
+        with self.sh.lock:
+            if generation != self._e_generation or len(self.sequence.done) != len(self.sequence.order):
+                self.integration.reset()
+                return
+            try:
+                self.integration.measure(frame, stamp, *rects, generation)
+            except ValueError as exc:
+                self.integration.reset()
+                self.integration.reason = '无法测量：' + str(exc)
 
     def _c_loop(self):
         while not self.sh.quit:
@@ -803,6 +858,8 @@ class Pipeline:
     # ══════════════════════════════════════════════════════════
     def request_inspection(self, kind: str = "assembly") -> None:
         """手动触发一次全分辨率抽检（等操作者按空格，或演示时救场用）。"""
+        if self.integration is not None:
+            return self.inspect_integration()
         if self.c_mode:
             return
         with self.sh.lock:
@@ -820,6 +877,8 @@ class Pipeline:
                 from .core.checks import PrestartGate
                 self.d_gate = PrestartGate(self.d_expected, self.d_settings)
                 self._d_snapshot = None
+                if self.integration is not None:
+                    self.integration.reset()
             return
         if self.c_mode:
             return
