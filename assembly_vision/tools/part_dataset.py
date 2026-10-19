@@ -298,8 +298,10 @@ def segment_variant(image, wp, policy, variant):
                 kept.append(blob)
         blobs = kept
         result.detail["rejected_candidates"] = rejected
+    # ★ 仅 A 候选显式启用；旧模型未配置时保持 3px² 冻结语义，不填掩膜。
+    hole_min_area = policy.get("experiment.hole_min_area_px", 3.0)
     for blob in blobs:
-        blob.features = contour_features(blob.contour, mask)
+        blob.features = contour_features(blob.contour, mask, hole_min_area_px=hole_min_area)
     return mask, blobs, result
 
 

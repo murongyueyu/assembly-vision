@@ -162,14 +162,23 @@ def end_width_ratio(contour: np.ndarray, frac: float = 0.2) -> float:
     return float(hi_w / lo_w) if lo_w > 1e-6 else 1.0
 
 
-def contour_features(contour: np.ndarray, mask: Optional[np.ndarray] = None) -> Dict[str, float]:
-    """一次算出全部特征。数值单位是像素，比例类无量纲。"""
+def contour_features(contour: np.ndarray, mask: Optional[np.ndarray] = None,
+                     *, hole_min_area_px: float = 3.0) -> Dict[str, float]:
+    """一次算出全部特征；孔面积过滤仅影响计数，不修改掩膜。
+
+    默认保留冻结口径。A 独立候选可通过 policy 显式提供门槛；真实结构孔
+    仍保留于原掩膜，不能将此身份特征当作完整性或缺件判据。
+    """
+    if (isinstance(hole_min_area_px, (bool, str))
+            or not np.isscalar(hole_min_area_px)
+            or not np.isfinite(hole_min_area_px) or hole_min_area_px <= 0):
+        raise ValueError("孔面积门槛必须为有限正数")
     area = float(cv2.contourArea(contour))
     peri = float(cv2.arcLength(contour, True))
     rw, rh, ang = min_area_rect(contour)
     hull = cv2.convexHull(contour)
     hull_area = float(cv2.contourArea(hull))
-    holes = count_holes(contour, mask)
+    holes = count_holes(contour, mask, min_area_px=hole_min_area_px)
 
     return {
         "area_px": area,

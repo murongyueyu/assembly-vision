@@ -34,7 +34,7 @@ MODULES = ["test_features", "test_segment", "test_d435_source", "test_polar",
            "test_tracker", "test_tracking_e2e", "test_tracking_roi", "test_part_dataset", "test_depth",
            "test_tray_geometry", "test_tray_observer", "test_tray_observer_integration",
            "test_prestart_check", "test_prestart_integration", "test_process_sequence",
-           "test_process_integration"]
+           "test_process_integration", "test_wheel_holes"]
 # ★ 三个追踪相关模块的分工（2026-10）：
 #     `test_tracker`       —— core 的**单元**覆盖（遮挡三档 / 身份余量 / 形状冻结 /
 #                            判丢 / 防幽灵 / 最优认领 / 拿走放回），用自造 Blob，很快。
