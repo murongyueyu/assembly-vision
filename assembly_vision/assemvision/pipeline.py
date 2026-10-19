@@ -74,13 +74,25 @@ class Pipeline:
                  path_override: Optional[str] = None,
                  tray_observer_path: Optional[str] = None,
                  tray_observer_runtime_path: Optional[str] = None,
-                 prestart_check_path: Optional[str] = None) -> None:
+                 prestart_check_path: Optional[str] = None,
+                 process_sequence_path: Optional[str] = None) -> None:
         self.cam = cam_cfg
         self.wp = wp_cfg
         self.calib = calib
         self.sh = Shared()
         self.native_depth = None
         self._depth_index = -1
+        self.e_mode = process_sequence_path is not None
+        if self.e_mode:
+            self.sh.lock = threading.RLock()
+            self._e_generation = 0
+            if prestart_check_path is not None or tray_observer_path is not None:
+                raise ValueError('E入口与独立C/D入口互斥')
+            from .core.fsm import PickSequence
+            self.e_settings = load_config(process_sequence_path).data
+            self.sequence = PickSequence(wp_cfg, self.e_settings)
+            prestart_check_path = str((Path(process_sequence_path).resolve().parent /
+                                      self.e_settings['prestart']).resolve())
         self.d_mode = prestart_check_path is not None
         if self.d_mode and tray_observer_path is not None:
             raise ValueError('D开工模式与独立C观察模式互斥')
@@ -333,6 +345,7 @@ class Pipeline:
                 return False
             frame, captured_at = item
             self._c_last_index = frame.index
+            generation = self._e_generation if self.e_mode else None
         shape = frame.left.shape[:2] if frame.left is not None else (0, 0)
         stamp = EvidenceStamp(frame.index, captured_at, shape)
         observation, polygons, audit = None, {}, None
@@ -363,7 +376,11 @@ class Pipeline:
                                             stamp, stamp, time.monotonic(), self.d_settings)
             with self.sh.lock:
                 if not self.c_error:
+                    if self.e_mode and generation != self._e_generation:
+                        return True
                     result = self.d_gate.update(result, time.monotonic())
+                    if self.e_mode:
+                        self.sequence.update(result, time.monotonic())
                     self._d_snapshot = (frame, result, observation, polygons, audit)
         except Exception as exc:
             self._c_fail('D处理异常：' + str(exc), frame, captured_at)
@@ -380,11 +397,13 @@ class Pipeline:
             if self.c_error or not np.isfinite(age) or not 0 <= age <= self.c_max_age_s:
                 result = self.d_gate.invalidate(result.stamp, self.c_error or '观测过期')
                 self._d_snapshot = (frame, result, None, {}, None)
+                if self.e_mode:
+                    self.sequence.interrupt(result.reason)
                 return self._d_snapshot
             return self._d_snapshot
 
     def get_prestart_result(self):
-        """仅D开工信号；E尚未消费。读取时重新检查新鲜度，禁止沿用旧放行。"""
+        """D动态开工信号；E历史开工另行锁存。读取时禁止沿用旧放行。"""
         if not self.d_mode:
             raise RuntimeError('未启用D开工模式')
         return copy.deepcopy(self._d_current_snapshot()[1])
@@ -430,6 +449,15 @@ class Pipeline:
         st.source_name = self.source.name
         st.stats = {'帧号': result.stamp.index, '稳定帧': result.stable_frames,
                     '允许开始': '是' if result.allow_start else '否'}
+        if self.e_mode:
+            with self.sh.lock:
+                verdict = copy.deepcopy(self.sequence.verdict)
+                started = self.sequence.started
+            st.level, st.title = verdict.level, verdict.title
+            st.step, st.total = verdict.step, verdict.total
+            st.detail = verdict.detail + (st.detail[:-1] if not started else [])
+            st.banner = verdict.title if verdict.level == ERROR else ''
+            st.stats['流程已开工'] = '是' if started else '否'
         return st
 
     def _c_loop(self):
@@ -780,6 +808,14 @@ class Pipeline:
 
     def reset_process(self) -> None:
         """复位：清空装配状态记忆、事件与终检结果，等待下一次装配。"""
+        if self.e_mode:
+            with self.sh.lock:
+                self.sequence.reset()
+                self._e_generation += 1
+                from .core.checks import PrestartGate
+                self.d_gate = PrestartGate(self.d_expected, self.d_settings)
+                self._d_snapshot = None
+            return
         if self.c_mode:
             return
         self.net.reset()
@@ -799,6 +835,9 @@ class Pipeline:
     # UI 数据组装
     # ══════════════════════════════════════════════════════════
     def build_ui_state(self) -> UIState:
+        if self.e_mode:
+            with self.sh.lock:
+                return self._build_d_ui_state()
         if self.d_mode:
             return self._build_d_ui_state()
         if self.c_mode:

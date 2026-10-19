@@ -1,0 +1,14 @@
+# ★ E工程确认门槛，需真实四工序复测；不代表实际安装或紧固验收。
+prestart: prestart_check.yaml
+confirmation:
+  confirm_frames: 3
+  confirm_hold_s: 0.3
+  max_gap_s: 0.5
+  max_age_s: 1.0
+timeout_s: 15.0
+# 只绑定事件来源；名称、前置条件与效果读取冻结workpiece.operations。
+operations:
+  op1: slot_base
+  op2: slot_column
+  op3: slot_wheel
+  op4: slot_cap
