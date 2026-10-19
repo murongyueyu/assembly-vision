@@ -380,7 +380,12 @@ class Pipeline:
                         return True
                     result = self.d_gate.update(result, time.monotonic())
                     if self.e_mode:
-                        self.sequence.update(result, time.monotonic())
+                        # ★ E候选消费同帧实际A轨迹；部分遮挡可见跟随不等于零件消失。
+                        tracking = None
+                        if self.sequence.tracking is not None and audit is not None:
+                            tracking = (stamp, self.identity.tracker.tracks,
+                                        polygons if observation.observed_current else {})
+                        self.sequence.update(result, time.monotonic(), tracking=tracking)
                     self._d_snapshot = (frame, result, observation, polygons, audit)
         except Exception as exc:
             self._c_fail('D处理异常：' + str(exc), frame, captured_at)

@@ -14,6 +14,130 @@ from typing import Dict, List, Optional, Sequence
 from ..types import Event, SlotResult, SpokeResult
 
 
+class TrackingSlotEvidence:
+    """E专用：正常当前追踪离槽；不改变D结果，不把历史轮廓当可见证据。"""
+
+    def __init__(self, expected, settings, detector):
+        self.expected, self.detector = dict(expected), detector
+        self.margin = float(settings['min_outside_px'])
+        if not math.isfinite(self.margin) or self.margin <= 0:
+            raise ValueError('E离槽距离必须为有限正数')
+        self.reset()
+
+    def reset(self):
+        self.keys, self.references, self.departed = {}, {}, {}
+        self.last = None
+
+    def _clear_slot(self, sid):
+        self.keys.pop(sid, None)
+        self.departed.pop(sid, None)
+        self.detector.stable.pop(sid, None)
+        self.detector.pending.pop(sid, None)
+        self.detector.picked.discard(sid)
+
+    def project(self, result, now, tracking, done):
+        import copy
+        import cv2
+        import numpy as np
+        from .checks import PrestartSlot
+        projected = copy.deepcopy(result)
+        projected.allow_start = False
+        detector = self.detector
+        age = now - result.stamp.captured_at
+        if (tracking is None or tracking[0] != result.stamp or not math.isfinite(age)
+                or not 0 <= age <= detector.max_age):
+            self.reset()
+            projected.valid = False
+            projected.reason = 'E缺少同帧有效追踪来源'
+            return projected
+        # ★ C方向拒识与采集断档分开处理；只有当前可见A链可以跨C未知段延续。
+        last = self.last
+        if last is not None:
+            gap = result.stamp.captured_at - last[1]
+            repeated = result.stamp.index == last[0] and gap == 0
+            if not repeated and (result.stamp.index <= last[0] or not 0 < gap <= detector.max_gap):
+                self.reset()
+                self.last = (result.stamp.index, result.stamp.captured_at)
+                projected.valid = False
+                projected.reason = 'E追踪来源重复、倒退或断档'
+                return projected
+        self.last = (result.stamp.index, result.stamp.captured_at)
+        _, tracks, polygons = tracking
+        by_part = {}
+        for track in tracks:
+            if track.part_id:
+                by_part.setdefault(track.part_id, []).append(track)
+        visible = {}
+        for part, candidates in by_part.items():
+            if len(candidates) != 1:
+                continue
+            track = candidates[0]
+            if (track.state not in ('detected', 'tracked') or track.lost_frames != 0
+                    or track.detail.get('visible_observed') != 1.0 or track.contour is None):
+                continue
+            contour = np.asarray(track.contour)
+            if contour.size < 6 or not np.isfinite(contour).all():
+                continue
+            moments = cv2.moments(contour.astype(np.float32))
+            if moments['m00'] <= 0:
+                continue
+            center = (moments['m10']/moments['m00'], moments['m01']/moments['m00'])
+            visible[part] = (track, center)
+        projected.valid = True
+        projected.reason = ''
+        projected.slots = {}
+        for sid, part in self.expected.items():
+            current = visible.get(part)
+            state = 'missing' if sid in done else 'unknown'
+            reason = 'E等待当前可见追踪或可靠槽位'
+            if current is None:
+                if sid not in done:
+                    if sid in self.departed:
+                        # ★ 离槽已由当时正常当前追踪观察到；之后旋入底座不要求仍见单件。
+                        # 此处只用当前可靠空槽完成稳定确认，不把历史轮廓当当前位置。
+                        if sid in polygons and result.slots[sid].state == 'missing':
+                            state, reason = 'missing', 'E已观测追踪离槽，当前可靠空槽确认'
+                    else:
+                        candidates = by_part.get(part, [])
+                        occluded = (len(candidates) == 1 and candidates[0].state == 'occluded'
+                                    and self.keys.get(sid) == id(candidates[0]))
+                        if not occluded:
+                            self._clear_slot(sid)
+            else:
+                track, center = current
+                key = id(track)
+                if sid not in done and self.keys.get(sid) not in (None, key):
+                    self._clear_slot(sid)
+                # 保留实际对象引用防止对象释放后id被复用，复位时一起清除。
+                self.references[key] = track
+                polygon = polygons.get(sid)
+                if polygon is not None:
+                    polygon = np.asarray(polygon, dtype=np.float32).reshape(-1, 2)
+                    distance = cv2.pointPolygonTest(polygon, center, True)
+                    if distance >= 0:
+                        self.keys[sid] = key
+                        self.departed.pop(sid, None)
+                        state, reason = 'match', 'E当前轨迹仍在原槽'
+                    elif distance <= -self.margin:
+                        state, reason = 'missing', 'E当前可见轨迹已离槽'
+                        if self.keys.get(sid) != key and sid not in done:
+                            self._clear_slot(sid)
+                        elif sid not in done:
+                            self.departed.setdefault(sid, dict(index=result.stamp.index,
+                                captured_at=result.stamp.captured_at, track_key=key))
+            projected.slots[sid] = PrestartSlot(part, part if state == 'match' else '',
+                                               state=state, reason=reason)
+        # 当前可见的其他已确认身份进入槽内仍按错件暂停，不能靠追踪绕过越序。
+        for sid, polygon in polygons.items():
+            if sid not in self.expected:
+                continue
+            for part, (_, center) in visible.items():
+                if part != self.expected[sid] and cv2.pointPolygonTest(
+                        np.asarray(polygon, dtype=np.float32).reshape(-1, 2), center, False) >= 0:
+                    projected.slots[sid] = PrestartSlot(self.expected[sid], part, 'wrong', 'E当前轨迹进入其他零件槽')
+        return projected
+
+
 class ConfirmedPickDetector:
     """E取件边沿：正确在槽到可靠空槽，手退出后才确认；不推测隐藏动作。"""
 

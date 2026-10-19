@@ -36,6 +36,10 @@ class PickSequence:
                 raise ValueError('E顺序不符合实际工序前置条件')
             effects.update(op['eff'])
         self.detector = ConfirmedPickDetector(self.expected, settings['confirmation'])
+        self.tracking = None
+        if 'tracking_departure' in settings:
+            from .events import TrackingSlotEvidence
+            self.tracking = TrackingSlotEvidence(self.expected, settings['tracking_departure'], self.detector)
         self.timeout = float(settings['timeout_s'])
         if not self.timeout > 0 or not math.isfinite(self.timeout):
             raise ValueError('E等待时间必须为有限正数')
@@ -47,6 +51,8 @@ class PickSequence:
         self.events = []
         self.last_progress = None
         self.detector.reset()
+        if self.tracking is not None:
+            self.tracking.reset()
         self.verdict = self._view(WARN, 'E：等待D四槽匹配放行')
 
     def _view(self, level, title, detail=None):
@@ -60,10 +66,12 @@ class PickSequence:
 
     def interrupt(self, reason):
         self.detector.interrupt()
+        if self.tracking is not None:
+            self.tracking.reset()
         self.verdict = self._view(WARN, 'E：暂停，等待可靠当前观测', [reason])
         return self.verdict
 
-    def update(self, result, now):
+    def update(self, result, now, tracking=None):
         if not self.started:
             if not result.allow_start:
                 self.verdict = self._view(ERROR if result.state == 'alarm' else WARN,
@@ -77,11 +85,23 @@ class PickSequence:
                     or any(row.state != 'match' for row in result.slots.values())):
                 return self.interrupt('开工四槽证据不完整')
             self.started = True
+            if self.tracking is not None:
+                projected = self.tracking.project(result, now, tracking, [])
+                if not projected.valid or any(row.state != 'match' for row in projected.slots.values()):
+                    self.started = False
+                    return self.interrupt('开工需同帧四件当前可见追踪')
             self.last_progress = result.stamp.captured_at
             self.detector.stable = {sid: 'match' for sid in self.expected}
             self.verdict = self._view(OK, 'E：已开工，请按顺序取件')
             return self.verdict
+        if self.tracking is not None:
+            result = self.tracking.project(result, now, tracking, self.done)
         events = self.detector.update(result, now)
+        if self.tracking is not None:
+            for event in events:
+                event.detail['evidence'] = 'current_tracking'
+                if event.slot in self.tracking.departed:
+                    event.detail['departure'] = dict(self.tracking.departed[event.slot])
         self.events = (self.events + events)[-100:]
         if not result.valid or not 0 <= now-result.stamp.captured_at <= self.detector.max_age:
             return self.interrupt(result.reason or '观测失效')

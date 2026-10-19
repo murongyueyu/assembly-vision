@@ -1,0 +1,19 @@
+# ★ E尺寸候选：D rev.3w.3当前正确静置稳定放行；真实四工序仍须本轮实测。
+# 仅显式切换D来源；A/D门槛和旧正式E配置保持不变。
+prestart: prestart_check_size_candidate.yaml
+confirmation:
+  confirm_frames: 3
+  confirm_hold_s: 0.3
+  max_gap_s: 0.5
+  max_age_s: 1.0
+timeout_s: 15.0
+# ★ 用户授权：同一A轨迹当前可见（允许部分遮挡）离槽即可确认取件。
+# C方向未知时仅暂停几何判断；A链中断、过期或断档仍不得补记。
+tracking_departure:
+  min_outside_px: 8.0
+# 只绑定事件来源；名称、前置条件与效果读取冻结workpiece.operations。
+operations:
+  op1: slot_base
+  op2: slot_column
+  op3: slot_wheel
+  op4: slot_cap
