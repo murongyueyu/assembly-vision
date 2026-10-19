@@ -1,0 +1,11 @@
+# ★ 用户连续三次确认跨模块授权：仅开发候选，未重新现场验收，不覆盖正式模型。
+source_model: ../../ai_测试工具/A轮盘碎孔/20261019/candidate_10_01/model.json
+source_sha256: c368d6d44ffda953ca63dea53688c8bd32c62837e60e2ef2d05f045c115d3c56
+# ★ 当前正确件开发图：立柱短边最大12.77，顶盖长边24.25/短边23.32mm。
+# 这些是既有440mm/fx近似尺度下的视觉特征，不是实物精密尺寸或产品公差。
+upper_bounds:
+  P2_column:
+    short_side_mm: 13.0
+  P4_cap:
+    length_mm: 25.0
+    short_side_mm: 24.0
