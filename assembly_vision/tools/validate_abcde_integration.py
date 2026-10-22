@@ -210,7 +210,10 @@ def main():
                             integration_settings=pipe.integration.settings,
                             baseline_accepted=pipe.integration.camera.get('native_depth.baseline_accepted'),
                             height_assessment_accepted=pipe.integration.height_accepted,
-                            height_tolerance_mm=pipe.integration.height_tolerance)
+                            height_tolerance_mm=pipe.integration.height_tolerance,
+                            height_min_mm=pipe.integration.height_min,
+                            height_max_mm=pipe.integration.height_max,
+                            upper_limit_mm=pipe.integration.height_upper_limit)
         def resetting():
             annotations.append(dict(kind='reset', at=time.time(), confirmation=copy.deepcopy(confirmation)))
             reset()

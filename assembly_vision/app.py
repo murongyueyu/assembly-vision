@@ -79,8 +79,7 @@ def main(argv=None) -> int:
         print("[app] 已启动：%s" % pipe.source.name)
         if pipe.integration is not None:
             print('[app] ABCDE集成；四步后按i人工选同帧参考区和顶盖测区；高度判定=%s' %
-                  ('受控±%.1fmm' % pipe.integration.height_tolerance
-                   if pipe.integration.height_accepted else '基线未接受'))
+                  pipe.integration.height_rule)
         elif pipe.e_mode:
             print('[app] E取件顺序推定；未验证物理安装、紧固或高度')
         elif pipe.d_mode:

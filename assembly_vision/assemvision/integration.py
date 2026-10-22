@@ -11,6 +11,14 @@ from .config import Config, load_config
 from .core.depth import NativeHeightEstimator, compare_native_height, rectangle_mask
 
 
+def assess_height(height_mm, baseline_mm, tolerance_mm, upper_limit_mm=None):
+    """原下限继续生效；额外上限按未舍入数值比较，等于上限可通过。"""
+    conforms = compare_native_height(height_mm, baseline_mm, tolerance_mm)
+    if conforms is None:
+        return None
+    return bool(conforms and (upper_limit_mm is None or height_mm <= upper_limit_mm))
+
+
 class Integration:
     def __init__(self, path, camera):
         self.path = Path(path).resolve()
@@ -30,6 +38,8 @@ class Integration:
         assessment = self.settings.get('height_assessment', {})
         self.height_accepted = assessment.get('enabled', False) is True
         self.height_tolerance = None
+        self.height_upper_limit = None
+        self.height_min = self.height_max = None
         if self.height_accepted:
             self.height_tolerance = float(assessment['tolerance_mm'])
             maximum = float(assessment['max_tolerance_mm'])
@@ -37,6 +47,14 @@ class Integration:
                     or not math.isfinite(maximum) or not math.isfinite(self.height_tolerance)
                     or not 0 < self.height_tolerance <= maximum):
                 raise ValueError('受控高度判定范围或授权无效')
+            baseline = float(native['baseline_height_mm'])
+            self.height_min = baseline - self.height_tolerance
+            self.height_max = baseline + self.height_tolerance
+            if 'upper_limit_mm' in assessment:
+                self.height_upper_limit = float(assessment['upper_limit_mm'])
+                if not math.isfinite(self.height_upper_limit) or self.height_upper_limit < self.height_min:
+                    raise ValueError('高度上限必须有限且不低于原下限')
+                self.height_max = min(self.height_max, self.height_upper_limit)
         # ★ 仅复制B参数，不采用旧运行副本的相机控件，也绝不复用旧像素测区。
         native['reference_rect'] = native['target_rect'] = None
         if self.height_accepted:
@@ -49,6 +67,12 @@ class Integration:
         self.result = None
         self.measurement = None
         self.reason = '待测（四步后按i选区）'
+
+    @property
+    def height_rule(self):
+        if not self.height_accepted:
+            return '基线未接受'
+        return '%.3f～%.3f mm' % (self.height_min, self.height_max)
 
     def reset(self):
         self.result = self.measurement = None
@@ -68,8 +92,8 @@ class Integration:
         cfg.set('native_depth.reference_rect', list(reference))
         cfg.set('native_depth.target_rect', list(target))
         result = NativeHeightEstimator(cfg).measure_frame(frame)
-        conforms = (compare_native_height(result['height_mm'], cfg.get('native_depth.baseline_height_mm'),
-                                         self.height_tolerance)
+        conforms = (assess_height(result['height_mm'], cfg.get('native_depth.baseline_height_mm'),
+                                 self.height_tolerance, self.height_upper_limit)
                     if result['ok'] and self.height_accepted else None)
         self.result = dict(result, frame_index=stamp.index, captured_at=stamp.captured_at,
                            generation=generation, association='manual_same_frame_cap_region',
@@ -77,6 +101,8 @@ class Integration:
                            baseline_accepted=self.height_accepted, baseline_source_accepted=False,
                            baseline_height_mm=cfg.get('native_depth.baseline_height_mm'),
                            height_tolerance_mm=self.height_tolerance, height_conforms=conforms,
+                           height_min_mm=self.height_min, height_max_mm=self.height_max,
+                           upper_limit_mm=self.height_upper_limit,
                            assessment_scope='仅人工同帧顶盖高度；不代表整机全部质量',
                            scope='仅该帧人工确认表面；不证明后续帧仍在同一位置')
         self.measurement = (frame, copy.deepcopy(self.result))
@@ -91,7 +117,7 @@ class Integration:
         lines = ['开工：' + ('已通过D并开工' if started else '等待D稳定放行'),
                  '取件顺序：%d/4' % state.step]
         if result:
-            lines.append('快照测量：' + ('有效 %.2f mm' % result['height_mm'] if result['ok'] else '无效'))
+            lines.append('快照测量：' + ('有效 %.4f mm' % result['height_mm'] if result['ok'] else '无效'))
             lines.append('测量帧：%s（人工快照）' % result['frame_index'])
             if not result['ok']:
                 lines.append(result['reason'])
@@ -102,7 +128,6 @@ class Integration:
         elif result and result['height_conforms'] is not None:
             passed = result['height_conforms']
             lines.append('高度符合性：' + ('合格' if passed else '不合格'))
-            lines.append('容差：±%.1f mm（人工快照）' % self.height_tolerance)
             state.title = '取件%d/4 · 高度%s' % (state.step, '合格' if passed else '不合格')
             if not passed:
                 state.level = 'error'
@@ -110,7 +135,10 @@ class Integration:
             elif state.step == 4 and state.level != 'error':
                 state.level = 'ok'
         else:
-            lines.extend(['高度符合性：待测', '容差：±%.1f mm' % self.height_tolerance])
+            lines.append('高度符合性：待测')
+        if self.height_accepted:
+            lines.extend(['上限：%.3f mm（含）' % self.height_max,
+                          '下限：%.3f mm（含）' % self.height_min])
         lines.extend(['紧固性：队友负责', '安装等其他质量：未验证'])
         state.detail = lines + state.detail
         state.stats['B基线'] = '仅受控高度接受' if self.height_accepted else '未接受'

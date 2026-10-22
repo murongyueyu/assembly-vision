@@ -15,7 +15,7 @@ from assemvision.core.checks import EvidenceStamp
 from assemvision.core.part_tracker import TrackState
 from assemvision.core.tray_observer import TrayObserver
 from assemvision.pipeline import Pipeline
-from assemvision.integration import Integration
+from assemvision.integration import Integration, assess_height
 from assemvision.ui.base import UIState
 from assemvision.types import Frame
 from test_prestart_integration import fixture, ROOT
@@ -130,6 +130,7 @@ def main():
     accepted_path = ROOT/'config/abcde_integration_height_3mm_candidate.yaml'
     accepted = Integration(str(accepted_path), cam)
     assert accepted.height_accepted and accepted.height_tolerance == 3.
+    assert accepted.height_upper_limit == 68.5 and accepted.height_max == 68.5
     assert accepted.camera.get('native_depth.height_tolerance_mm') == 3.
     assert not accepted.camera.get('native_depth.baseline_accepted')
     assessed = accepted.measure(frame,result.stamp,(20,20,100,100),(300,300,20,20),0)
@@ -138,7 +139,30 @@ def main():
     accepted.decorate(state,True)
     assert state.level == 'ok' and '高度合格' in state.title
     assert any('紧固性：队友负责' in line for line in state.detail)
+    assert any('上限：68.500 mm' in line for line in state.detail)
+    assert not any('容差：±3' in line for line in state.detail)
     baseline = accepted.camera.get('native_depth.baseline_height_mm')
+    # ★ 按原始数值比较，不能先格式化为68.50再判定；边界68.5包含。
+    for height, expected in ((68.4999,True),(68.5,True),(68.5001,False),
+                             (68.6,False),(70.,False),(60.,False),
+                             (baseline-3.,True),(baseline-3.-.0001,False),
+                             (None,None),(float('nan'),None),(float('inf'),None)):
+        assert assess_height(height,baseline,3.,68.5) is expected, height
+    assert assess_height(70.,baseline,3.) is True  # 旧无额外上限的接口仍保留。
+    for height, expected in ((68.5,True),(68.5001,False)):
+        with patch('assemvision.integration.NativeHeightEstimator.measure_frame',
+                   return_value=dict(ok=True,height_mm=height,reason='ok')):
+            boundary = accepted.measure(frame,result.stamp,(20,20,100,100),(300,300,20,20),0)
+        assert boundary['height_conforms'] is expected
+        assert boundary['height_max_mm'] == 68.5
+        state = UIState(level='ok',step=4,total=4)
+        accepted.decorate(state,True)
+        assert state.level == ('ok' if expected else 'error')
+    over = copy.copy(frame)
+    over.depth_points_mm = xyz.copy()
+    over.depth_points_mm[300:320,300:320,2] = 440. - 68.6
+    over_result = accepted.measure(over,result.stamp,(20,20,100,100),(300,300,20,20),0)
+    assert over_result['ok'] and over_result['height_conforms'] is False
     for difference in (-3.1, 3.1):
         changed_frame = copy.copy(frame)
         changed_frame.depth_points_mm = xyz.copy()
@@ -164,4 +188,19 @@ def main():
             pass
         else:
             raise AssertionError('超过用户指定最大容差仍被接受')
+        compatible = copy.deepcopy(invalid)
+        compatible['height_assessment']['tolerance_mm'] = 3.
+        compatible['height_assessment'].pop('upper_limit_mm')
+        invalid_path.write_text(json.dumps(compatible,ensure_ascii=False),encoding='utf-8')
+        legacy = Integration(str(invalid_path),cam)
+        assert legacy.height_upper_limit is None and legacy.height_max == baseline+3.
+        for limit in (float('nan'),float('inf'),60.):
+            compatible['height_assessment']['upper_limit_mm'] = limit
+            invalid_path.write_text(json.dumps(compatible,ensure_ascii=False),encoding='utf-8')
+            try:
+                Integration(str(invalid_path),cam)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('无效上限未拒绝')
     print('ABCDE：冻结绑定、同帧四步、原生深度接线、人工快照关联、质量未知及复位通过')

@@ -1,4 +1,5 @@
-# ★ 2026-10-19用户新授权：高度容差最多3mm，紧固性交队友，本程序不实现。
+# ★ 2026-10-22用户授权：大于68.5mm不合格，等于可通过；原下限保留。
+# 文件名保留以兼容既有启动命令；实际判据不再是对称±3mm。
 # 沿用原B基线数值/设备/质量门禁，只接受人工同帧顶盖表面的受控高度判定。
 sequence: process_sequence_size_candidate.yaml
 sequence_sha256: 444c0128dcb20fff07e7ea50e62749ea2298e4ef9f6057fa85af6080c56fbc2a
@@ -10,4 +11,5 @@ height_assessment:
   scope: manual_same_frame_cap_region
   tolerance_mm: 3.0
   max_tolerance_mm: 3.0
-  authorization: 用户指定容差最多3mm，仅高度项；紧固性由队友完成
+  upper_limit_mm: 68.5
+  authorization: 用户指定高度上限68.5mm，保留原下限；仅高度项，紧固性另行处理
