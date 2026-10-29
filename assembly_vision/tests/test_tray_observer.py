@@ -3,6 +3,7 @@
 import copy
 import os
 import sys
+from multiprocessing import shared_memory
 
 import cv2
 import numpy as np
@@ -13,6 +14,22 @@ from assemvision.core.roi import capsule_polygon, circle_polygon
 from assemvision.core.tray_observer import TrayObserver, geometry_binding
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def same_observation(left, right):
+    """所有离散决策必须一致；OpenCV并发路径的浮点舍入误差最多1e-6。"""
+    if isinstance(left, dict):
+        assert left.keys() == right.keys()
+        for key in left:
+            same_observation(left[key], right[key])
+    elif isinstance(left, (list, tuple)):
+        assert len(left) == len(right)
+        for a, b in zip(left, right):
+            same_observation(a, b)
+    elif isinstance(left, (float, np.floating)):
+        np.testing.assert_allclose(left, right, atol=1e-6, rtol=0, equal_nan=True)
+    else:
+        assert left == right, (left, right)
 
 
 def main():
@@ -38,6 +55,8 @@ def main():
     revised_data['matching']['exclude_brass'] = True
     revised_data['occupancy']['evidence'] = 'metal_or_brass'
     revised = TrayObserver(wp, cal, revised_data, reference)
+    parallel = TrayObserver(wp, cal, revised_data, reference, workers=3)
+    fast = TrayObserver(wp, cal, revised_data, reference, workers=4, correlation_backend='box_sum_cached')
     matching_only_data = copy.deepcopy(revised_data)
     matching_only_data['occupancy']['evidence'] = 'metal'
     matching_only = TrayObserver(wp, cal, matching_only_data, reference)
@@ -71,6 +90,10 @@ def main():
             # ★ 新匹配遮挡入口必须保留全组合朝向/占用，不只测满盘数量。
             current = revised.observe(image, current_metal,
                                       brass_mask=current_metal)
+            concurrent = parallel.observe(image, current_metal, brass_mask=current_metal)
+            same_observation(concurrent.to_dict(), current.to_dict())
+            same_observation(fast.observe(image,current_metal,brass_mask=current_metal).to_dict(),
+                             current.to_dict())
             assert current.orientation_ok, (bits, turn, current.to_dict())
             assert current.state == result.state
             assert {s:r['state'] for s,r in current.slots.items()} == {
@@ -102,6 +125,51 @@ def main():
     bad = observer.observe(frame,all_blocked)
     assert not bad.orientation_ok and bad.pose is None and bad.state=='unknown'
     assert observer.observe(frame,None).state=='unknown'
+    for image, mask, hand in ((frame, all_blocked, None), (blank, no_mask, None),
+                              (frame, metal, all_blocked)):
+        same_observation(parallel.observe(image, mask, hand, brass_mask=metal).to_dict(), revised.observe(
+            image, mask, hand, brass_mask=metal).to_dict())
+        same_observation(fast.observe(image,mask,hand,brass_mask=metal).to_dict(),revised.observe(
+            image,mask,hand,brass_mask=metal).to_dict())
+    before=fast._correlation_cache.hits
+    for _ in range(2):
+        same_observation(fast.observe(frame,metal,brass_mask=metal).to_dict(),
+                         revised.observe(frame,metal,brass_mask=metal).to_dict())
+    assert fast._correlation_cache.hits>before
+    parallel.close()
+    fast.close()
+    processes = TrayObserver(wp,cal,revised_data,reference,workers=4,
+                            correlation_backend='box_sum_cached',execution_backend='process')
+    name = None
+    try:
+        for image,mask,hand in ((frame,metal,None),(blank,no_mask,None),(frame,metal,all_blocked)):
+            same_observation(processes.observe(image,mask,hand,brass_mask=metal).to_dict(),
+                             revised.observe(image,mask,hand,brass_mask=metal).to_dict())
+        name = processes._shared_memory.name
+    finally:
+        processes.close()
+    assert processes._shared_memory is None and processes._executor is None
+    try:
+        leaked = shared_memory.SharedMemory(name=name)
+    except FileNotFoundError:
+        pass
+    else:
+        leaked.close()
+        raise AssertionError('C方向共享内存未释放')
+    assert parallel._executor is None
+    try:
+        parallel.observe(frame, metal, brass_mask=metal)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('关闭后不允许继续提交方向任务')
+    for workers in (0, 5, True, 1.5):
+        try:
+            TrayObserver(wp, cal, data, reference, workers=workers)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('无效C并行数未拒绝')
     glove = np.zeros_like(no_mask)
     glove[80:400,160:480] = cv2.resize((observer.slot_masks['slot_cap']*255).astype('uint8'),(320,320),interpolation=cv2.INTER_NEAREST)
     hand_result = observer.observe(frame,metal,glove)

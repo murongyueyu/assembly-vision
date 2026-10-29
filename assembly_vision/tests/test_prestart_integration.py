@@ -47,6 +47,9 @@ def fixture():
     mask = np.zeros((480,640),'uint8')
     pipe.segmenter = SimpleNamespace(segment=lambda *a, **kw: SegResult(metal_mask=mask,
         glove_mask=mask.copy(), brass_mask=mask.copy()))
+    # ★ 2026-10-25: 10-24 加了 D-prep 预分割线程后，_d_process_once 改从 _prepared 取帧；
+    #   本用例是直接写 _c_input 的注入式测试，关掉 prep 线程以走原来的 _c_input 分支。
+    pipe._prep_thread = None
     pipe._d_intrinsics = source.color_intrinsics()
     return pipe, observer, source, identity
 

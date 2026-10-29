@@ -23,6 +23,9 @@ def build():
         pipe=Pipeline(old.cam, old.wp, Config(),
                       process_sequence_path=str(ROOT/'config/process_sequence.yaml'))
     pipe.segmenter=old.segmenter
+    # ★ 2026-10-25: 10-24 加了 D-prep 预分割线程后，_d_process_once 改从 _prepared 取帧；
+    #   本用例是直接写 _c_input 的注入式测试，关掉 prep 线程以走原来的 _c_input 分支。
+    pipe._prep_thread = None
     pipe._d_intrinsics=old._d_intrinsics
     return pipe, observer, identity
 

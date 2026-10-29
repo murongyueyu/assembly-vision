@@ -11,14 +11,51 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'tools'))
 from assemvision.config import load_config
 from assemvision.core.checks import EvidenceStamp
 from assemvision.core.part_identity import FrozenPartIdentity
+from validate_prestart_candidate import digest, digest_text
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def check_digest_eol():
+    """★ 配置标签与行尾无关，但来源校验必须继续按字节。
+
+    仓库 `core.autocrlf=true` 且没有 `.gitattributes`，同一份 yaml 在 Windows
+    检出是 CRLF、在 Linux/树莓派检出是 LF —— 实测
+    `process_sequence_size_candidate.yaml` 工作区 746 字节 / 仓库 blob 727 字节，
+    差的 19 正好是行数。字节级 sha256 因此跨机对不上，归一化后必须完全相同。
+    """
+    with TemporaryDirectory() as folder:
+        folder = Path(folder)
+        text = 'prestart:\n  min_area_px: 300\n'
+        crlf, lf = folder/'crlf.yaml', folder/'lf.yaml'
+        crlf.write_bytes(text.replace('\n', '\r\n').encode('utf-8'))
+        lf.write_bytes(text.encode('utf-8'))
+        assert digest(crlf) != digest(lf), '字节级 sha256 必须能区分行尾'
+        assert digest_text(crlf) == digest_text(lf), '归一化后必须跨机一致'
+        assert digest_text(lf) == digest(lf), '本来就是 LF 的文件不得被改动'
+    # ★ 反向守卫：workpiece/camera 的哈希是**防篡改**用途，必须继续字节级，
+    #   且必须与 prestart_check*.yaml 里登记的值一致。谁在仓库里加
+    #   `.gitattributes` 让它们检出成 LF，这里会立刻红 —— 而不是等到树莓派上
+    #   FrozenPartIdentity 拒绝加载、主程序起不来（模块 G 一次都没跑过）。
+    prestart = load_config(str(ROOT/'config/prestart_check.yaml')).data['identity']
+    for key, name in (('workpiece_sha256', 'workpiece.yaml'), ('camera_sha256', 'camera.yaml')):
+        assert digest(ROOT/'config'/name) == prestart[key], key + ' 与登记值不符（行尾被改过？）'
+    # ★ 真实案例回归：abcde_integration_candidate.yaml 的 sequence_sha256 是在 **LF 内容**上
+    #   登记的（444c0128…），而 Windows 检出是 CRLF —— 纯字节级比较必然不符，
+    #   树莓派上 test_abcde_integration 就是这样挂的。这里钉住「两种口径至少要接受一个」。
+    integ = load_config(str(ROOT/'config/abcde_integration_candidate.yaml')).data
+    source = ROOT/'config'/integ['sequence']
+    assert integ['sequence_sha256'] in {digest(source), digest_text(source)}, \
+        '集成候选冻结来源 hash 两种口径都对不上（文件真的被改了？）'
+    print('配置标签：行尾无关、来源校验仍按字节、登记值一致通过')
+
+
 def main():
+    check_digest_eol()
     old = load_config(str(ROOT/'config/prestart_check.yaml')).data
     candidate = load_config(str(ROOT/'config/prestart_check_wheel10_candidate.yaml')).data
     changed = copy.deepcopy(candidate)

@@ -78,11 +78,28 @@ class SegResult:
     brass_blobs: List[Blob] = field(default_factory=list)
     glove_bbox: Optional[Tuple[int, int, int, int]] = None
     glove_area_px: float = 0.0
+    # ★★ 两只手同时入画是装配工位的**常态**，不是特例。
+    #   2026-10 之前这里只有一个 `glove_bbox`，`Segmenter` 取完最大连通域后还把
+    #   `glove_mask` 裁成只剩那一块 —— 后果分两层，第二层更隐蔽：
+    #     ① 界面只画一个橙框，第二只手套"看不见"；
+    #     ② **遮挡判定也收不到第二只手**（`glove_hits` 吃的就是 `glove_mask`），
+    #        于是"另一只手正压在料盘上"被判成没有遮挡。
+    #   现在：`glove_bboxes` 按面积降序给出**全部**合格手套块，`glove_mask` 是并集；
+    #   `glove_bbox` / `glove_area_px` 仍等于最大那块，老调用方零改动。
+    glove_bboxes: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    glove_areas_px: List[float] = field(default_factory=list)
     hand_on: Dict[str, bool] = field(default_factory=dict)   # slot_id -> 手套是否压在该槽
     detail: Dict[str, float] = field(default_factory=dict)   # 耗时等调试信息
 
     def glove_missing(self) -> bool:
         return self.glove_bbox is None
+
+    @property
+    def glove_count(self) -> int:
+        """画面里合格的手套块数（0 / 1 / 2…）。"""
+        if self.glove_bboxes:
+            return len(self.glove_bboxes)
+        return 0 if self.glove_bbox is None else 1
 
 
 @dataclass

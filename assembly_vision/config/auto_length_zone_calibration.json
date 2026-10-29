@@ -1,0 +1,94 @@
+{
+  "image_size": [
+    640,
+    480
+  ],
+  "intrinsics": {
+    "width": 640.0,
+    "height": 480.0,
+    "fx": 603.8247680664062,
+    "fy": 602.4337158203125,
+    "ppx": 325.0372314453125,
+    "ppy": 254.80599975585938,
+    "coeffs": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "model": "distortion.inverse_brown_conrady",
+    "frame_index": 21
+  },
+  "tray_side_mm": 160.0,
+  "tray_corners": [
+    [
+      240.05601501464844,
+      39.86578369140625
+    ],
+    [
+      474.04718017578125,
+      34.749874114990234
+    ],
+    [
+      470.1158447265625,
+      263.83843994140625
+    ],
+    [
+      251.8455810546875,
+      268.6846008300781
+    ]
+  ],
+  "tray_plane_normal": [
+    0.011673572784943147,
+    -0.12935787992865144,
+    0.9915292565521198
+  ],
+  "tray_plane_offset_mm": 433.0444953261439,
+  "floor_plane_normal": [
+    0.011673572784943147,
+    -0.12935787992865144,
+    0.9915292565521198
+  ],
+  "floor_plane_offset_mm": 437.0815009094211,
+  "floor_rms_mm": 0.9018361434104607,
+  "axis_height_mm": 24.5,
+  "validation_truth_length_mm": 64.3,
+  "base_diameter_mm": 49.0,
+  "tray_edge_lengths_mm": [
+    160.6764162528843,
+    161.4558380214085,
+    159.7526005247995,
+    158.0755084668243
+  ],
+  "axis_assumption": "底座圆盘边缘接触绿幕，杆轴平行绿幕；手扶但不垫高",
+  "scale_status": "160mm 料盘几何锚定 + 当前姿态单点 length_scale 校到 64.0mm；单姿态拟合不能当作独立精度验收",
+  "tray_rim_height_samples_mm": [
+    8.23937758741971,
+    9.156103975748238,
+    7.817536597929347
+  ],
+  "tray_rim_median_height_mm": 8.23937758741971,
+  "depth_metric_scale": 1.009799345203286,
+  "floor_plane_offset_calibrated_mm": 441.3646134188029,
+  "rectified_pixels_per_mm": 4.0,
+  "calibration_scope": "固定相机；底座边缘接触绿幕且杆轴平行绿幕。手可扶，不垫高底座或遮端点。",
+  "distortion_coefficients": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "source_color": "reference.raw.png（四角完整）",
+  "source_depth": "reference-full.xyz.npy（同一固定相机，更新绿幕和料盘边缘深度）",
+  "latest_color_tray_clipped": true,
+  "validation_status": "SINGLE_POSE only: three current hand-supported readings 66.41-66.60mm (old scale) mapped to 64.0mm; earlier 8-pose mean 65.8359mm would read low; not independent accuracy; quality_release_enabled=false",
+  "quality_release_enabled": false,
+  "length_scale": 0.93585,
+  "length_scale_target_mm": 64.0,
+  "length_scale_raw_mean_mm": 68.39,
+  "length_scale_sample_count": 3,
+  "length_scale_source": "2026-10-29 现场同一手扶姿态三次读数 66.43/66.60/66.41（旧比例 0.972114 下）；按当前姿态平均 66.48 反算到 64.0；旧 8 次独立样本 65.8359 不再作为本姿态比例来源",
+  "length_scale_status": "SINGLE_POSE_SCALE_FIT: 当前手扶姿态三次校到 64.0mm；换姿态/换件会偏；不是独立精度验收，quality release 仍关闭"
+}

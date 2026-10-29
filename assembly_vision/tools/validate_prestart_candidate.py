@@ -23,7 +23,22 @@ from assemvision.ui import make_renderer
 
 
 def digest(path):
+    """字节级 sha256：图片等二进制证据用，必须与平台无关。"""
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def digest_text(path):
+    """文本 sha256：先把 CRLF 归一成 LF 再算，跨机可比。
+
+    ★ 为什么配置标签不能用 `digest()`：仓库 `core.autocrlf=true` 且没有
+      `.gitattributes`，同一份 yaml 在 Windows 检出是 CRLF、在 Linux/树莓派
+      检出是 LF，字节级 sha256 因此对不上。实测
+      `process_sequence_size_candidate.yaml` 工作区 746 字节 / 仓库 blob 727 字节，
+      差的 19 正好是行数 —— 内容一致、只有行尾不同，归一化后哈希完全相同。
+    ★ 反过来 `workpiece_sha256` / `camera_sha256` 是**防篡改**用途，必须继续用
+      字节级 `digest()`，**不要**换成这个（换了就形同放弃来源校验）。
+    """
+    return hashlib.sha256(Path(path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def write_json(path, value):
@@ -35,7 +50,10 @@ def write_json(path, value):
         if dataclasses.is_dataclass(obj):
             return dataclasses.asdict(obj)
         raise TypeError(type(obj).__name__)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=encode), encoding='utf-8')
+    # ★ newline='\n'：Windows 文本模式会把 \n 翻成 \r\n，同一份 report.json
+    #   在两个平台上字节不同，`source_sha256` 跨机就对不上（与 digest_text 同一类问题）。
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=encode),
+                    encoding='utf-8', newline='\n')
 
 
 def snapshot(pipe):
@@ -174,7 +192,10 @@ def main():
     args = ap.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     report = replay(args) if args.capture else live(args)
-    report.update(config=str(args.config.resolve()), config_sha256=digest(args.config))
+    # config_sha256 保留字节级（与磁盘文件一一对应）；config_sha256_lf 跨机可比，
+    # 复核「同一份配置」时看后者 —— 见 digest_text() 的说明。
+    report.update(config=str(args.config.resolve()), config_sha256=digest(args.config),
+                  config_sha256_lf=digest_text(args.config))
     summary = dict(observations=len(report['samples']),
         states=dict(Counter(r['result']['state'] for r in report['samples'])),
         allow_start=sum(r['result']['allow_start'] for r in report['samples']))

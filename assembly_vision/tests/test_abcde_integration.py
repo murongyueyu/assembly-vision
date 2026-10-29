@@ -2,6 +2,8 @@
 """集成编排回归：真实入口绑定、四步门禁、B单帧选区和质量未知。"""
 import copy
 import json
+import threading
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -14,11 +16,71 @@ from assemvision.config import Config, load_config
 from assemvision.core.checks import EvidenceStamp
 from assemvision.core.part_tracker import TrackState
 from assemvision.core.tray_observer import TrayObserver
-from assemvision.pipeline import Pipeline
+from assemvision.pipeline import Pipeline, Shared
 from assemvision.integration import Integration, assess_height
 from assemvision.ui.base import UIState
 from assemvision.types import Frame
 from test_prestart_integration import fixture, ROOT
+
+
+def demand_capture(cam):
+    """真实采集线程按需交付一次新同帧深度，不复用旧彩色或跨复位帧。"""
+    for mode in ('valid', 'missing', 'reset'):
+        pipe = Pipeline.__new__(Pipeline)
+        pipe.sh = Shared()
+        pipe.sh.lock = threading.RLock()
+        pipe.cam, pipe.c_max_age_s = cam, 1.
+        pipe.c_error, pipe._e_generation = '', 0
+        pipe._integration_depth_request = None
+        pipe.integration = Integration(str(ROOT/'config/abcde_integration_height_3mm_candidate.yaml'), cam)
+        pipe.sequence = SimpleNamespace(started=True, done=list(range(4)), order=list(range(4)))
+        image = np.zeros((480,640,3), 'uint8')
+        old = Frame(1, 1., left=image)
+        now = time.monotonic()
+        pipe._d_snapshot = (old, SimpleNamespace(stamp=EvidenceStamp(1,now,(480,640))), None, {}, None)
+        yy, xx = np.mgrid[:480,:640]
+        xyz = np.stack([xx,yy,np.full_like(xx,440)],axis=-1).astype('float32')
+        xyz[300:320,300:320,2] = 372
+        calls, delivered = [], []
+        normal = threading.Event()
+        def read(want_full=False):
+            calls.append(want_full)
+            time.sleep(.005)
+            frame = Frame(len(calls)+1,float(len(calls)),left=image.copy())
+            if want_full:
+                if mode != 'missing':
+                    frame.depth_points_mm = xyz.copy()
+                    frame.depth_profile = copy.deepcopy(pipe.integration.camera.get('native_depth.profile'))
+                delivered.append(frame)
+                if mode == 'reset':
+                    pipe._e_generation += 1
+            else:
+                normal.set()
+            return frame
+        pipe.source = SimpleNamespace(read=read)
+        thread = threading.Thread(target=pipe._c_acq_loop)
+        pipe._threads = [thread]
+        thread.start()
+        try:
+            assert normal.wait(1.) and not any(calls)
+            with patch('assemvision.pipeline.cv2.selectROI', side_effect=[(20,20,100,100),(300,300,20,20)]), \
+                 patch('assemvision.pipeline.cv2.destroyWindow'):
+                pipe.inspect_integration()
+            assert calls.count(True) == 1
+            if mode == 'valid':
+                assert pipe.integration.result['height_conforms'] is True
+                measured_frame = pipe.integration.measurement[0]
+                assert np.array_equal(measured_frame.left, delivered[0].left)
+                assert np.array_equal(measured_frame.depth_points_mm, delivered[0].depth_points_mm)
+                assert pipe.integration.result['frame_index'] != old.index
+                assert pipe.integration.result['frame_index'] == delivered[0].index
+            else:
+                assert pipe.integration.result is None
+            assert pipe._integration_depth_request is None
+        finally:
+            pipe.sh.quit = True
+            thread.join(1.)
+            assert not thread.is_alive()
 
 
 def main():
@@ -46,6 +108,9 @@ def main():
         pipe = Pipeline(cam, wp, Config(), integration_path=path)
     assert factory.call_args.args[0].get('depth.enabled')
     assert factory.call_args.args[0].get('realsense.controls') == cam.get('realsense.controls')
+    # ★ 2026-10-25: 10-24 加了 D-prep 预分割线程后，_d_process_once 改从 _prepared 取帧；
+    #   本用例是直接写 _c_input 的注入式测试，关掉 prep 线程以走原来的 _c_input 分支。
+    pipe._prep_thread = None
     pipe.segmenter, pipe._d_intrinsics = previous.segmenter, previous._d_intrinsics
     image = np.zeros((480,640,3), 'uint8')
     objects = copy.deepcopy(identity.observe(image,None,None)[0])
@@ -203,4 +268,43 @@ def main():
                 pass
             else:
                 raise AssertionError('无效上限未拒绝')
-    print('ABCDE：冻结绑定、同帧四步、原生深度接线、人工快照关联、质量未知及复位通过')
+    demand_capture(cam)
+    pi_pipe = Pipeline(cam, wp, load_config(str(ROOT/'config/calibration.yaml')),
+                       source_override='images', path_override=str(ROOT/'data/synthetic_seq'),
+                       integration_path=str(ROOT/'config/abcde_integration_pi_functional_candidate.yaml'))
+    assert pi_pipe.c_max_age_s == 3.
+    assert pi_pipe.d_settings['freshness']['max_gap_s'] == 3.
+    assert pi_pipe.sequence.detector.max_gap == pi_pipe.sequence.detector.max_age == 3.
+    assert pi_pipe.identity.confirmation.max_gap == 3.
+    assert pi_pipe.identity.confirmation.frames == real.identity.confirmation.frames == 7
+    assert pi_pipe.identity.confirmation.min_score == real.identity.confirmation.min_score == .85
+    assert real.identity.confirmation.max_gap == .25 and real.c_max_age_s == 1.
+    assert pi_pipe.integration.height_upper_limit == 68.5
+    assert any('Pi功能联调' in x for x in pi_pipe.build_ui_state().detail)
+    pi_pipe.stop()
+    performance = Pipeline(cam, wp, load_config(str(ROOT/'config/calibration.yaml')),
+                          source_override='images', path_override=str(ROOT/'data/synthetic_seq'),
+                          integration_path=str(ROOT/'config/abcde_integration_pi_performance_candidate.yaml'))
+    assert performance.observer.workers == 4
+    assert performance.deployment_runtime == dict(observer_workers=4,opencv_threads=1,ui_fps=8,
+                                                correlation_backend='box_sum_cached')
+    assert performance.observer.correlation_backend == 'box_sum_cached'
+    assert performance.identity.confirmation.min_score == .85
+    assert performance.identity.confirmation.frames == 7
+    # ★ 2026-10-25: 上限由用户授权改过（70→65mm），不再写死 68.5；
+    #   改成跟配置走，但仍验证「覆盖确实生效」（不是回落到冻结基线）。
+    perf_upper = load_config(
+        str(ROOT / 'config/abcde_integration_pi_performance_candidate.yaml')) \
+        .get('height_assessment.upper_limit_mm')
+    assert performance.integration.height_upper_limit == perf_upper
+    frozen_baseline = performance.integration.camera.get('native_depth.baseline_height_mm')
+    assert abs(perf_upper - frozen_baseline) > 0.5  # 覆盖生效，不是 68.025114 基线
+    with patch.object(app, 'Pipeline', return_value=performance), \
+         patch.object(app, 'make_renderer', return_value=renderer), \
+         patch.object(performance, 'start'), patch.object(performance, 'stop'), \
+         patch('cv2.setNumThreads') as thread_setting:
+        assert app.main(['--integration',path,'--windowed','--max-frames','2']) == 0
+        thread_setting.assert_called_once_with(1)
+    performance.stop()
+    assert performance.observer._executor is None
+    print('ABCDE：冻结绑定、同帧四步、按需深度/复位拒绝、人工快照关联、质量未知通过')

@@ -1,0 +1,32 @@
+# ★ G性能候选：同图等价回归后启用4线程及模板/当前遮挡数学项复用。
+# ★ 2026-10-22用户授权Pi优先跑通：仅延长时效/连续确认间隔，非实时验收。
+# ★ 2026-10-22用户授权：大于68.5mm不合格，等于可通过；原下限保留。
+# 文件名保留以兼容既有启动命令；实际判据不再是对称±3mm。
+# 沿用原B基线数值/设备/质量门禁，只接受人工同帧顶盖表面的受控高度判定。
+sequence: process_sequence_size_candidate.yaml
+sequence_sha256: 444c0128dcb20fff07e7ea50e62749ea2298e4ef9f6057fa85af6080c56fbc2a
+native_reference: ../../ai_测试工具/B模块深度/20261018_full_baseline_03/camera.native-depth.json
+native_reference_sha256: be932cd53865d0abd224f0c2ffb7493c061316b87a34ab91a81d358a99888621
+association: manual_same_frame_cap_region
+height_assessment:
+  enabled: true
+  scope: manual_same_frame_cap_region
+  tolerance_mm: 3.0
+  max_tolerance_mm: 3.0
+  upper_limit_mm: 68.5
+  authorization: 用户指定高度上限68.5mm，保留原下限；仅高度项，紧固性另行处理
+
+# ★ 正式配置不变；不减少确认帧数、不降低身份/尺寸或高度门槛。
+deployment_timing:
+  mode: functional_only
+  max_age_s: 3.0
+  max_gap_s: 3.0
+  identity_gap_s: 3.0
+
+# ★ 不减少C方向、角度与平移搜索；只配置调度和UI刷新上限。
+deployment_runtime:
+  observer_workers: 3
+  opencv_threads: 1
+  ui_fps: 8
+  correlation_backend: box_sum_cached
+  execution_backend: process

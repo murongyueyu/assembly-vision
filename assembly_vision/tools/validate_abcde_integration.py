@@ -19,7 +19,7 @@ import app
 from assemvision.ui import make_renderer
 from assemvision.imgio import imwrite_safe
 from capture_part_dataset import actual_controls
-from validate_prestart_candidate import snapshot, digest, write_json
+from validate_prestart_candidate import snapshot, digest, digest_text, write_json
 
 
 def replay(args):
@@ -67,7 +67,8 @@ def replay(args):
         renderer.close()
         pipe.stop()
         write_json(args.output/'report.json',dict(samples=rows,source=str(args.capture.resolve()),
-            source_sha256=digest(args.capture/'report.json'),config_sha256=digest(args.config),
+            source_sha256=digest(args.capture/'report.json'),
+            config_sha256=digest(args.config),config_sha256_lf=digest_text(args.config),
             metadata=capture['metadata'], scope='既有真实原图集成回归，非新增现场验收',error=pipe.c_error))
     print(json.dumps(dict(samples=len(rows),max_step=max(r['step'] for r in rows),
                           final_step=rows[-1]['step'],error=pipe.c_error)),flush=True)
@@ -109,7 +110,8 @@ def main():
         return dict(exit=code, samples=list(rows) if code is not None else [],
             observations_count=len(rows), latest=rows[-1] if rows else None, metadata=copy.deepcopy(metadata),
             annotations=copy.deepcopy(annotations), errors=list(errors), config=str(args.config.resolve()),
-            config_sha256=digest(args.config), actual_scene_requires_review=True,
+            config_sha256=digest(args.config),config_sha256_lf=digest_text(args.config),
+            actual_scene_requires_review=True,
             threads_stopped=all(not t.is_alive() for p in pipes for t in p._threads))
 
     def writer():
@@ -210,10 +212,7 @@ def main():
                             integration_settings=pipe.integration.settings,
                             baseline_accepted=pipe.integration.camera.get('native_depth.baseline_accepted'),
                             height_assessment_accepted=pipe.integration.height_accepted,
-                            height_tolerance_mm=pipe.integration.height_tolerance,
-                            height_min_mm=pipe.integration.height_min,
-                            height_max_mm=pipe.integration.height_max,
-                            upper_limit_mm=pipe.integration.height_upper_limit)
+                            height_tolerance_mm=pipe.integration.height_tolerance)
         def resetting():
             annotations.append(dict(kind='reset', at=time.time(), confirmation=copy.deepcopy(confirmation)))
             reset()

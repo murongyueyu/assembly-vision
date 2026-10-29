@@ -1,0 +1,173 @@
+{
+  "capture": {
+    "exposure_readback": "windows_mf",
+    "distance_mm": 440.0,
+    "warmup_frames": 30,
+    "failed_reads_limit": 15,
+    "poses_deg": [
+      0,
+      30,
+      60,
+      90,
+      135,
+      180
+    ],
+    "positions": [
+      "left",
+      "center",
+      "right",
+      "left",
+      "center",
+      "right"
+    ],
+    "backgrounds": [
+      "tray",
+      "green"
+    ],
+    "negative_scenes": [
+      "green",
+      "empty_tray",
+      "wood",
+      "shadow",
+      "glove",
+      "empty_workarea"
+    ],
+    "negative_repeats": 2
+  },
+  "annotation": {
+    "clip_interval_s": 1.0
+  },
+  "experiment": {
+    "segmentation_overrides": {
+      "segment.brass.min_area_px": 300,
+      "segment.brass.morph_close": 1,
+      "segment.brass.morph_open": 1
+    },
+    "variants": [
+      "brass",
+      "seeded_metal",
+      "seeded_metal_close",
+      "seeded_color"
+    ],
+    "seed_margin_px": 8,
+    "close_kernel_px": 1,
+    "seeded_color": {
+      "margin_px": 2,
+      "h_min": 10,
+      "h_max": 45,
+      "s_min": 30,
+      "s_max": 255,
+      "v_min": 50,
+      "v_max": 255
+    },
+    "feature_sets": {
+      "shape": [
+        "circularity",
+        "solidity",
+        "elongation",
+        "holes",
+        "straightness",
+        "end_width_ratio",
+        "area_frac"
+      ],
+      "shape_scale": [
+        "circularity",
+        "solidity",
+        "elongation",
+        "holes",
+        "straightness",
+        "end_width_ratio",
+        "area_frac",
+        "area_mm2",
+        "length_mm",
+        "short_side_mm"
+      ],
+      "shape_color": [
+        "circularity",
+        "solidity",
+        "elongation",
+        "holes",
+        "straightness",
+        "end_width_ratio",
+        "area_frac",
+        "c_hue_mean",
+        "c_hue_std",
+        "c_sat_mean",
+        "c_val_mean",
+        "c_sat_hi_frac"
+      ]
+    },
+    "min_score": 0.55,
+    "min_margin": 0.05,
+    "required_features": [
+      "length_mm",
+      "short_side_mm"
+    ],
+    "holes_tol": 1.0,
+    "ignored_features_by_part": {
+      "P4_cap": [
+        "holes"
+      ]
+    },
+    "min_samples_per_class": 8,
+    "lower_percentile": 5,
+    "upper_percentile": 95,
+    "relative_padding": 0.1,
+    "minimum_padding": 0.02,
+    "tracking_overrides": {
+      "backend": "detection",
+      "detect_every_n": 1,
+      "identity_relink": true,
+      "identity_relink_min_score": 0.85,
+      "identity_relink_area_ratio": [
+        0.8,
+        1.25
+      ],
+      "partial_follow": {
+        "min_area_px": 80,
+        "max_extent_px": 160,
+        "glove_margin_px": 12,
+        "max_distance_px": 100,
+        "max_gap_seconds": 3,
+        "min_score": 0.85,
+        "area_ratio": [
+          0.08,
+          1.6
+        ],
+        "short_side_ratio": [
+          0.25,
+          1.8
+        ],
+        "full_area_ratio": [
+          0.8,
+          1.25
+        ],
+        "min_aspect_by_part": {
+          "P2_column": 2.0
+        },
+        "unique_hand_relink": true
+      }
+    },
+    "max_candidate_extent_px": 160,
+    "reject_border_candidates": true,
+    "confirmation": {
+      "frames": 7,
+      "min_score": 0.85,
+      "max_gap_seconds": 0.25,
+      "dist_match_px": 60,
+      "iou_match": 0.15,
+      "area_ratio": [
+        0.8,
+        1.25
+      ]
+    },
+    "hole_min_area_px": 10.0
+  },
+  "evaluation": {
+    "bbox_iou": 0.5,
+    "precision_target": 0.95,
+    "recall_target": 0.95,
+    "mask_iou_target": 0.85,
+    "latency_p95_ms_target": 33.0
+  }
+}

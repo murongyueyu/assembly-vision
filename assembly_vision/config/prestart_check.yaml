@@ -21,7 +21,7 @@ identity:
   policy_sha256: 7c7da2757fb5b4999e6383c411c439344be70036fa086bf73c23d1a5a27bc57a
   observer: tray_observation_v2.yaml
   # ★ A交付后只有C几何获授权更新，当前整份正式配置按C23冻结绑定。
-  workpiece_sha256: 12bdba31fe55e63834c6760b32f68edd228f219b38e4d686ce054a9da7902530
+  workpiece_sha256: 1970fc11922a233209b1678ef3bdb297b349a19e2951bb645546512d437cc662
   camera_sha256: ea607c8d614a0e1e45f9ad6d3506b393ac9e1ba2abd8856c5fec6ceb1db74b68
   # ★ 仅同工位旧图回放使用；真机必须读取SDK当前内参，不外推分辨率。
   replay_intrinsics:

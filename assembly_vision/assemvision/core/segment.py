@@ -152,25 +152,46 @@ class Segmenter:
                                          keep_mask=(keep_mask if gate_on else None),
                                          mm_per_px=mm_per_px)
 
-        # 手套：取最大连通域，套面积与长宽比闸门（滤掉蓝色噪声与屏幕反光）
+        # ── 手套：**保留全部合格连通域**，不再只取最大那块 ─────────────
+        # ★★ 为什么必须改（2026-10 现场）：装配时**两手同时入画是常态**。
+        #   旧实现 `best = 最大块` + `glove_mask = 只留 best` 有两个后果：
+        #     ① 界面上永远只有一个橙框，第二只手套"消失"；
+        #     ② `glove_mask` 被裁掉后，**遮挡判定也失去第二只手**
+        #        （`glove_hits` 吃 glove_mask；`tray_observer` 的
+        #         `max_glove_fraction` 同理），另一只手压着料盘却判"没遮挡"。
+        #   现在的规则：
+        #     · `_blobs` 已按面积降序，逐块过面积/长宽比闸门，**累积到上限为止**；
+        #     · `max_gloves`（默认 2）是**上限不是目标** —— 画面只有一只手时
+        #       结果与旧版完全一致（`glove_bboxes` 长度 1，mask 也是同一块）；
+        #     · `glove_bbox` / `glove_area_px` 取**最大那块**，兼容所有老调用方；
+        #     · `glove_mask` 改成**所有合格块的并集**，遮挡判定从此覆盖两只手。
+        #   ⚠️ 已知边界：`morph_close: 21` 会把相距 <~20px 的两只手并成一块，
+        #      那种情况下只能得到 1 个框（并集掩膜仍是对的）。
+        #      真出现"两手贴在一起"的工位画面，再考虑在 `_glove_split` 里做
+        #      距离变换分水岭拆分 —— 那是另一个量级的事，不在本次改动内。
         blobs_g = self._blobs(glove_mask, min_area_px=float(self.glove.get("min_area_px", 3000)))
         max_area = float(self.glove.get("max_area_px", 200000))
         max_aspect = float(self.glove.get("max_aspect", 6.0))
-        best = None
+        max_gloves = max(1, int(self.glove.get("max_gloves", 2)))
+        kept: List[Blob] = []
         for b in blobs_g:
+            if len(kept) >= max_gloves:
+                break
             if b.area_px > max_area:
                 continue
             _, _, w, h = b.bbox
             aspect = max(w, h) / max(1.0, float(min(w, h)))
             if aspect > max_aspect:
                 continue
-            if best is None or b.area_px > best.area_px:
-                best = b
-        if best is not None:
-            res.glove_bbox = best.bbox
-            res.glove_area_px = best.area_px
+            kept.append(b)
+        if kept:
+            res.glove_bbox = kept[0].bbox
+            res.glove_area_px = kept[0].area_px
+            res.glove_bboxes = [tuple(b.bbox) for b in kept]
+            res.glove_areas_px = [float(b.area_px) for b in kept]
             keep = np.zeros_like(glove_mask)
-            cv2.drawContours(keep, [best.contour], -1, 255, thickness=cv2.FILLED)
+            # 一次 drawContours 传多个轮廓 = 画并集，省掉逐块 bitwise_or
+            cv2.drawContours(keep, [b.contour for b in kept], -1, 255, thickness=cv2.FILLED)
             res.glove_mask = keep
 
         # 黄铜：全部保留（可能同时有多个零件在画面里）

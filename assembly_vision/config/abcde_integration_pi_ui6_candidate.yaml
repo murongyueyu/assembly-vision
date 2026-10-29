@@ -1,0 +1,69 @@
+# ★ 2026-10-28 新增 2/4 阶段的"立柱"检测；2026-10-29 改为**量长度**（横放）。
+#   2/4（底座+立柱取走后）按 i：把立柱横放，框住它，量轮廓长边，判定 64 ± 3 mm（61.000～67.000）。
+#   4/4 顶盖检测保留不变（65 ± 3，上限 68.000 → 62.000～68.000，仍是深度法向高度）。
+#   不动 A/C/D/E 任何判据，不动 B 冻结源文件数值与 hash。
+sequence: process_sequence_size_candidate.yaml
+sequence_sha256: 444c0128dcb20fff07e7ea50e62749ea2298e4ef9f6057fa85af6080c56fbc2a
+native_reference: ../../ai_测试工具/B模块深度/20261018_full_baseline_03/camera.native-depth.json
+native_reference_sha256: be932cd53865d0abd224f0c2ffb7493c061316b87a34ab91a81d358a99888621
+association: manual_same_frame_cap_region
+
+# ★ 分阶段的测量项。at_step = 允许按 i 的取件进度；每个阶段带自己的基线/容差/授权。
+#   mode: height = B 的深度法向高度；mode: length = 2D 轮廓长边（不需要深度）
+#   target 只影响选区窗口标题（COLUMN / CAP），不参与判据。
+height_stages:
+  - name: column
+    label: 立柱
+    at_step: 2
+    target: COLUMN
+    # ★ 2026-10-29 用户改判：立柱**横放**量长度，64mm 左右。
+    #   深度法在这件上不可用（2026-10-28 实测：杆身/杆端有效深度点 = 0，
+    #   D435 对 Ø15 高反光细杆打不出点），所以改用同帧金属掩膜的最长边。
+    mode: length
+    # ★ 2026-10-29 用户改判：第三步不再人工拉框；按 I 自动出固定框，
+    #   框内轮廓连续保持 2 秒后自动测量，64±1mm 合格后关闭检测并进入下一步。
+    auto_zone: true
+    enabled: true
+    scope: manual_same_frame_cap_region
+    baseline_mm: 64.0
+    tolerance_mm: 1.0
+    max_tolerance_mm: 1.0
+    # ★ 2026-10-29 现场标定：TrayMap 推出的 0.731 mm/px 与卡尺差 ~12%
+    #   （标定 homography 已过期）。自动框走 config/auto_length_zone_calibration.json
+    #   的 160mm 料盘几何 + 单件 length_scale；这里的 0.638 只保留给旧人工选区兜底。
+    mm_per_px: 0.638
+    # 长度法不走深度门禁：min_points / min_valid_ratio 只对 height 模式有意义。
+    authorization: 用户2026-10-29改判：立柱长度64±1mm（63.000～65.000）；按I自动框、保持2秒、自动测量；合格后关闭检测进入轮盘
+  - name: cap
+    label: 顶盖
+    at_step: 4
+    target: CAP
+    mode: height
+    enabled: true
+    scope: manual_same_frame_cap_region
+    # ★ 2026-10-29 用户改判：顶盖高度按 68.5 ± 1 mm（67.500～69.500）判。
+    #   同日先改 68.5±3、再按用户要求收紧到 ±1（"阈值范围有点大"）。
+    #   取代 2026-10-25 的 65 ± 3 / 上限 68。现场实测两次 68.33 / 68.03 mm，均在窗口内。
+    baseline_mm: 68.5
+    tolerance_mm: 1.0
+    max_tolerance_mm: 3.0
+    authorization: 用户2026-10-29按现场实测68.5mm改判并要求±1mm（取代2026-10-25的65±3）；窗口67.500～69.500；仍仅判高度，不含紧固性
+
+# ★ 正式配置不变；不减少确认帧数、不降低身份/尺寸或高度门槛。
+deployment_timing:
+  mode: functional_only
+  max_age_s: 3.0
+  max_gap_s: 3.0
+  identity_gap_s: 3.0
+
+# ★ 不减少C方向、角度与平移搜索；只配置调度和UI刷新上限。
+deployment_runtime:
+  observer_workers: 4
+  opencv_threads: 1
+  ui_fps: 8
+  correlation_backend: box_sum_cached
+
+# ★ F六步展示候选；测量/取件/开工判据完全沿用上面配置。
+operator_ui:
+  mode: six_step
+  completion_seconds: 5.5

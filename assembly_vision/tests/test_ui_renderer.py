@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import os
 import sys
+from unittest.mock import patch
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from assemvision.ui import make_renderer                      # noqa: E402
 from assemvision.ui.base import Renderer                      # noqa: E402
+from assemvision.ui.base import UIState
 
 
 def _app_kwargs(wp, W=1920, H=1080):
@@ -79,6 +82,28 @@ def main() -> int:
         print("   中文字体: %s" % (r.font_path or "(没找到，会退回英文)"))
 
     # ⑤ Qt 渲染器：环境里没 PyQt5 就跳过，跳过要说清楚不是通过
+    if ok_open:
+        r.cache_unchanged = True
+        state = UIState(frame=np.zeros((32,32,3),'uint8'),title='缓存原图')
+        with patch.object(r,'_render_frame',wraps=r._render_frame) as draw:
+            first = r.render(state)
+            expected = first.copy()
+            first[:] = 0
+            assert np.array_equal(r.render(state), expected) and draw.call_count == 1
+            state.title = '观测过期'
+            r.render(state)
+            assert draw.call_count == 2
+            state.polygons = [(np.array([[1,1],[5,1],[5,5]],dtype='int32'),'ok',2)]
+            r.render(state)
+            assert draw.call_count == 3
+            state.polygons[0][0][0,0] += 1
+            r.render(state)
+            assert draw.call_count == 4
+            state.frame = state.frame.copy()
+            r.render(state)
+            assert draw.call_count == 5
+        r.close()
+
     try:
         import PyQt5  # noqa: F401
         has_qt = True

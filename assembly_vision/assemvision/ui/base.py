@@ -85,6 +85,8 @@ class UIState:
     stats: Dict[str, Any] = field(default_factory=dict)
     banner: str = ""                              # 顶部横幅（严重告警时用）
     source_name: str = ""
+    # ★ 六步是展示进度，step/total仍保留E四件进度。
+    workflow: Optional[Dict[str, Any]] = None
 
     def color(self, key: str) -> Tuple[int, int, int]:
         return DEFAULT_COLORS.get(key, DEFAULT_COLORS[IDLE])

@@ -1,0 +1,37 @@
+# ★ F独立检测框联调。仅参考长度，不写六步完成、不作尺寸质量放行。
+zone: [270, 310, 170, 120]
+hold_seconds: 2.0
+min_frames: 5
+max_frame_gap_seconds: 0.5
+# ★ 手抖容忍（2026-10-30 三次放宽）：固定计时锚点允许的漂移。
+#   12/9px 现场仍觉得紧；15/12px 给手抖更大余量，明显移动仍会清零。
+#   这里只放宽稳定判定，不改标定、比例或尺寸合格范围。
+max_center_drift_px: 15.0
+max_length_drift_px: 12.0
+# ★ 短暂丢失宽限：只冻结计时，不把丢失时间算进 2 秒；超过 0.6s、空框或真正断帧立即撤销。
+max_lost_seconds: 0.6
+rearm_empty_seconds: 0.6
+edge_margin_px: 3
+min_contour_area_px: 60.0
+min_aspect: 1.15
+max_aspect: 5.0
+max_glove_pixels: 10
+# ★ 沿用当前长度候选，只用于显示参考值；尚未完成固定检测区的独立尺度验证。
+reference_mm_per_px: 0.638
+render_fps: 10
+
+# ★ 手扶辅助允许；蓝手套从局部测量掩膜排除，不能遮住测量端点。
+allow_glove_support: true
+calibration_file: auto_length_zone_calibration.json
+# ★ 仅在独立检测区补足金属反光边缘，不改A正式分割。
+green_hsv_lower: [46, 40, 0]
+green_hsv_upper: [95, 255, 255]
+glove_hsv_lower: [91, 60, 0]
+glove_hsv_upper: [140, 255, 255]
+min_seed_pixels: 20
+
+# 手套只在遮住测量端点时暂停，不禁止辅助扶平。
+endpoint_fit_fraction: [0.35, 0.85]
+endpoint_axis_band_px: 4
+endpoint_margin_px: 6
+max_endpoint_glove_pixels: 3

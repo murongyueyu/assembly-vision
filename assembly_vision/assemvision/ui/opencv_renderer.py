@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -47,12 +48,45 @@ class _Text:
         self.font_path = font_path
         self._cache: Dict[int, "ImageFont.FreeTypeFont"] = {}
         self._scale = float(scale)
+        self._bmp: "OrderedDict" = OrderedDict()   # 文字位图缓存（见 _raster）
+        self._bmp_max = 256
 
     def font(self, size: int):
         size = max(10, int(round(size * self._scale)))
         if size not in self._cache:
             self._cache[size] = ImageFont.truetype(self.font_path, size)
         return self._cache[size]
+
+    def _raster(self, text: str, size: int, anchor: str,
+                color: Tuple[int, int, int]):
+        """把一条文字光栅化成 RGBA 位图并缓存，返回 (图像, 相对锚点的 dx, dy)。
+
+        ★ 2026-10 Pi4B 实测：每帧对每条文字走一次 PIL 往返约 3.5ms，
+          6~17 条就是 20~60ms，是 render 的最大单项。同一文字（零件名、
+          状态行）内容不变，位图可以复用 —— 命中后每条约 0.05ms。
+          用 LRU 上限，避免底部状态栏里「帧号」这种每秒都变的文本撑爆内存。
+        """
+        key = (text, size, anchor, color)
+        ent = self._bmp.get(key)
+        if ent is not None:
+            self._bmp.move_to_end(key)
+            return ent
+        font = self.font(size)
+        try:
+            bb = font.getbbox(text, anchor=anchor)
+        except Exception:                       # noqa: BLE001  锚点不支持时退回估值
+            bb = (0, 0, len(text) * int(size), int(size))
+        w = max(1, bb[2] - bb[0])
+        h = max(1, bb[3] - bb[1])
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(img).text(
+            (-bb[0], -bb[1]), text, font=font,
+            fill=(int(color[2]), int(color[1]), int(color[0]), 255), anchor=anchor)
+        ent = (np.asarray(img), int(bb[0]), int(bb[1]))
+        self._bmp[key] = ent
+        if len(self._bmp) > self._bmp_max:
+            self._bmp.popitem(last=False)
+        return ent
 
     def draw(self, canvas: np.ndarray,
              items: Sequence[Tuple[str, Tuple[int, int], Tuple[int, int, int], int, str]]) -> None:
@@ -64,13 +98,23 @@ class _Text:
                 cv2.putText(canvas, text, org, cv2.FONT_HERSHEY_SIMPLEX,
                             max(0.4, size / 30.0), color, 1, cv2.LINE_AA)
             return
-        img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-        d = ImageDraw.Draw(img)
+
+        ch, cw = canvas.shape[:2]
         for text, org, color, size, anchor in items:
-            rgb = (int(color[2]), int(color[1]), int(color[0]))
-            d.text((int(org[0]), int(org[1])), str(text), font=self.font(size),
-                   fill=rgb, anchor=anchor or "la")
-        canvas[:, :, :] = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+            arr, dx, dy = self._raster(str(text), int(size), anchor or "la",
+                                       (int(color[0]), int(color[1]), int(color[2])))
+            h, w = arr.shape[:2]
+            x0, y0 = int(org[0]) + dx, int(org[1]) + dy
+            cx0, cy0 = max(0, x0), max(0, y0)
+            cx1, cy1 = min(cw, x0 + w), min(ch, y0 + h)
+            if cx1 <= cx0 or cy1 <= cy0:
+                continue                        # 完全在画布外
+            src = arr[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0]
+            sub = canvas[cy0:cy1, cx0:cx1]
+            a = src[:, :, 3].astype(np.uint16)[:, :, None]
+            fg = src[:, :, :3][:, :, ::-1].astype(np.uint16)     # RGBA 的 RGB -> BGR
+            out = (sub.astype(np.uint16) * (255 - a) + fg * a + 127) // 255
+            sub[:] = out.astype(np.uint8)
 
 
 class OpenCVRenderer(Renderer):
@@ -107,6 +151,12 @@ class OpenCVRenderer(Renderer):
         self.text = _Text(self.font_path, scale=self.H / 1080.0)
         self.actions: Dict[str, Callable] = dict(actions or {})
         self._inited = False
+        self._operator = None
+        self.cache_unchanged = False
+        self.cache_hits = self.canvases_built = 0
+        self._cache_key = self._cache_frame = self._cache_canvas = None
+        self._panel_key = None                 # 右侧面板缓存（见 _render_frame）
+        self._panel_cache: Optional[np.ndarray] = None
         if colors:
             self.set_colors(colors)
         if not self.font_path:
@@ -123,6 +173,30 @@ class OpenCVRenderer(Renderer):
 
     # ── 主入口 ────────────────────────────────────────────────
     def render(self, state: UIState) -> np.ndarray:
+        if state.workflow is not None:
+            if self._operator is None:
+                from .operator_view import OperatorView
+                # ★ 文字直接按最终画布像素绘制，消除小屏下重复缩放。
+                self._operator = OperatorView(_Text(self.font_path, scale=1.0))
+            return self._operator.render(state, self.W, self.H)
+        if not self.cache_unchanged:
+            return self._render_frame(state)
+        # ★ 仅显式Pi候选开启；帧对象归采集所有且不被原地修改。
+        # 同帧仍逐项比较文字、框和轮廓；过期/复位/测量变更立即重绘。
+        key = (state.level,state.title,tuple(state.detail),state.step,state.total,
+               tuple((k,repr(v)) for k,v in state.stats.items()),state.banner,state.source_name,
+               tuple((tuple(box),label,color) for box,label,color in state.boxes),
+               tuple((p.shape,p.dtype.str,p.tobytes(),color,int(thick)) for p,color,thick in state.polygons),
+               tuple((k,tuple(v)) for k,v in DEFAULT_COLORS.items()))
+        if self._cache_frame is state.frame and self._cache_key == key:
+            self.cache_hits += 1
+            return self._cache_canvas.copy()
+        canvas = self._render_frame(state)
+        self._cache_frame, self._cache_key, self._cache_canvas = state.frame,key,canvas
+        return canvas.copy()
+
+    def _render_frame(self, state: UIState) -> np.ndarray:
+        self.canvases_built += 1
         vw, vh, pw, bar_h = self._layout()
         canvas = np.full((self.H, self.W, 3), CANVAS_BG, dtype=np.uint8)
         texts: List[Tuple[str, Tuple[int, int], Tuple[int, int, int], int, str]] = []
@@ -135,20 +209,26 @@ class OpenCVRenderer(Renderer):
             sx = min(vw / float(fw), vh / float(fh))
             nw, nh = int(fw * sx), int(fh * sx)
             ox, oy = (vw - nw) / 2.0, (vh - nh) / 2.0
-            small = cv2.resize(state.frame, (nw, nh), interpolation=cv2.INTER_AREA)
-            canvas[int(oy):int(oy) + nh, int(ox):int(ox) + nw] = small
+            # ★ 直接缩放到目标 ROI（2026-10 Pi4B 实测）：旧版先 resize 出中间
+            #   缓冲再整块赋值，多一次 4.2MB 拷贝（实测 5.7ms/帧）。写进 dst
+            #   后连这一趟拷贝一起省掉，像素结果与原写法逐字节相同。
+            roi = canvas[int(oy):int(oy) + nh, int(ox):int(ox) + nw]
+            cv2.resize(state.frame, (nw, nh), dst=roi, interpolation=cv2.INTER_AREA)
 
             for poly, ckey, thick in state.polygons:
                 p = _map_poly(poly, sx, ox, oy)
                 if p is not None:
-                    cv2.polylines(canvas, [p], True, state.color(ckey), int(thick), cv2.LINE_AA)
+                    # ★ 轮廓用 LINE_8 不用 LINE_AA（2026-10 Pi4B 实测）：
+                    #   轮盘轮廓有 500+ 个点，抗锯齿绘制在 Pi 上要 5ms 以上，
+                    #   而轮廓只是提示位置，硬边完全够用。
+                    cv2.polylines(canvas, [p], True, state.color(ckey), int(thick), cv2.LINE_8)
 
             for bbox, label, ckey in state.boxes:
                 x, y, w, h = bbox
                 p1 = (int(x * sx + ox), int(y * sx + oy))
                 p2 = (int((x + w) * sx + ox), int((y + h) * sx + oy))
                 col = state.color(ckey)
-                cv2.rectangle(canvas, p1, p2, col, 2, cv2.LINE_AA)
+                cv2.rectangle(canvas, p1, p2, col, 2, cv2.LINE_8)
                 if label:
                     texts.append((label, (p1[0], max(0, p1[1] - 6)), col, 20 * self.H / 1080.0, "ld"))
 
@@ -166,8 +246,21 @@ class OpenCVRenderer(Renderer):
         if state.source_name:
             texts.append((state.source_name, (vw - 14, y0 + bar_h // 2), GREY, 18, "rm"))
 
-        # 4) 右侧面板
-        self._draw_panel(canvas, state, vw, pw, texts)
+        # 4) 右侧面板（整块缓存）
+        # ★ 2026-10 Pi4B 实测：面板里最多 12 条明细，每帧重画要 30~40ms，
+        #   而静态观察时内容几乎不变。把面板整块（底色 + 图形 + 文字）缓存，
+        #   命中时直接贴回（约 0.3ms），像素与原路径逐字节相同。
+        panel_key = (state.level, state.title, tuple(state.detail),
+                     state.step, state.total,
+                     tuple((k, tuple(v)) for k, v in DEFAULT_COLORS.items()))
+        if self._panel_cache is not None and self._panel_key == panel_key:
+            canvas[:, vw:] = self._panel_cache
+        else:
+            panel_texts: List[Tuple[str, Tuple[int, int], Tuple[int, int, int], int, str]] = []
+            self._draw_panel(canvas, state, vw, pw, panel_texts)
+            self.text.draw(canvas, panel_texts)
+            self._panel_cache = canvas[:, vw:].copy()
+            self._panel_key = panel_key
 
         self.text.draw(canvas, texts)
         return canvas
@@ -200,14 +293,14 @@ class OpenCVRenderer(Renderer):
                 if i > 0:
                     pprev = int(x0 + pad + span * (i - 1) / (n - 1))
                     cv2.line(canvas, (pprev, py), (px, py), (80, 80, 80), 2)
-                cv2.circle(canvas, (px, py), r, col, -1, cv2.LINE_AA)
+                cv2.circle(canvas, (px, py), r, col, -1, cv2.LINE_8)
 
         # 4.2 大圆形状态灯（颜色最醒目的部分）
         lamp_r = int(pw * 0.28)
         lamp_y = int(self.H * 0.32)
         col = state.color(state.level)
-        cv2.circle(canvas, (cx, lamp_y), lamp_r, col, -1, cv2.LINE_AA)
-        cv2.circle(canvas, (cx, lamp_y), lamp_r, (20, 20, 20), 3, cv2.LINE_AA)
+        cv2.circle(canvas, (cx, lamp_y), lamp_r, col, -1, cv2.LINE_8)
+        cv2.circle(canvas, (cx, lamp_y), lamp_r, (20, 20, 20), 3, cv2.LINE_8)
         glyph = LEVEL_GLYPH.get(state.level, "?")
         texts.append((glyph, (cx, lamp_y), (255, 255, 255),
                       int(lamp_r * 1.25), "mm"))
@@ -237,14 +330,33 @@ class OpenCVRenderer(Renderer):
             if self.fullscreen:
                 cv2.setWindowProperty(self.window, cv2.WND_PROP_FULLSCREEN,
                                       cv2.WINDOW_FULLSCREEN)
+            else:
+                # ★ 2026-10 Pi 实测：`--windowed` 下 WINDOW_NORMAL 不会跟着画布
+                #   尺寸走，1920x1080 的画面被开成约 400x350，现场根本看不清。
+                #   显式 resizeWindow 到画布尺寸；减掉标题栏(48)与窗口边框(4)，
+                #   再拉回左上角 —— 否则窗口继承上次位置，右侧面板会被裁掉。
+                cv2.resizeWindow(self.window, max(240, self.W - 4),
+                                 max(240, self.H - 48))
+                cv2.moveWindow(self.window, 0, 0)
             self._inited = True
         cv2.imshow(self.window, canvas)
-        key = cv2.waitKey(max(1, int(1000 / max(1, self.fps)))) & 0xFF
+        # ★ 用 pollKey 而不是 waitKey（2026-10 Pi4B 实测）：旧版按 1000/fps 阻塞，
+        #   30fps 时每帧白等 **33~35ms**；改成 waitKey(1) 后还剩约 4ms 的等待开销。
+        #   pollKey 完全不等待，实测端到端再省 ~4ms（38.4ms → 34.3ms）。
+        #   两个都负责 pump 窗口事件，按键不会丢。
+        try:
+            key = cv2.pollKey() & 0xFF
+        except AttributeError:                  # 老版本 OpenCV 没有 pollKey
+            key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):            # ESC / q 退出
             return False
         # ★ 动作键（与 QtRenderer 的按钮同义）—— 接口必须一致，
         #   否则 app.py 传 actions 时两个渲染器行为不一样，很难排查。
-        if key == ord("i") and "inspect" in self.actions:
+        if key == ord("f"):
+            self.fullscreen = not self.fullscreen
+            cv2.setWindowProperty(self.window, cv2.WND_PROP_FULLSCREEN,
+                                  cv2.WINDOW_FULLSCREEN if self.fullscreen else cv2.WINDOW_NORMAL)
+        elif key == ord("i") and "inspect" in self.actions:
             try:
                 self.actions["inspect"]()
                 print("[ui] 已请求手动抽检（i）")

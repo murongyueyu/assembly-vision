@@ -1,0 +1,754 @@
+{
+  "schema": 1,
+  "created_at": "2026-10-17T21:17:31.322215+08:00",
+  "variant": "seeded_color",
+  "feature_set": "shape_scale",
+  "scale_note": "shape_scale 使用本次采集 distance/fx 的近似桌面尺度，不读取旧标定",
+  "policy": {
+    "capture": {
+      "exposure_readback": "windows_mf",
+      "distance_mm": 440.0,
+      "warmup_frames": 30,
+      "failed_reads_limit": 15,
+      "poses_deg": [
+        0,
+        30,
+        60,
+        90,
+        135,
+        180
+      ],
+      "positions": [
+        "left",
+        "center",
+        "right",
+        "left",
+        "center",
+        "right"
+      ],
+      "backgrounds": [
+        "tray",
+        "green"
+      ],
+      "negative_scenes": [
+        "green",
+        "empty_tray",
+        "wood",
+        "shadow",
+        "glove",
+        "empty_workarea"
+      ],
+      "negative_repeats": 2
+    },
+    "annotation": {
+      "clip_interval_s": 1.0
+    },
+    "experiment": {
+      "segmentation_overrides": {
+        "segment.brass.min_area_px": 300,
+        "segment.brass.morph_close": 1,
+        "segment.brass.morph_open": 1
+      },
+      "variants": [
+        "brass",
+        "seeded_metal",
+        "seeded_metal_close",
+        "seeded_color"
+      ],
+      "seed_margin_px": 8,
+      "close_kernel_px": 1,
+      "seeded_color": {
+        "margin_px": 2,
+        "h_min": 10,
+        "h_max": 45,
+        "s_min": 30,
+        "s_max": 255,
+        "v_min": 50,
+        "v_max": 255
+      },
+      "feature_sets": {
+        "shape": [
+          "circularity",
+          "solidity",
+          "elongation",
+          "holes",
+          "straightness",
+          "end_width_ratio",
+          "area_frac"
+        ],
+        "shape_scale": [
+          "circularity",
+          "solidity",
+          "elongation",
+          "holes",
+          "straightness",
+          "end_width_ratio",
+          "area_frac",
+          "area_mm2",
+          "length_mm",
+          "short_side_mm"
+        ],
+        "shape_color": [
+          "circularity",
+          "solidity",
+          "elongation",
+          "holes",
+          "straightness",
+          "end_width_ratio",
+          "area_frac",
+          "c_hue_mean",
+          "c_hue_std",
+          "c_sat_mean",
+          "c_val_mean",
+          "c_sat_hi_frac"
+        ]
+      },
+      "min_score": 0.55,
+      "min_margin": 0.05,
+      "required_features": [
+        "length_mm",
+        "short_side_mm"
+      ],
+      "holes_tol": 1.0,
+      "ignored_features_by_part": {
+        "P4_cap": [
+          "holes"
+        ]
+      },
+      "min_samples_per_class": 8,
+      "lower_percentile": 5,
+      "upper_percentile": 95,
+      "relative_padding": 0.1,
+      "minimum_padding": 0.02,
+      "tracking_overrides": {
+        "backend": "detection",
+        "detect_every_n": 1,
+        "identity_relink": true,
+        "identity_relink_min_score": 0.85,
+        "identity_relink_area_ratio": [
+          0.8,
+          1.25
+        ],
+        "partial_follow": {
+          "min_area_px": 80,
+          "max_extent_px": 160,
+          "glove_margin_px": 12,
+          "max_distance_px": 100,
+          "max_gap_seconds": 3,
+          "min_score": 0.85,
+          "area_ratio": [
+            0.08,
+            1.6
+          ],
+          "short_side_ratio": [
+            0.25,
+            1.8
+          ],
+          "full_area_ratio": [
+            0.8,
+            1.25
+          ],
+          "min_aspect_by_part": {
+            "P2_column": 2.0
+          },
+          "unique_hand_relink": true
+        }
+      },
+      "max_candidate_extent_px": 160,
+      "reject_border_candidates": true,
+      "confirmation": {
+        "frames": 7,
+        "min_score": 0.85,
+        "max_gap_seconds": 0.25,
+        "dist_match_px": 60,
+        "iou_match": 0.15,
+        "area_ratio": [
+          0.8,
+          1.25
+        ]
+      },
+      "hole_min_area_px": 10.0
+    },
+    "evaluation": {
+      "bbox_iou": 0.5,
+      "precision_target": 0.95,
+      "recall_target": 0.95,
+      "mask_iou_target": 0.85,
+      "latency_p95_ms_target": 33.0
+    }
+  },
+  "policy_sha256": "2af0b26d4969ced04bda10e1fcf670a6c31e276d83cf37465315c9a156e60266",
+  "workpiece_sha256": "12bdba31fe55e63834c6760b32f68edd228f219b38e4d686ce054a9da7902530",
+  "camera_sha256": "ea607c8d614a0e1e45f9ad6d3506b393ac9e1ba2abd8856c5fec6ceb1db74b68",
+  "source": [
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000001.png",
+      "sha256": "4ab37c9e5e9a1d8e1c5be2d8bebdc1b88273e11b9602b17071ecb9dde9b491b3",
+      "annotation_sha256": "765e5ce133d68711633aa99f56ffde38c7717606c3ed63193dc31c655b217b01"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000002.png",
+      "sha256": "2b6692849e309a26ecb739a261de3d19e2d4dac34588c6fa137e6bd6959d6721",
+      "annotation_sha256": "413830b43ec83167d82a46f021cf42c879094aee4106c292d2e946e61cff226a"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000003.png",
+      "sha256": "1af764083e29514d25b71d21ea724c39edaee94a82329b84801405919b2ba6a6",
+      "annotation_sha256": "e14df55e0ee79c5f630f3d79aab7c68adaf7a3bf5154cc77439b9f7caaaa91cc"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000004.png",
+      "sha256": "6d1c9ae714c4dd587cc8af912938988ad4e8120ae1f1c72f3da4de3076c03b6f",
+      "annotation_sha256": "1fa83f90351211b5b316ed086a89511663c8103bfe489d3ceed35ed020dc796a"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000005.png",
+      "sha256": "bed2e95a6a9faebd3cea28dcea50cc724a2b1c1198e357d263b25943202e271e",
+      "annotation_sha256": "261193b35e8f173b7d5dae7af038c4d30342c9fe6bc38bdb88dde01b7054301e"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000006.png",
+      "sha256": "0e842b299ef809e9de8c0b948e5d3977d6c3e8f67563c65ecccf7af9e3708015",
+      "annotation_sha256": "fab425dec2a0e8c3a06437351b7628c90d25ab81cc3d18badd452423b6ea18e8"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000007.png",
+      "sha256": "b50ed5df2516f3acbbb0cd81bda3ffadf53e45fae7e906d05df9359cce601392",
+      "annotation_sha256": "29ee73bbc784365b7c9d221da501313bed48c4dbe493c312b23e44bde2c99a99"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000008.png",
+      "sha256": "bd3f7a7997b48b91cada637ec4f00b701f4e1a23d2f15f2a1b330e537c3f087f",
+      "annotation_sha256": "5d2afd7c4c50e4769ac997fdb0256df99871a6b692e6347df38280261c19b090"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000009.png",
+      "sha256": "f505fa8f25fcf7483042f79ba3b7b1a2ac2bf882c869bba7abe9d461885a6658",
+      "annotation_sha256": "5ef7a65aceb00fae50b01014d764bc5753bb4a23d2f039b96439d0cfc2b17656"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000010.png",
+      "sha256": "2b80c1490f24db003eb61dc1c07a1900db7f436c6268bebe945df3771f6856c5",
+      "annotation_sha256": "2dcbfb9316e35aaf1abd545011e7908bc39a3ce14a25d4a2c6f2e8fa6d615d6e"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000011.png",
+      "sha256": "0a6515996ad998f3aa343cb6f5ca1af5eee0aa62252129218c1d65e43baacb3d",
+      "annotation_sha256": "8548774fcf2f7c09a44618027ca4fab960e8390ed3eac08d154e1b74a54a87e0"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000012.png",
+      "sha256": "1c41e56ca12307555069b2395493c3beba5caabf47a99745017e6b4d3f91e3b5",
+      "annotation_sha256": "de92f91c460bcbbc053f669524b7613f3da0c5bf08bf990e5c1c9f62de25139a"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000013.png",
+      "sha256": "38c7245908ec29222f397a6edef0d86633611444768bfa89da821255327372d8",
+      "annotation_sha256": "e2942c4bf285dcc192366c1a133f192504c3d9df2b9346587f63c2f23a525faa"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000014.png",
+      "sha256": "3d9b9ab5e8a16d743b747b69ce26bfcb36b927b9aee71e1999a5ba0ef2a61316",
+      "annotation_sha256": "0f3c45c7a66cfac764e4e8c5f57df75827723dc6c294edb56aec340d06cae1cd"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000015.png",
+      "sha256": "c32dd2b65215ff8cb584c601d5398bdcae18e436cd0d798e7245d79a0a06f786",
+      "annotation_sha256": "cc2fb1592b9d27c0164bd9eadd39a4a5f52841a987fc5dacf441397cd4113cb5"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000016.png",
+      "sha256": "93d3621484a73188a8239ca33d59a425d3945095676d8514e6d8c8d13a995207",
+      "annotation_sha256": "bf207bdba14954e00159d1ca4ad05d65f7d24d3593dd1e263c7aab0aa74ca616"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000017.png",
+      "sha256": "b6912adc765f8a457e0b77a5eb517a41b9bbd61c132f9ffb2975496cb3b12ed6",
+      "annotation_sha256": "ede9f3bbf4da6faee234fcef5162f4bf8e52215b3b5db14341331ab287ff633c"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000018.png",
+      "sha256": "1bd82653468f17b0da8c574ebf5026ec4a048affeb98a1c7511766ed88bbc9b2",
+      "annotation_sha256": "116b4a5038bf77daeae14b3be1ca56160a54c7fa24fd604511425eb75783739a"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000019.png",
+      "sha256": "c627d3c2df793f260c01454a6c57369f9ab0ecbb4cbef14fddfbfc0c619153cc",
+      "annotation_sha256": "bac67bac116d682da4ded7d5393c12e7ccea9833dab73190261c6533312e85c4"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000020.png",
+      "sha256": "517d0a0b25f754a594063319d072371d39f4f086fc2e8c61b5cf22b19ad1972a",
+      "annotation_sha256": "efbce90a08f4668c1dae770b6b0da799cf9c4d6d95f434db38fc6c5b12b20159"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000021.png",
+      "sha256": "7f8ded36033d94e90b761ee9a1decb219cf5fd8335de850a8cc93e7d8ded39cd",
+      "annotation_sha256": "2c6691bacfd580611aaa06063a030ecf0a66e84f14b56384351037c00321a364"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000022.png",
+      "sha256": "4477462596bfb30add6c2aea9f7065abf3e37a0c0ae1cf2e87cb847a2a03391a",
+      "annotation_sha256": "1445eddf5ef822f98f77ce173aa89cc1dc32926ab85ef15a11f94258c2ec2a65"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000023.png",
+      "sha256": "b4dc04e796f73939eed803f79ba8ed6269b646ca60083fd2e4df965247bb30c5",
+      "annotation_sha256": "630e5f4a658df21f5795566abc1573e06f125eaed6d36c8b15fde3516e725223"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000024.png",
+      "sha256": "a6f1d403231b5f707cb5fdc793b33f74468cafba9a5890b05b7d3e99bb290868",
+      "annotation_sha256": "ec24d326f94ef2046ab2d63138773f93fe4111b1c755cf058ff45158ea33d2d4"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000025.png",
+      "sha256": "fff4313aae8af2726e1e4573a84f11f52ba43e9e0263b61200186b2fb5554da7",
+      "annotation_sha256": "f117478db7b4a52c13b789465f05ac9f2f089246f19eec62c7648d99406ad99c"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000026.png",
+      "sha256": "e478045c47a3beabd76a82c77f9ec9607e4a6dd1c4e61117eee57bff7fc2bb92",
+      "annotation_sha256": "a78e5e307bd9cbb7f733d9c9ea98d303d93a1088e370553ceefc09cf67461b84"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000027.png",
+      "sha256": "aa0405a83faf2577f1f5b5d5998f44f2d473e543c39b5544f21414c24fac3209",
+      "annotation_sha256": "7e09c0920988e05c07bd0db17c09489b86f61695da9a80f9b0e9969f6b02d631"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000028.png",
+      "sha256": "f0fdcbe5004d3026242e7c781ae810c8c84c44e7be47bac07600fd5b5fbd3a17",
+      "annotation_sha256": "e1aa4bed1b4ab1680f92d2681a2aa8638f22b3682f5bcf202d4954bf5fb10d6e"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000029.png",
+      "sha256": "1de438fa7612b00cb6433557249d40e158182176af82c0f415fe8a2ce1a1f7dc",
+      "annotation_sha256": "e86cd0dab7e1bbc3c4a6547d2935e75b6034e7080e037ccfc72228dc5dae9072"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000030.png",
+      "sha256": "c3531666b8b8355e4b2d474c71e72411a867f1478efb9a00602362715373e865",
+      "annotation_sha256": "27ad6cb4331d341db4a366aaba14c513709f2357b1810dc7f40fe64eebbe8de6"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000031.png",
+      "sha256": "bd0087f05f2c6e8ac7796fe7b1bb267e96bd08be761d83c7d21d5c99267a1fc6",
+      "annotation_sha256": "0143a02a1d14714ee1772a858153d3b2273adc99307d9e067ca902cb55812b51"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000032.png",
+      "sha256": "b7046ac4a9ffd6ca6219bdd2d823e33720b390ac7a171c490e58cea59a59f564",
+      "annotation_sha256": "d62f55d797ac13f95bd44c63fb7d2b2792ce7c54105d4b0c962e545ffda3185f"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000033.png",
+      "sha256": "8c4e209690336ecdd8c6c225c605b05f733c37fc63140d748ea764d3bfc41b69",
+      "annotation_sha256": "d9bd812486082fe98fce987f4efaa8e06bb17d5283d632c0fdd27ed77c94cad8"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000034.png",
+      "sha256": "64ed85b53fe68a74366d13afb293a5872164d06a14748c6fc86d61ea5a156132",
+      "annotation_sha256": "df32767f6f4f8f790b23772630663979b7ba6d95a1f95a00ac4761a3b0b439c8"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000035.png",
+      "sha256": "2a5285639d8a7b3141d0e2a60d54a03c3b3f35aaf4fd1050e652d1a7f6842fbd",
+      "annotation_sha256": "55b333c7e3b0b25dbaa6b1dac47fa4b815eca86a743398a1abe333391720e126"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000036.png",
+      "sha256": "1b9df5b0b996d393775a711fcc06e50036160d2d08ebb66a1f0b20fb1519bfb1",
+      "annotation_sha256": "4adaa7a841fafa25ac9669ae848c260a3f1abbc713b43edb5a7525aba320346d"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000037.png",
+      "sha256": "e07bac15d995b1a627737e97a985cc47dc60fbfba3ab32e1c75e5b5aa6c04194",
+      "annotation_sha256": "c0735d6564680a2581d9f7c273342efcdffb9bcbb4201d2c770404c5a66d20cd"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000038.png",
+      "sha256": "eee01de1e79c4561528848b15f019c418d74411471cb37403f0b4321eebd6947",
+      "annotation_sha256": "8add39281ff64802ca721f42d0fe1209f54789f853e4492e519d2558815ca619"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000039.png",
+      "sha256": "66ccc17f3f6dffd986a0d22b22ebc1a27c0ce85e7f794d7a61d96f27d14744c5",
+      "annotation_sha256": "33b52f5f47a79552254238255996ebd0f91e3cba9da72849bb3cd76ecf7e0660"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000040.png",
+      "sha256": "89f45322de6635138839cf7fe6d3155d5f2320c82c546324aeda2a65feb92620",
+      "annotation_sha256": "75f29432365ab75d6cc310a48087343c099aa56175bcc7a7d0ee39d710538480"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000041.png",
+      "sha256": "8568f753007075a6c7221d41472eb5553691c503a5de170a9ab7f14bbcc2d551",
+      "annotation_sha256": "695ce90439671922df5f7f174f48a94c73fcb63bfe10b58918d1422332ec2ad2"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000042.png",
+      "sha256": "399e2c5c28a6352b2e876a45901b092fc7259848d652c2d96985a4c9a2598a93",
+      "annotation_sha256": "0780d129ec90f44d9501e9f74514de7857284bac8a4e668fba606d23ee4e62be"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000043.png",
+      "sha256": "26379f11926aaf61a3441350ca9b0a014bd6fce13eefed60abb6d2bf0f00fa62",
+      "annotation_sha256": "3cf330645f8661bd1800ed95e0d47e519fabfa212d575bf022990783b2c035ee"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000044.png",
+      "sha256": "e85b229dfea3131edda4e76f4aeb800eac4fb73896b0b3dc8db6a3d98f364b40",
+      "annotation_sha256": "261dc350d62f8e85c763417a693c06fc8ef93a34c3292ab8a4296af023add2d0"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000045.png",
+      "sha256": "167caa438e99ac2bba4ebb4e95184499991387b5d0761deff95f4f59f59f363f",
+      "annotation_sha256": "ec5a41e980bc395ee32d370555c28130292f053e8dd71f259ae5e5475a7c6453"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000046.png",
+      "sha256": "4aa5efa126f6ca6804617e52bd77617da96af7090f983d99e243456749a8edf5",
+      "annotation_sha256": "4f4d507ffc47c646974f68aa39ee7e8f53931b87a8dacc640013c895b6d3c66a"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000047.png",
+      "sha256": "3917029735f5e764775b70a13637587b4343f61fd6dbb48edbc96d3f4bf05576",
+      "annotation_sha256": "0db465f47d9b6437a5b5dde060f7bb1b476fbc612f8da81f2f218093a9f6d7e5"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000048.png",
+      "sha256": "ecaff044769fc69e4d5b6b91c609891cfd4ae999c97501ec09e4b1009c3409fe",
+      "annotation_sha256": "2d27e9c2924c91585cd28c2e9229a81d14666eb5d8edac913171a124d6d0317b"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000049.png",
+      "sha256": "7488ead6f990faf4e49b68108d0afdd2f38982cd5d97e65828e8dab4626dcd61",
+      "annotation_sha256": "a19e10139720e6b9d4332532340e08e3fb615b32f99e356f31fa13c3ea000dd7"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000050.png",
+      "sha256": "4dfe0d23fbdfb3cfd7886aa8ae3bd6a1d43eb965adc20cc59ee030055c97b9b4",
+      "annotation_sha256": "7744d4b4e5e7054a5369bf69efd61f31a985f16027fe5ad6d49676074d625b50"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000051.png",
+      "sha256": "ab9735b759f32128f10645cc963f041a13576da4a75724118420bdf749d83426",
+      "annotation_sha256": "3907baf2b31e4c907c2b31827e12bf58e984d23e7a91cbdd9e328f7888f612e6"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000052.png",
+      "sha256": "a0b14afa4bfdd00fa198a7c03792c600c601df080cd3ffb49ac40412345e84b6",
+      "annotation_sha256": "94195f227105359b715c7c496b58521eb8e9e037343588078bf257e6a5613552"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000053.png",
+      "sha256": "da551a720e95ca354b0351b997ae5b89db8002ff507d16bba46df20f3bcc8962",
+      "annotation_sha256": "48d91d66ac8fd3ad1ad840485604d40caa06183f56056cf2dd76bfe5144e5e8b"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000054.png",
+      "sha256": "977ed9a58d0326e58de0a3f05799be144342db399231145b3b130fa94bc0654d",
+      "annotation_sha256": "882177b0e5455dc2a08aecb80dab425958f9ffdeea0cfdfed1d4c306301043ca"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000055.png",
+      "sha256": "778809b54aa349b037760155684d6040f294d6ad959118bae6335873432c66c5",
+      "annotation_sha256": "42c3099a4785b5ded10ae60dcc848e7d5d39bc0dfa0dfc8c0826e8b2036f48d0"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000056.png",
+      "sha256": "38bd3ca8b615eca81554590340be88e49796c60c442e86daef113c1095255e49",
+      "annotation_sha256": "735a1c0ee53a39f36483af6c5c159e2d13489daf944b8ff51c2e86ed7c6ef4c0"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000057.png",
+      "sha256": "8b4b7ff2dd3619128a323555c363b228f451a37aa90c97f5339add8aee79272c",
+      "annotation_sha256": "32b267ebaf955a4042a42a7e87928abf475e6c95e7d9119ccb5a78eb3164d076"
+    },
+    {
+      "session": "dev_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_01\\raw\\000058.png",
+      "sha256": "b8dae08e34e512658d759e8d010981da98e1f554a838d352a5ab1a6f93f4f031",
+      "annotation_sha256": "a941d67943bf5266a2a9d99390b8faaefd0beb2b95ffe562b0e50969bc2f7da3"
+    },
+    {
+      "session": "dev_cap_smooth_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_cap_smooth_01\\raw\\000001.png",
+      "sha256": "e84c198f8fc979bac2c08175c524466f13b16ce8f18ec049ecba00d29756456b",
+      "annotation_sha256": "0a9390d66405de7a3a19f45a82531846cad2c074264d8ecc9d6f2e14dc7e1eeb"
+    },
+    {
+      "session": "dev_cap_smooth_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_cap_smooth_01\\raw\\000002.png",
+      "sha256": "6e8e6cdf7506514885f173576762628516d5fa84533106d9a7904315203a37f2",
+      "annotation_sha256": "43998faabeb85be31e4cde9d44de3a4e2b8230c29b6bfd610030b65804c45952"
+    },
+    {
+      "session": "dev_cap_smooth_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_cap_smooth_01\\raw\\000003.png",
+      "sha256": "49cbc2b571dd042de5ce509e516f0ed640ceea2642b8098907e99f0927b6c50d",
+      "annotation_sha256": "43a700c968f6dfe815e22c751ed4a0c1254bfcceed09575557482fc4f7813dcf"
+    },
+    {
+      "session": "dev_cap_smooth_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_cap_smooth_01\\raw\\000004.png",
+      "sha256": "9b3397c7c71f9b9d9b15bd7e7a9cf608b21d4372ed64371fec7b3077eac1fc4b",
+      "annotation_sha256": "d5dd41ab85b2c1f9671a7ea4f3ca6762806b54a02163a9ac565e327a02b3bad9"
+    },
+    {
+      "session": "dev_cap_smooth_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_cap_smooth_01\\raw\\000005.png",
+      "sha256": "1588cc60dd18dbc9485eaa84daf0d85826ee846d1888e065922b53e335f215ae",
+      "annotation_sha256": "1dd5917241635757e8a0fb29a3e0c58b1f36d382ace074480e591fc5ab83c365"
+    },
+    {
+      "session": "dev_cap_smooth_01",
+      "image": "D:\\university resource\\大三上\\视觉\\ai_测试工具\\阶段1数据\\dev_cap_smooth_01\\raw\\000006.png",
+      "sha256": "3b3d1a595809b7a1e1aa26fa66c4c5cc7513bb1e0ab31db4071ac57485d0ff40",
+      "annotation_sha256": "2a19b73c8d31d5353f05ad63039003aba784afe07e7a8fab1fb97aa87cf3a758"
+    }
+  ],
+  "development_detection_misses": [],
+  "templates": {
+    "P1_base": {
+      "name": "底座圆盘",
+      "ranges": {
+        "circularity": [
+          0.5407372577113714,
+          0.8778684864448353
+        ],
+        "solidity": [
+          0.8582838129680319,
+          1.0752279869875088
+        ],
+        "elongation": [
+          0.9007974849787348,
+          1.151545861221015
+        ],
+        "holes": [
+          0.7,
+          10.099999999999998
+        ],
+        "straightness": [
+          0.051278650179243684,
+          0.16070136631883974
+        ],
+        "end_width_ratio": [
+          0.9082236447990046,
+          1.2229546868956507
+        ],
+        "area_frac": [
+          0.6899188239472774,
+          0.868149611761912
+        ],
+        "area_mm2": [
+          1569.9015087649034,
+          2417.382564738191
+        ],
+        "length_mm": [
+          42.89074518362105,
+          58.6229679073169
+        ],
+        "short_side_mm": [
+          42.44608925545319,
+          57.38419792046247
+        ]
+      },
+      "samples": 12
+    },
+    "P2_column": {
+      "name": "立柱",
+      "ranges": {
+        "circularity": [
+          0.12338867708245442,
+          0.2158773218540659
+        ],
+        "solidity": [
+          0.5901936095291737,
+          0.8250934056788829
+        ],
+        "elongation": [
+          6.06429822283121,
+          9.451348787026545
+        ],
+        "holes": [
+          -0.02,
+          1.02
+        ],
+        "straightness": [
+          0.0014665425457159528,
+          0.05197727335043349
+        ],
+        "end_width_ratio": [
+          0.9293171467880844,
+          1.5325708556741693
+        ],
+        "area_frac": [
+          0.5208944718294427,
+          0.7267538534730147
+        ],
+        "area_mm2": [
+          240.00591290995033,
+          490.83067642950283
+        ],
+        "length_mm": [
+          55.520320598318115,
+          76.99185846347922
+        ],
+        "short_side_mm": [
+          6.404299786011716,
+          13.0
+        ]
+      },
+      "samples": 12
+    },
+    "P3_wheel": {
+      "name": "轮盘组件",
+      "ranges": {
+        "circularity": [
+          0.11648338722952108,
+          0.19052492913160113
+        ],
+        "solidity": [
+          0.4386124106968665,
+          0.5748119671957199
+        ],
+        "elongation": [
+          0.8994136435074654,
+          1.147213152994769
+        ],
+        "holes": [
+          7.95,
+          16.5
+        ],
+        "straightness": [
+          0.07511930738477787,
+          0.32686983761317734
+        ],
+        "end_width_ratio": [
+          0.8989770720726851,
+          1.1322655891392555
+        ],
+        "area_frac": [
+          0.362923768668949,
+          0.4726191331889206
+        ],
+        "area_mm2": [
+          1514.5859866910225,
+          2307.534725726585
+        ],
+        "length_mm": [
+          57.7282297498298,
+          79.68895807315529
+        ],
+        "short_side_mm": [
+          56.853655995386674,
+          76.44465208709333
+        ]
+      },
+      "samples": 12
+    },
+    "P4_cap": {
+      "name": "顶盖铭牌",
+      "ranges": {
+        "circularity": [
+          0.34037715535138596,
+          0.9039688975637187
+        ],
+        "solidity": [
+          0.7895536737597872,
+          1.0624614047493104
+        ],
+        "elongation": [
+          0.8968052722002986,
+          1.2313336956039704
+        ],
+        "straightness": [
+          0.1308807785106687,
+          0.33028591349528325
+        ],
+        "end_width_ratio": [
+          0.8951825093144177,
+          1.3832474971246755
+        ],
+        "area_frac": [
+          0.6400653967275438,
+          0.8976984594014881
+        ],
+        "area_mm2": [
+          205.42541494919692,
+          350.67678104768567
+        ],
+        "length_mm": [
+          15.55749365843649,
+          25.0
+        ],
+        "short_side_mm": [
+          14.938108665009276,
+          24.0
+        ]
+      },
+      "samples": 18
+    }
+  },
+  "parent_model_sha256": "ad320176bdd520aef392ad6c81a31fcd67f64f82199d50a62ec96d3a2046eaa4",
+  "candidate_note": "仅启用孔数面积过滤；保留全部旧模板区间/权重、分割、尺寸必检和七帧0.85门槛；旧孔数区间作为保守兼容带，以dev及历史图回归检查，不重新拟合或使用失败图扩带"
+}

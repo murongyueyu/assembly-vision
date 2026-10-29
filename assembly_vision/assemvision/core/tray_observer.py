@@ -7,6 +7,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import copy
+import multiprocessing
+from multiprocessing import shared_memory
+import threading
+from collections import OrderedDict
 import hashlib
 from pathlib import Path
 from typing import Optional
@@ -60,7 +66,36 @@ def shape_feature(gray, mode):
     raise ValueError('未知C槽形特征：'+str(mode))
 
 
-def masked_correlation(reference, current, valid, border, search, min_visible, min_std):
+class _CorrelationCache:
+    """仅缓存由当前模板/当前遮挡掩膜共同决定的数学项，不缓存位姿或判定。"""
+    def __init__(self, capacity=64):
+        self.data = OrderedDict()
+        self.lock = threading.Lock()
+        self.capacity = capacity
+        self.hits = 0
+
+    def get(self,key):
+        with self.lock:
+            value=self.data.get(key)
+            if value is not None:
+                self.data.move_to_end(key)
+                self.hits+=1
+            return value
+
+    def put(self,key,value):
+        with self.lock:
+            self.data[key]=value
+            self.data.move_to_end(key)
+            while len(self.data)>self.capacity:
+                self.data.popitem(last=False)
+
+    def clear(self):
+        with self.lock:
+            self.data.clear()
+
+
+def masked_correlation(reference, current, valid, border, search, min_visible, min_std,
+                       backend='opencv',cache=None):
     """一次求出平移窗口的加权NCC；遮挡随当前图移动，不能补零冒充模板证据。"""
     h, w = reference.shape
     target = np.asarray(reference[border:h-border, border:w-border], 'float32')
@@ -70,12 +105,56 @@ def masked_correlation(reference, current, valid, border, search, min_visible, m
                    border-search:w-border+search].astype('float32')
     ones = np.ones_like(target)
     corr = lambda src, tpl: cv2.matchTemplate(src, tpl, cv2.TM_CCORR)
-    count = corr(weight, ones)
+    if backend in ('box_sum','box_sum_cached','fft_cached'):
+        # ★ 与全1模板相关等价的窗口求和；仍搜索原来的每一个平移位置。
+        th, tw = target.shape
+        def total(src):
+            sums = cv2.boxFilter(src, cv2.CV_32F, (tw, th), anchor=(0,0),
+                                 normalize=False, borderType=cv2.BORDER_CONSTANT)
+            return sums[:image.shape[0]-th+1, :image.shape[1]-tw+1]
+    elif backend == 'opencv':
+        total = lambda src: corr(src, ones)
+    else:
+        raise ValueError('未知C相关计算后端：'+str(backend))
+    if backend == 'fft_cached':
+        # ★ 原加权相关的频域计算；模板频谱固定，当前图/遮挡仍逐帧变换。
+        dh,dw = (cv2.getOptimalDFTSize(n) for n in image.shape)
+        sources = {}
+        def spectrum(src):
+            padded = cv2.copyMakeBorder(src,0,dh-src.shape[0],0,dw-src.shape[1],
+                                       cv2.BORDER_CONSTANT,value=0)
+            return cv2.dft(padded,flags=cv2.DFT_COMPLEX_OUTPUT)
+        def corr(src,tpl):
+            item = sources.get(id(src))
+            if item is None:
+                item=(src,spectrum(src))
+                sources[id(src)] = item
+            template_key=('fft',tpl.shape,tpl.tobytes(),dh,dw)
+            template = cache.get(template_key) if cache is not None else None
+            if template is None:
+                template=spectrum(tpl)
+                if cache is not None:
+                    cache.put(template_key,template)
+            product=cv2.mulSpectrums(item[1],template,flags=0,conjB=True)
+            result=cv2.idft(product,flags=cv2.DFT_SCALE|cv2.DFT_REAL_OUTPUT)
+            return result[:image.shape[0]-tpl.shape[0]+1,:image.shape[1]-tpl.shape[1]+1].copy()
+        # 频谱缓存不保存当前遮挡项，避免真实相机掩膜微动造成无效缓存。
+        value_cache=None
+    else:
+        value_cache=cache
+    key=(target.shape,target.tobytes(),weight.shape,weight.tobytes()) if value_cache is not None else None
+    values=value_cache.get(key) if value_cache is not None else None
+    if values is None:
+        count=total(weight)
+        sum_a=corr(weight,target)
+        sum_a2=corr(weight,target*target)
+        if value_cache is not None:
+            value_cache.put(key,(count,sum_a,sum_a2))
+    else:
+        count,sum_a,sum_a2=values
     safe_count = np.maximum(count, 1.)
-    sum_a = corr(weight, target)
-    sum_a2 = corr(weight, target * target)
-    sum_b = corr(weight * image, ones)
-    sum_b2 = corr(weight * image * image, ones)
+    sum_b = total(weight * image)
+    sum_b2 = total(weight * image * image)
     cross = corr(weight * image, target)
     var_a = np.maximum(sum_a2 - sum_a * sum_a / safe_count, 0.)
     var_b = np.maximum(sum_b2 - sum_b * sum_b / safe_count, 0.)
@@ -91,10 +170,42 @@ def masked_correlation(reference, current, valid, border, search, min_visible, m
     return float(scores[y, x]), (int(x-search), int(y-search)), float(count[y, x]/target.size)
 
 
+_PROCESS_OBSERVER = _PROCESS_MEMORY = _PROCESS_PLANES = None
+
+
+def _init_direction_process(wp, cal, settings, reference, views, name, shape, backend):
+    """spawn子进程只构造C，不打开相机；共享内存里的当前帧只读。"""
+    global _PROCESS_OBSERVER, _PROCESS_MEMORY, _PROCESS_PLANES
+    cv2.setNumThreads(1)
+    _PROCESS_OBSERVER = TrayObserver(Config(wp),Config(cal),settings,reference,
+                                     correlation_backend=backend)
+    _PROCESS_OBSERVER.reference_views = views
+    _PROCESS_MEMORY = shared_memory.SharedMemory(name=name)
+    _PROCESS_PLANES = np.ndarray(shape,dtype=np.uint8,buffer=_PROCESS_MEMORY.buf)
+    _PROCESS_PLANES.flags.writeable = False
+
+
+def _direction_process(job):
+    serial, branch, angle, center = job
+    result = _PROCESS_OBSERVER._evaluate_branch(branch,*_PROCESS_PLANES,angle,np.asarray(center))
+    return serial,result
+
+
 class TrayObserver:
     """模板与配置均为显式输入；未知掩膜、失配标定不静默退回固定槽位。"""
 
-    def __init__(self, wp: Config, cal: Config, settings: dict, reference: np.ndarray):
+    def __init__(self, wp: Config, cal: Config, settings: dict, reference: np.ndarray,
+                 workers=1, correlation_backend='opencv', execution_backend='thread'):
+        if type(workers) is not int or not 1 <= workers <= 4:
+            raise ValueError('C方向并行数必须为1～4的整数')
+        if correlation_backend not in ('opencv', 'box_sum','box_sum_cached','fft_cached'):
+            raise ValueError('C相关计算后端无效')
+        self.correlation_backend = correlation_backend
+        self._correlation_cache = _CorrelationCache() if correlation_backend in ('box_sum_cached','fft_cached') else None
+        if execution_backend not in ('thread','process'):
+            raise ValueError('C方向执行后端无效')
+        self.execution_backend = execution_backend
+        self._cal_data = copy.deepcopy(cal.data)
         if settings['geometry_binding'] != geometry_binding(wp, cal):
             raise ValueError('C槽形模板与当前c3/槽位几何不一致，需要重新建立C模板')
         self.wp, self.settings = wp, settings
@@ -122,9 +233,32 @@ class TrayObserver:
             self.slot_masks[sid] = mask > 0
         if set(self.slot_masks) != {s['id'] for s in self.tray.slots}:
             raise ValueError('C模板槽位集合不完整')
+        self.workers = workers
+        self._closed = False
+        self._process_lock = threading.Lock()
+        self._shared_memory = self._shared_planes = None
+        self._frame_serial = 0
+        self._executor = (ThreadPoolExecutor(max_workers=workers, thread_name_prefix='C-angle')
+                          if workers > 1 and execution_backend == 'thread' else None)
+
+    def close(self):
+        """调用方停止处理线程后释放方向线程池，禁止关闭后继续发布结果。"""
+        with self._process_lock:
+            self._closed = True
+            if self._executor is not None:
+                self._executor.shutdown(wait=True, cancel_futures=True)
+                self._executor = None
+            if self._shared_memory is not None:
+                self._shared_planes = None
+                self._shared_memory.close()
+                self._shared_memory.unlink()
+                self._shared_memory = None
+            if self._correlation_cache is not None:
+                self._correlation_cache.clear()
 
     @classmethod
-    def from_file(cls, wp, cal, path):
+    def from_file(cls, wp, cal, path, workers=1, correlation_backend='opencv',
+                  execution_backend='thread'):
         path = Path(path)
         settings = load_config(str(path)).data
         reference_path = path.parent / settings['reference_image']
@@ -134,7 +268,8 @@ class TrayObserver:
         if image is None:
             raise ValueError('读不到C空盘模板')
         reference = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-        observer = cls(wp, cal, settings, reference)
+        observer = cls(wp, cal, settings, reference, workers=workers,
+                       correlation_backend=correlation_backend, execution_backend=execution_backend)
         for view in settings.get('reference_views', []):
             view_path = path.parent / view['image']
             if hashlib.sha256(view_path.read_bytes()).hexdigest() != view['sha256']:
@@ -167,7 +302,51 @@ class TrayObserver:
         return cv2.warpPerspective(image, matrix, self.canvas,
                                    flags=cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR)
 
+    def _evaluate_branch(self, branch, gray, blocked, valid_image, base_angle, observed_center):
+        match = self.settings['matching']
+        branch_candidates = []
+        for angle_offset in match.get('angle_offsets_deg', [0.]):
+            pose = TrayPose(theta_deg=base_angle+90*branch+float(angle_offset),ok=True)
+            pose.tx,pose.ty = map(float,observed_center-pose.R@(self.size/2))
+            canonical = shape_feature(self._warp(gray,pose),self.feature_mode)
+            visible = (self._warp(blocked,pose,True)==0)&(self._warp(valid_image,pose,True)>0)
+            score,offset,support = masked_correlation(
+                self.reference_for_angle(pose.theta_deg),canonical,visible,
+                int(round(match['border_mm']*self.ppm)),int(round(match['translation_search_mm']*self.ppm)),
+                float(match['min_visible_fraction']),float(match['min_std']),backend=self.correlation_backend,
+                cache=self._correlation_cache)
+            delta=pose.R@(np.asarray(offset)/self.ppm)
+            pose.tx+=float(delta[0]);pose.ty+=float(delta[1])
+            branch_candidates.append((score,support,branch,offset,pose))
+        return max(branch_candidates,key=lambda item:item[0])
+
+    def _process_candidates(self, gray, blocked, valid_image, base_angle, center):
+        # ★ 一组方向全部完成前不覆盖共享帧；每个结果携带组号，绝不拼接不同帧。
+        with self._process_lock:
+            if self._closed:
+                raise RuntimeError('C方向观察器已关闭')
+            if self._executor is None:
+                shape=(3,*gray.shape)
+                self._shared_memory=shared_memory.SharedMemory(create=True,size=int(np.prod(shape)))
+                self._shared_planes=np.ndarray(shape,dtype=np.uint8,buffer=self._shared_memory.buf)
+                self._executor=ProcessPoolExecutor(max_workers=self.workers,
+                    mp_context=multiprocessing.get_context('spawn'),initializer=_init_direction_process,
+                    initargs=(self.wp.data,self._cal_data,self.settings,self.reference,self.reference_views,
+                              self._shared_memory.name,shape,self.correlation_backend))
+            self._shared_planes[0]=gray
+            self._shared_planes[1]=blocked
+            self._shared_planes[2]=valid_image
+            self._frame_serial+=1
+            serial=self._frame_serial
+            jobs=[(serial,branch,base_angle,center.tolist()) for branch in range(4)]
+            results=list(self._executor.map(_direction_process,jobs))
+            if any(number!=serial for number,_ in results):
+                raise RuntimeError('C方向进程返回了不同帧组')
+            return [result for _,result in results]
+
     def observe(self, bgr, metal_mask, glove_mask=None, brass_mask=None):
+        if self._closed:
+            raise RuntimeError('C方向观察器已关闭')
         result = TrayObservation()
         expected = tuple(self.settings['image_size'])
         if bgr is None or (bgr.shape[1], bgr.shape[0]) != expected:
@@ -207,24 +386,17 @@ class TrayObserver:
             blocked = cv2.bitwise_or(blocked, brass_mask)
         blocked = cv2.dilate(blocked, np.ones((int(match['occlusion_dilate_px']),)*2, 'uint8'))
         valid_image = np.full(bgr.shape[:2], 255, 'uint8')
-        candidates = []
         # ★ 四分支采用同样的小角搜索，不能只细化赢家从而虚增方向差距。
-        offsets = match.get('angle_offsets_deg', [0.])
-        for branch in range(4):
-            branch_candidates = []
-            for angle_offset in offsets:
-                pose = TrayPose(theta_deg=base.theta_deg + 90*branch + float(angle_offset), ok=True)
-                pose.tx, pose.ty = map(float, observed_center-pose.R@(self.size/2))
-                canonical = shape_feature(self._warp(gray, pose), self.feature_mode)
-                visible = (self._warp(blocked, pose, True) == 0) & (self._warp(valid_image, pose, True) > 0)
-                score, offset, support = masked_correlation(
-                    self.reference_for_angle(pose.theta_deg), canonical, visible,
-                    int(round(match['border_mm']*self.ppm)), int(round(match['translation_search_mm']*self.ppm)),
-                    float(match['min_visible_fraction']), float(match['min_std']))
-                delta = pose.R @ (np.asarray(offset)/self.ppm)
-                pose.tx += float(delta[0]); pose.ty += float(delta[1])
-                branch_candidates.append((score, support, branch, offset, pose))
-            candidates.append(max(branch_candidates, key=lambda item: item[0]))
+        def evaluate_branch(branch):
+            return self._evaluate_branch(branch,gray,blocked,valid_image,base.theta_deg,observed_center)
+        if self.execution_backend=='process' and self.workers>1 and all(
+                image.dtype==np.uint8 for image in (gray,blocked,valid_image)):
+            candidates=self._process_candidates(gray,blocked,valid_image,base.theta_deg,observed_center)
+        elif self._executor is None or self.execution_backend=='process':
+            candidates = [evaluate_branch(branch) for branch in range(4)]
+        else:
+            # map保留原分支顺序，等分时仍采用原串行顺序，不按任务完成先后选赢家。
+            candidates = list(self._executor.map(evaluate_branch, range(4)))
         candidates.sort(key=lambda item: -item[0])
         result.candidates = [{'branch': b, 'score': s, 'visible_fraction': v,
                               'translation_px': list(o), 'theta_deg': p.theta_deg}

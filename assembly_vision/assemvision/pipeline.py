@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import os
 import threading
 import copy
 import time
@@ -37,6 +39,9 @@ from .sources.factory import make_source
 from .types import (ERROR, IDLE, OK, WARN, AssemblyResult, Event, Frame,
                     SegResult, SlotResult, SpokeResult, Verdict)
 from .ui.base import UIState
+from .ui.auto_length_gate import PlacementGate
+from .ui.auto_length_zone import candidate
+from .ui.zone_geometry import calibrated_measure, endpoints_visible, measurement_mask
 
 
 class Shared:
@@ -84,11 +89,33 @@ class Pipeline:
         self.native_depth = None
         self._depth_index = -1
         self.integration = None
+        self._integration_depth_request = None
+        self.deployment_timing = None
+        self.deployment_runtime = None
         if integration_path is not None:
             if any(p is not None for p in (process_sequence_path, prestart_check_path, tray_observer_path)):
                 raise ValueError('ABCDE集成入口与独立C/D/E入口互斥')
             from .integration import Integration
             self.integration = Integration(integration_path, cam_cfg)
+            execution = self.integration.settings.get('deployment_runtime')
+            if execution is not None:
+                limits = {'observer_workers': 4, 'opencv_threads': 4, 'ui_fps': 30}
+                if (not set(limits) <= set(execution)
+                        or set(execution)-set(limits)-{'correlation_backend','execution_backend'}
+                        or any(type(execution[k]) is not int or not 1 <= execution[k] <= high
+                               for k, high in limits.items())
+                        or execution.get('correlation_backend','opencv') not in ('opencv','box_sum','box_sum_cached')
+                        or execution.get('execution_backend','thread') not in ('thread','process')):
+                    raise ValueError('Pi运行配置的线程数/界面频率无效')
+                self.deployment_runtime = copy.deepcopy(execution)
+            timing = self.integration.settings.get('deployment_timing')
+            if timing is not None:
+                if (set(timing) != {'mode', 'max_age_s', 'max_gap_s', 'identity_gap_s'}
+                        or timing['mode'] != 'functional_only'
+                        or not all(np.isfinite(float(timing[k])) and float(timing[k]) > 0
+                                   for k in ('max_age_s', 'max_gap_s', 'identity_gap_s'))):
+                    raise ValueError('Pi联调时序配置无效')
+                self.deployment_timing = copy.deepcopy(timing)
             process_sequence_path = self.integration.sequence_path
         self.e_mode = process_sequence_path is not None
         if self.e_mode:
@@ -98,6 +125,10 @@ class Pipeline:
                 raise ValueError('E入口与独立C/D入口互斥')
             from .core.fsm import PickSequence
             self.e_settings = load_config(process_sequence_path).data
+            if self.deployment_timing:
+                self.e_settings['confirmation'].update(
+                    max_age_s=float(self.deployment_timing['max_age_s']),
+                    max_gap_s=float(self.deployment_timing['max_gap_s']))
             self.sequence = PickSequence(wp_cfg, self.e_settings)
             prestart_check_path = str((Path(process_sequence_path).resolve().parent /
                                       self.e_settings['prestart']).resolve())
@@ -114,9 +145,18 @@ class Pipeline:
                 from .core.checks import PrestartGate
                 from .core.part_identity import FrozenPartIdentity
                 self.d_settings = load_config(prestart_check_path).data
+                if self.deployment_timing:
+                    self.d_settings['freshness'].update(
+                        max_age_s=float(self.deployment_timing['max_age_s']),
+                        max_gap_s=float(self.deployment_timing['max_gap_s']))
                 self.d_expected = {s['id']: s['part'] for s in wp_cfg.get('slots')}
                 self.d_gate = PrestartGate(self.d_expected, self.d_settings)
                 self.identity = FrozenPartIdentity(wp_cfg, cam_cfg, prestart_check_path, self.d_settings)
+                if self.deployment_timing:
+                    # ★ 用户授权仅Pi功能联调延长连续确认间隔；原policy文件/分数/帧数不动。
+                    self.identity.policy.set('experiment.confirmation.max_gap_seconds',
+                                             float(self.deployment_timing['identity_gap_s']))
+                    self.identity.reset()
                 tray_observer_path = str((Path(prestart_check_path).resolve().parent /
                                           self.d_settings['identity']['observer']).resolve())
                 self._d_snapshot = None
@@ -129,9 +169,27 @@ class Pipeline:
                 self.c_max_age_s = self.d_settings['freshness']['max_age_s']
             if not np.isfinite(self.c_max_age_s) or self.c_max_age_s <= 0:
                 raise ValueError("C显示有效期必须为有限正数")
-            self.observer = TrayObserver.from_file(wp_cfg, calib, tray_observer_path)
+            if self.deployment_runtime:
+                self.observer = TrayObserver.from_file(wp_cfg, calib, tray_observer_path,
+                    workers=self.deployment_runtime['observer_workers'],
+                    correlation_backend=self.deployment_runtime.get('correlation_backend','opencv'),
+                    execution_backend=self.deployment_runtime.get('execution_backend','thread'))
+            else:
+                self.observer = TrayObserver.from_file(wp_cfg, calib, tray_observer_path)
             self.segmenter = Segmenter(wp_cfg)
             self.tray = self.observer.tray
+            # ★ A身份（内含v5分割）与C观测互不依赖：常驻两线程每帧并行，
+            #   输入输出与串行完全一致，只改调度不改判据。
+            from concurrent.futures import ThreadPoolExecutor
+            self._d_pair = (ThreadPoolExecutor(max_workers=2, thread_name_prefix='D-pair')
+                            if self.d_mode else None)
+            # ★ 预分割线程：把 C 分割挪到上一帧 A/C 计算期间，逐帧输入输出不变。
+            self._prep_lock = threading.Lock()
+            self._prep_cv = threading.Condition(self._prep_lock)
+            self._prepared = None
+            self._prep_index = -1
+            self._prep_thread = (threading.Thread(target=self._seg_prep_loop, name='D-prep', daemon=True)
+                                 if self.d_mode else None)
             source_cfg = Config(copy.deepcopy(cam_cfg.data))
             # 只覆盖C来源的内存参数，不改正式相机控件/配置，也不启动深度流。
             if self.integration is not None:
@@ -203,6 +261,9 @@ class Pipeline:
         self._last_seg_ts = 0.0
         self._inspect_ts = 0.0
         self._inspect_waiting = False
+        self._d_seg = None
+        self._auto_length_cfg = None
+        self._auto_length_cal = None
         self._wheel_ts = 0.0
         self._pose_ts = 0.0
         self._fps_t = time.time()
@@ -249,6 +310,8 @@ class Pipeline:
                 self._threads = [
                     threading.Thread(target=self._c_acq_loop, name="D-acq" if self.d_mode else "C-acq", daemon=True),
                     threading.Thread(target=self._c_loop, name="D-check" if self.d_mode else "C-observe", daemon=True)]
+                if self._prep_thread is not None:
+                    self._threads.append(self._prep_thread)
                 for thread in self._threads:
                     thread.start()
             except Exception:
@@ -279,14 +342,24 @@ class Pipeline:
         for t in self._threads:
             if t.ident is not None:
                 t.join(timeout=1.0)
+        if getattr(self, '_d_pair', None) is not None:
+            self._d_pair.shutdown(wait=False)
         self.source.close()
         if self.c_mode:
             # 读帧可能阻塞到SDK超时；关闭来源后再确认全部退出。
             for t in self._threads:
                 if t.ident is not None:
                     t.join(timeout=1.0)
+            if getattr(self.observer,'execution_backend','thread') == 'process':
+                # spawn初次初始化可长于普通帧；等待整组完成并释放共享内存再退出。
+                self.observer.close()
+                for t in self._threads:
+                    if t.ident is not None:
+                        t.join(timeout=1.0)
             if any(t.is_alive() for t in self._threads):
                 raise RuntimeError("C线程未正常退出")
+            if hasattr(self.observer, 'close'):
+                self.observer.close()
 
     def _c_fail(self, reason, frame=None, captured_at=0.0):
         # ★ 异常覆盖成功快照；采集失败不与正在计算的旧成功竞争发布。
@@ -299,7 +372,11 @@ class Pipeline:
     def _c_acq_loop(self):
         try:
             while not self.sh.quit:
-                frame = self.source.read(want_full=self.integration is not None)
+                with self.sh.lock:
+                    request = self._integration_depth_request
+                # ★ Pi部署：正常取件只取彩色；仅人工测量请求计算同帧深度/点云。
+                # SDK仍按冻结分辨率/帧率开流，唯一采集线程不变。
+                frame = self.source.read(want_full=request is not None)
                 captured_at = time.monotonic()
                 if frame is None:
                     time.sleep(0.005)
@@ -314,6 +391,11 @@ class Pipeline:
                     frame.depth_profile = copy.deepcopy(frame.depth_profile)
                 with self.sh.lock:
                     self._c_input = (frame, captured_at)
+                    if request is not None and self._integration_depth_request is request:
+                        if request['generation'] == self._e_generation:
+                            request['sample'] = (frame, captured_at)
+                        self._integration_depth_request = None
+                        request['ready'].set()
         except Exception as exc:
             self._c_fail("采集异常：" + str(exc))
 
@@ -354,15 +436,67 @@ class Pipeline:
                 self._c_snapshot = (frame, captured_at, observation, reason)
         return True
 
+    def _seg_prep_loop(self) -> None:
+        """★ 预分割：只对真正会处理的下一帧算一次，与上一帧的A/C重叠。"""
+        while not self.sh.quit:
+            with self._prep_cv:
+                while self._prepared is not None and not self.sh.quit:
+                    self._prep_cv.wait(0.02)
+            if self.sh.quit:
+                break
+            with self.sh.lock:
+                item = self._c_input
+            if item is None:
+                time.sleep(0.002)
+                continue
+            frame, captured_at = item
+            if frame.index == self._prep_index:
+                time.sleep(0.002)
+                continue
+            self._prep_index = frame.index
+            seg, prep_error = None, ''
+            expected = tuple(self.observer.settings['image_size'])
+            try:
+                if (frame.left is not None and frame.left.dtype == np.uint8
+                        and frame.left.ndim == 3 and frame.left.shape[2] == 3
+                        and frame.size == expected and frame.scale == 1.0):
+                    seg = self.segmenter.segment(frame.left, ts=frame.ts, scale=1.,
+                                                 mm_per_px=self.tray.mm_per_px())
+            except Exception as exc:                      # noqa: BLE001
+                prep_error = 'D预分割异常：' + repr(exc)
+            with self._prep_cv:
+                self._prepared = (frame, captured_at, seg, prep_error)
+                self._prep_cv.notify_all()
+
     def _d_process_once(self):
         from .core.checks import EvidenceStamp, evaluate_prestart, prestart_unknown
-        with self.sh.lock:
-            item = self._c_input
-            if self.c_error or item is None or item[0].index == self._c_last_index:
+        if self._prep_thread is not None:
+            with self._prep_cv:
+                if self._prepared is None and not self.sh.quit:
+                    self._prep_cv.wait(0.05)
+                prepared = self._prepared
+                self._prepared = None
+                self._prep_cv.notify_all()
+            if prepared is None or self.c_error:
                 return False
-            frame, captured_at = item
-            self._c_last_index = frame.index
-            generation = self._e_generation if self.e_mode else None
+            frame, captured_at, seg, prep_error = prepared
+            with self.sh.lock:
+                if self._c_last_index is not None and frame.index <= self._c_last_index:
+                    return False
+                self._c_last_index = frame.index
+                generation = self._e_generation if self.e_mode else None
+            if prep_error:
+                self._c_fail(prep_error, frame, captured_at)
+                return True
+        else:
+            with self.sh.lock:
+                item = self._c_input
+                if self.c_error or item is None or item[0].index == self._c_last_index:
+                    return False
+                frame, captured_at = item
+                self._c_last_index = frame.index
+                generation = self._e_generation if self.e_mode else None
+            seg = None
         shape = frame.left.shape[:2] if frame.left is not None else (0, 0)
         stamp = EvidenceStamp(frame.index, captured_at, shape)
         observation, polygons, audit = None, {}, None
@@ -374,16 +508,32 @@ class Pipeline:
                 self.identity.reset()
             else:
                 # ★ 同一原图两套冻结分割分别使用；C不能改用v5实验掩膜。
-                seg = self.segmenter.segment(frame.left, ts=frame.ts, scale=1.,
-                                               mm_per_px=self.tray.mm_per_px())
+                if seg is None:
+                    seg = self.segmenter.segment(frame.left, ts=frame.ts, scale=1.,
+                                                   mm_per_px=self.tray.mm_per_px())
                 if any(m is None or m.shape != shape or m.dtype != np.uint8
                        for m in (seg.metal_mask, seg.glove_mask, seg.brass_mask)):
                     raise ValueError('缺少同帧同尺寸C三掩膜')
-                objects, audit = self.identity.observe(frame.left, stamp, self._d_intrinsics)
+                # ★ 两路并行：A身份（含v5分割）与C观测互不依赖，结果逐字段不变。
+                pair = getattr(self, '_d_pair', None)
+                if pair is not None:
+                    identity_job = pair.submit(self.identity.observe, frame.left, stamp,
+                                               self._d_intrinsics)
+                    observation_job = pair.submit(self.observer.observe, frame.left,
+                                                  seg.metal_mask, seg.glove_mask,
+                                                  brass_mask=seg.brass_mask)
+                    objects, audit = identity_job.result()
+                    observation = observation_job.result()
+                else:
+                    objects, audit = self.identity.observe(frame.left, stamp, self._d_intrinsics)
+                    observation = self.observer.observe(frame.left, seg.metal_mask, seg.glove_mask,
+                                                        brass_mask=seg.brass_mask)
                 # ★ 手只用同帧冻结分割的矩形框显示，不拟合或绘制手的轮廓。
+                # ★★ 两只手同时入画时要**每只手各画一个框**：
+                #    `glove_bbox` 仍是最大那块（老逻辑），`glove_bboxes` 是全部。
                 audit['glove_bbox'] = seg.glove_bbox
-                observation = self.observer.observe(frame.left, seg.metal_mask, seg.glove_mask,
-                                                     brass_mask=seg.brass_mask)
+                audit['glove_bboxes'] = list(getattr(seg, 'glove_bboxes', None) or
+                                             ([seg.glove_bbox] if seg.glove_bbox else []))
                 if observation.orientation_ok and observation.pose is not None:
                     for slot in self.tray.slots:
                         center = observation.pose.apply([slot['center']])[0]
@@ -396,6 +546,9 @@ class Pipeline:
                     if self.e_mode and generation != self._e_generation:
                         return True
                     result = self.d_gate.update(result, time.monotonic())
+                    _dbg_path = os.environ.get('ASSEMBLY_DEBUG_JSONL', '')
+                    if _dbg_path:
+                        self._dump_debug(_dbg_path, result, observation, objects, seg)
                     if self.e_mode:
                         # ★ E候选消费同帧实际A轨迹；部分遮挡可见跟随不等于零件消失。
                         tracking = None
@@ -403,9 +556,16 @@ class Pipeline:
                             tracking = (stamp, self.identity.tracker.tracks,
                                         polygons if observation.observed_current else {})
                         self.sequence.update(result, time.monotonic(), tracking=tracking)
-                        if self.integration is not None and len(self.sequence.done) != len(self.sequence.order):
-                            self.integration.reset()
+                        if self.integration is not None and self.integration.workflow is not None:
+                            self.integration.generation = self._e_generation
+                            self.integration.workflow.update(len(self.sequence.done),
+                                self.sequence.started, self.integration.results,
+                                self._e_generation, self.sequence.verdict.level)
+                        # ★ 2026-10-28 分阶段测高：测量结果按"当时取件进度"存，
+                        #   进度变了只是**不再显示**（decorate 按 step 过滤），
+                        #   不能在这里 reset —— 否则 2/4 测完立柱、一取轮盘就把它清了。
                     self._d_snapshot = (frame, result, observation, polygons, audit)
+                    self._d_seg = (frame.index, seg)
         except Exception as exc:
             self._c_fail('D处理异常：' + str(exc), frame, captured_at)
         return True
@@ -431,6 +591,52 @@ class Pipeline:
         if not self.d_mode:
             raise RuntimeError('未启用D开工模式')
         return copy.deepcopy(self._d_current_snapshot()[1])
+
+    def _dump_debug(self, path: str, result, observation, objects, seg) -> None:
+        """每帧判定结果追加到 JSONL（仅在 ASSEMBLY_DEBUG_JSONL 设置时启用）。
+
+        ★ 为什么需要：`evaluate_prestart` 是**单帧硬判据** —— A/C 跨帧、观测过期、
+          C 无盘 / 方向拒识 / 槽位不全，任意一条不成立整帧就 unknown 并只留一句
+          reason。界面上"一下有一、一下没有"的抖动，肉眼根本看不出断在哪一条，
+          只有把每帧的 reason 落盘才能数出是哪一条在反复触发。
+        环境变量未设置时调用点直接跳过，对现场零影响。
+        """
+        try:
+            rec = {
+                'ts': round(time.time(), 3),
+                'allow_start': bool(getattr(result, 'allow_start', False)),
+                'state': getattr(result, 'state', ''),
+                'valid': bool(getattr(result, 'valid', False)),
+                'stable_frames': int(getattr(result, 'stable_frames', 0) or 0),
+                'reason': getattr(result, 'reason', '') or '',
+                'glove_count': int(getattr(seg, 'glove_count', 0) or 0),
+                'slots': {sid: {'state': sr.state, 'expected': sr.expected,
+                                'observed': sr.observed, 'reason': sr.reason}
+                          for sid, sr in (getattr(result, 'slots', {}) or {}).items()},
+                'obs': {
+                    'found': bool(getattr(observation, 'found', False)),
+                    'orient_ok': bool(getattr(observation, 'orientation_ok', False)),
+                    'current': bool(getattr(observation, 'observed_current', False)),
+                    'state': getattr(observation, 'state', ''),
+                    'score': round(float(getattr(observation, 'score', -1.0)), 4),
+                    'margin': round(float(getattr(observation, 'margin', 0.0)), 4),
+                    'reason': getattr(observation, 'reason', '') or '',
+                    'slots': sorted((getattr(observation, 'slots', {}) or {}).keys()),
+                },
+                'objects': [{'part': getattr(o, 'part', ''),
+                             'confirmed': bool(getattr(o, 'confirmed', False)),
+                             'source': getattr(o, 'source', '')} for o in (objects or [])],
+                # ★ 四个朝向假设的分数：用来验证"赢家分支没有逐帧乱跳"。
+                #   只把分数低当成"拒识"会掩盖真正危险的情况 —— 方向选错。
+                'cands': [{'branch': int(c.get('branch', -1)),
+                           'score': round(float(c.get('score', 0.0)), 4),
+                           'theta': round(float(c.get('theta_deg', 0.0)), 3)}
+                          for c in (getattr(observation, 'candidates', []) or [])],
+            }
+            with open(path, 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+        except Exception:                                     # noqa: BLE001
+            pass          # 调试通道绝不允许影响主流程
 
     def _build_d_ui_state(self):
         frame, result, observation, polygons, audit = self._d_current_snapshot()
@@ -463,8 +669,14 @@ class Pipeline:
                 if obj.source == 'partial':
                     identity_label += '（当前残片）'
                 st.boxes.append((cv2.boundingRect(obj.contour), identity_label, color))
-            if audit.get('glove_bbox') is not None:
-                st.boxes.append((audit['glove_bbox'], '手套遮挡', WARN))
+            # ★ 兼容只有 `glove_bbox` 的老调用方/老测试：新字段缺失时退回单框。
+            #   标签规则：只有一只时仍是「手套遮挡」（与旧版逐字节一致），
+            #   两只及以上才带序号，避免把老断言改成另一种写法。
+            gboxes = (audit.get('glove_bboxes')
+                      or ([audit['glove_bbox']] if audit.get('glove_bbox') is not None else []))
+            for i, gbox in enumerate(gboxes, start=1):
+                label = '手套遮挡' if len(gboxes) == 1 else '手套遮挡%d' % i
+                st.boxes.append((gbox, label, WARN))
         if result.reason:
             st.detail.insert(0, result.reason)
         st.detail.append('仅开工联检，未启动工序')
@@ -484,25 +696,78 @@ class Pipeline:
             st.stats['流程已开工'] = '是' if started else '否'
             if self.integration is not None:
                 self.integration.decorate(st, started)
+                if st.workflow is not None and (self.c_error or not result.valid):
+                    st.workflow['fault'] = True
+                    st.workflow['complete'] = False
+                    st.banner = self.c_error or result.reason or '当前观测不可用'
+                    st.workflow['action'] = '等待可靠画面，请处理提示'
+                if self.deployment_timing:
+                    st.detail.insert(0, 'Pi功能联调：时效%.1fs / 间隔%.1fs；非实时性能验收' % (
+                        self.deployment_timing['max_age_s'], self.deployment_timing['max_gap_s']))
         return st
 
     def inspect_integration(self):
-        """UI主线程选冻结同帧测区；采集和流程窗口保持运行。"""
+        """UI主线程选冻结同帧测区；采集和流程窗口保持运行。
+
+        ★ 2026-10-28 分阶段测高：允许测量的取件进度由集成配置的 `height_stages`
+          决定（现场为 2/4 测立柱、4/4 测顶盖），不再写死 4/4。
+        ★ 2026-10-29 增加 `mode: length`：横放件量长度，只用 2D 轮廓、**不要深度**
+          （立柱高反光，D435 在它身上没有有效深度点）。
+        """
+        step = len(self.sequence.done)
+        stage = self.integration.stage_for_step(step)
         with self.sh.lock:
-            self.integration.reset()
+            if self.integration.workflow is None:
+                self.integration.reset()
+            elif stage is not None:
+                self.integration.results.pop(stage['name'], None)
+                self.integration.reason = '待测：正在选择测区'
             frame, result, _, _, _ = self._d_current_snapshot()
-            if (frame is None or not self.sequence.started or len(self.sequence.done) != len(self.sequence.order)
+            if (frame is None or not self.sequence.started or stage is None
                     or time.monotonic() - result.stamp.captured_at > self.c_max_age_s):
-                self.integration.reason = '待测：需要当前有效观测及取件4/4'
+                if stage is None:
+                    self.integration.reason = ('待测：需要当前有效观测及取件' +
+                                               self.integration.allowed_steps_text())
+                else:
+                    self.integration.reason = '待测：需要当前有效观测及取件%d/4' % step
                 return
             generation = self._e_generation
             stamp = result.stamp
             # 帧对象已归本次采集所有，不用后续画面替换选区底图。
-        if frame.depth_points_mm is None:
-            self.integration.reason = '无法测量：本帧无原生深度'
+        if stage.get('mode') == 'length':
+            self._inspect_length(frame, stamp, generation, stage)
             return
+        if frame.depth_points_mm is None:
+            if not any(t.is_alive() for t in self._threads):
+                self.integration.reason = '无法测量：本帧无原生深度'
+                return
+            request = dict(generation=generation, ready=threading.Event(), sample=None)
+            with self.sh.lock:
+                if generation != self._e_generation:
+                    return
+                self._integration_depth_request = request
+                self.integration.reason = '待测：正在请求同帧深度'
+            # 等待有上限；不在UI线程读相机，不借旧深度配新彩色。
+            timeout = self.c_max_age_s + float(self.cam.get('realsense.timeout_ms', 1000)) / 1000.
+            request['ready'].wait(timeout)
+            with self.sh.lock:
+                if self._integration_depth_request is request:
+                    self._integration_depth_request = None
+                sample = request['sample']
+                if (sample is None or generation != self._e_generation or self.sh.quit
+                        or len(self.sequence.done) != step):
+                    self.integration.reason = '待测：深度请求超时、取消或流程已复位'
+                    return
+                frame, captured_at = sample
+                from .core.checks import EvidenceStamp
+                stamp = EvidenceStamp(frame.index, captured_at, frame.left.shape[:2])
+                if (frame.depth_points_mm is None
+                        or not 0 <= time.monotonic() - captured_at <= self.c_max_age_s):
+                    self.integration.reason = '无法测量：请求帧缺深度或已过期'
+                    return
         rects = []
-        for name in ('Reference: bare green mat only', 'Target: current assembly CAP top only'):
+        for name in ('Reference: bare green mat only',
+                     'Target: current assembly %s top only' % stage['target']):
             window = '%s | frame %s | ENTER confirm / C cancel' % (name, frame.index)
             rect = cv2.selectROI(window, frame.left, showCrosshair=True, fromCenter=False)
             cv2.destroyWindow(window)
@@ -511,14 +776,214 @@ class Pipeline:
                 return
             rects.append(rect)
         with self.sh.lock:
-            if generation != self._e_generation or len(self.sequence.done) != len(self.sequence.order):
-                self.integration.reset()
+            if generation != self._e_generation or len(self.sequence.done) != step:
+                if generation != self._e_generation or self.integration.workflow is None:
+                    self.integration.reset()
+                self.integration.reason = '进度已变化，请按当前步骤重测'
                 return
             try:
-                self.integration.measure(frame, stamp, *rects, generation)
+                self.integration.measure(frame, stamp, *rects, generation, stage=stage)
+                if self.integration.workflow is not None:
+                    self.integration.workflow.update(len(self.sequence.done), self.sequence.started,
+                        self.integration.results, self._e_generation, self.sequence.verdict.level)
             except ValueError as exc:
-                self.integration.reset()
+                if self.integration.workflow is None:
+                    self.integration.reset()
                 self.integration.reason = '无法测量：' + str(exc)
+
+    def _inspect_length(self, frame, stamp, generation, stage):
+        if not stage.get('auto_zone'):
+            return self._inspect_length_manual(frame, stamp, generation, stage)
+        return self._inspect_length_auto(frame, stamp, generation, stage)
+
+    def _inspect_length_manual(self, frame, stamp, generation, stage):
+        """★ 2026-10-29 长度阶段：只选一个测区，用同一帧的金属掩膜量轮廓长边。
+
+        不请求深度、不借旧掩膜：分割就在这张冻结帧上做（~100ms，UI 线程一次性）。
+        """
+        window = ('Target: current assembly %s length | frame %s | ENTER confirm / C cancel'
+                  % (stage['target'], frame.index))
+        rect = cv2.selectROI(window, frame.left, showCrosshair=True, fromCenter=False)
+        cv2.destroyWindow(window)
+        if rect[2] <= 0 or rect[3] <= 0:
+            with self.sh.lock:
+                self.integration.reason = '待测：人工选区已取消'
+            return
+        mmpp = self.tray.mm_per_px(1.0)
+        seg, error = None, ''
+        try:
+            seg = self.segmenter.segment(frame.left, ts=frame.ts, scale=1.0,
+                                         want_features=False, work_roi=None,
+                                         mm_per_px=mmpp)
+        except Exception as exc:                       # noqa: BLE001
+            error = '分割异常：' + repr(exc)
+        with self.sh.lock:
+            if generation != self._e_generation or len(self.sequence.done) != int(stage['at_step']):
+                if generation != self._e_generation or self.integration.workflow is None:
+                    self.integration.reset()
+                self.integration.reason = '进度已变化，请按当前步骤重测'
+                return
+            if error:
+                if self.integration.workflow is None:
+                    self.integration.reset()
+                self.integration.reason = '无法测量：' + error
+                return
+            mask = seg.brass_mask if seg is not None and seg.brass_mask is not None else (
+                seg.metal_mask if seg is not None else None)
+            if mask is None or mask.shape[:2] != frame.left.shape[:2]:
+                if self.integration.workflow is None:
+                    self.integration.reset()
+                self.integration.reason = '无法测量：缺少同帧金属掩膜'
+                return
+            try:
+                self.integration.measure_length(frame, stamp, rect, generation,
+                                                stage=stage, mask=mask, mm_per_px=mmpp)
+                if self.integration.workflow is not None:
+                    self.integration.workflow.update(len(self.sequence.done), self.sequence.started,
+                        self.integration.results, self._e_generation, self.sequence.verdict.level)
+            except ValueError as exc:
+                if self.integration.workflow is None:
+                    self.integration.reset()
+                self.integration.reason = '无法测量：' + str(exc)
+
+    def _inspect_length_auto(self, frame, stamp, generation, stage):
+        """按 I 后自动生成长度框：固定检测区 + 2 秒稳定 + 自动测量。
+
+        不阻塞采集/处理线程：每帧读取 D 处理线程发布的最新全分辨率帧和分割。
+        合格后写入 integration 结果并关闭本窗口，主界面进入下一步。
+        """
+        from .integration import assess_height
+        from .ui.base import find_cjk_font
+        from .ui.opencv_renderer import _Text
+
+        root = Path(__file__).resolve().parents[1]
+        if getattr(self, '_auto_length_cfg', None) is None:
+            cfg = load_config(str(root / 'config/auto_length_zone_preview.yaml'))
+            self._auto_length_cfg = dict(cfg.data)
+            cal = root / 'config' / self._auto_length_cfg['calibration_file']
+            self._auto_length_cal = json.loads(cal.read_text(encoding='utf-8'))
+        settings = self._auto_length_cfg
+        zone = tuple(int(v) for v in settings['zone'])
+        gate = PlacementGate(settings)
+        text = _Text(find_cjk_font(), 1.0)
+        window = 'AUTO LENGTH | step %d | Q cancel' % int(stage['at_step'])
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window, 960, 540)
+        cv2.moveWindow(window, 0, 0)
+        try:
+            # 主界面是全屏窗口；不置顶时覆盖层会藏在它后面，操作者以为卡死。
+            cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
+        except Exception:                                   # noqa: BLE001
+            pass
+
+        def draw(image, status, reason, message='', color=None):
+            canvas = image.copy()
+            x, y, w, h = zone
+            cv2.rectangle(canvas, (x, y), (x + w, y + h),
+                          color or ((154, 218, 65) if status.get('color') == 'green'
+                                    else (81, 196, 248)), 3)
+            items = [('自动长度检测 · 保持2秒', (18, 26), (244, 240, 232), 20, 'la'),
+                     ('稳定 %.1f / %.1f 秒' % (
+                         min(settings['hold_seconds'], float(status.get('elapsed', 0.))),
+                         settings['hold_seconds']), (18, 442), (244, 240, 232), 20, 'la'),
+                     (str(reason)[:38], (18, 466), (173, 160, 141), 14, 'la')]
+            if message:
+                items.append((str(message)[:36], (18, 52),
+                              color or (244, 240, 232), 20, 'la'))
+            text.draw(canvas, items)
+            cv2.imshow(window, cv2.resize(canvas, (960, 540), interpolation=cv2.INTER_LINEAR))
+
+        last_index, last = -1, None
+        fail_text = ''
+        status = dict(color='yellow', elapsed=0., trigger=False, measured=False)
+        reason = '等待相机画面'
+        try:
+            while not self.sh.quit:
+                with self.sh.lock:
+                    if generation != self._e_generation or len(self.sequence.done) != int(stage['at_step']):
+                        self.integration.reason = '进度已变化，自动长度检测已关闭'
+                        return
+                    snap = self._d_snapshot
+                    pair = getattr(self, '_d_seg', None)
+                    if snap is None or pair is None:
+                        f = result = seg = None
+                    else:
+                        f, result, _, _, _ = snap
+                        seg = pair[1] if pair[0] == f.index else None
+                now = time.monotonic()
+                if f is None or seg is None:
+                    status = gate.update(now, hard=True)
+                    reason = '等待相机画面'
+                    last = None
+                elif f.index != last_index:
+                    last_index = f.index
+                    h, w = f.left.shape[:2]
+                    x, y, zw, zh = zone
+                    if x < 0 or y < 0 or x + zw > w or y + zh > h:
+                        self.integration.reason = '自动长度框超出相机画面'
+                        return
+                    local_mask = measurement_mask(f.left, seg, settings)
+                    metrics, reason, empty = candidate(seg, zone, settings, mask=local_mask)
+                    if metrics is not None and not endpoints_visible(f.left, local_mask, zone, settings):
+                        metrics = None
+                        reason = '手可扶，请露出底座外侧面和螺纹尖端'
+                    status = gate.update(now, metrics, empty)
+                    last = (f, status, reason)
+                    if status.get('trigger'):
+                        try:
+                            measured, _ = calibrated_measure(local_mask, zone, self._auto_length_cal)
+                        except Exception as exc:                 # noqa: BLE001
+                            measured = None
+                            fail_text = '测量异常：' + str(exc)
+                        else:
+                            fail_text = ''
+                        conforms = (assess_height(measured['length_mm'], stage['baseline_mm'],
+                                                  stage['tolerance_mm'], stage['upper_limit_mm'])
+                                    if measured is not None and measured.get('ok')
+                                    and measured.get('length_mm') is not None
+                                    and stage['accepted'] else None)
+                        if conforms:
+                            with self.sh.lock:
+                                if (generation != self._e_generation
+                                        or len(self.sequence.done) != int(stage['at_step'])):
+                                    self.integration.reason = '进度已变化，自动长度检测已关闭'
+                                    return
+                                self.integration.accept_length_result(
+                                    f, result.stamp, measured, generation, stage, zone)
+                                if self.integration.workflow is not None:
+                                    self.integration.workflow.update(
+                                        len(self.sequence.done), self.sequence.started,
+                                        self.integration.results, self._e_generation,
+                                        self.sequence.verdict.level)
+                            draw(f.left, status, reason,
+                                 '合格 %.2f mm，检测完成' % measured['length_mm'],
+                                 (154, 218, 65))
+                            cv2.waitKey(600)
+                            return
+                        if measured is not None and measured.get('length_mm') is not None:
+                            fail_text = '不合格：%.2f mm（%.1f~%.1f），请移出后重放' % (
+                                measured['length_mm'], stage['min_mm'], stage['max_mm'])
+                        elif not fail_text:
+                            fail_text = '不合格：测量无效，请移出后重放'
+                if fail_text and not status.get('measured'):
+                    fail_text = ''
+                if last is not None:
+                    f_last, status_last, reason_last = last
+                    draw(f_last.left, status_last, reason_last, fail_text,
+                         (103, 105, 246) if fail_text else None)
+                else:
+                    draw(np.zeros((480, 640, 3), np.uint8), status,
+                         reason, '等待相机画面')
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord('q'), ord('c')):
+                    self.integration.reason = '自动长度检测已取消'
+                    return
+                time.sleep(0.01)
+        finally:
+            try:
+                cv2.destroyWindow(window)
+            except Exception:                                   # noqa: BLE001
+                pass
 
     def _c_loop(self):
         while not self.sh.quit:
@@ -879,6 +1344,14 @@ class Pipeline:
                 self._d_snapshot = None
                 if self.integration is not None:
                     self.integration.reset()
+                    self.integration.generation = self._e_generation
+                    if self._integration_depth_request is not None:
+                        self._integration_depth_request['ready'].set()
+                        self._integration_depth_request = None
+                if getattr(self, '_prepared', None) is not None:
+                    with self._prep_cv:
+                        self._prepared = None
+                        self._prep_cv.notify_all()
             return
         if self.c_mode:
             return
@@ -956,8 +1429,12 @@ class Pipeline:
             for b in seg.brass_blobs[:6]:
                 part = self._label_for(b.centroid, scale)
                 st.boxes.append((b.bbox, part, OK))
-            if seg.glove_bbox is not None:
-                st.boxes.append((seg.glove_bbox, "手套", WARN))
+            # ★ 每只手套一个框：两只手同时入画时都要画出来
+            for i, gbox in enumerate(getattr(seg, 'glove_bboxes', None) or
+                                     ([seg.glove_bbox] if seg.glove_bbox is not None else []),
+                                     start=1):
+                label = "手套" if (getattr(seg, 'glove_count', 1) or 1) == 1 else f"手套{i}"
+                st.boxes.append((gbox, label, WARN))
 
         if verdict.level == ERROR:
             st.banner = verdict.title

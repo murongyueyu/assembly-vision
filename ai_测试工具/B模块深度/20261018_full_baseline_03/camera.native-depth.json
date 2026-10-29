@@ -1,0 +1,142 @@
+{
+  "source": "d435",
+  "device": 0,
+  "path": "",
+  "realsense": {
+    "width": 640,
+    "height": 480,
+    "fps": 30,
+    "serial": "",
+    "timeout_ms": 1000,
+    "open_retries": 3,
+    "retry_wait_s": 1.5,
+    "controls": {
+      "enable_auto_exposure": 0,
+      "exposure": 126,
+      "gain": 28,
+      "enable_auto_white_balance": 0,
+      "white_balance": 6300,
+      "brightness": -13,
+      "contrast": 50,
+      "gamma": 300,
+      "saturation": 60,
+      "sharpness": 100,
+      "hue": 0,
+      "backlight_compensation": 0,
+      "power_line_frequency": 3
+    }
+  },
+  "capture": {
+    "backend": "dshow",
+    "backend_windows": "dshow",
+    "fourcc": "MJPG",
+    "width": 1280,
+    "height": 480,
+    "frame_rate_hint": 30,
+    "fps": 30,
+    "mode": "side_by_side",
+    "left_index": 0,
+    "decoder": "full"
+  },
+  "locked_controls": {
+    "auto_exposure": 1,
+    "exposure_absolute": 120,
+    "gain": 30,
+    "white_balance_automatic": 0,
+    "white_balance_temperature": 4600
+  },
+  "exposure_windows": {
+    "exposure": -6.0,
+    "auto_exposure_off": 0.25
+  },
+  "scale": {
+    "realtime": 1.0,
+    "inspect": 1.0
+  },
+  "video": {
+    "loop": true,
+    "pace": true,
+    "stereo": false,
+    "fps": 15,
+    "start_frame": 0
+  },
+  "depth": {
+    "enabled": true,
+    "every_n_frames": 30,
+    "matcher": "sgbm",
+    "work_scale": 0.5,
+    "num_disparities": 160,
+    "block_size": 5,
+    "min_valid_ratio": 0.12,
+    "backend": "realsense"
+  },
+  "pose_check": {
+    "enabled": true,
+    "every_n_frames": 15,
+    "aruco_dict": "DICT_4X4_50",
+    "marker_ids": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "warn_px": 3.0,
+    "fail_px": 20.0,
+    "min_markers": 3
+  },
+  "native_depth": {
+    "min_distance_mm": 150.0,
+    "max_distance_mm": 1000.0,
+    "min_points": 50,
+    "min_valid_ratio": 0.6,
+    "max_plane_residual_mm": 2.0,
+    "max_height_spread_mm": 8.0,
+    "max_fit_points": 5000,
+    "fit_iterations": 5,
+    "warmup_frames": 30,
+    "sample_frames": 30,
+    "max_sample_attempts": 150,
+    "max_temporal_spread_mm": 4.0,
+    "min_baseline_height_mm": 5.0,
+    "height_tolerance_mm": 15.0,
+    "max_age_s": 2.0,
+    "reference_rect": [
+      64,
+      13,
+      290,
+      220
+    ],
+    "target_rect": [
+      235,
+      313,
+      26,
+      26
+    ],
+    "profile": {
+      "serial": "262322070302",
+      "width": 640,
+      "height": 480,
+      "fx": 603.8247680664062,
+      "fy": 602.4337158203125,
+      "ppx": 325.0372314453125,
+      "ppy": 254.80599975585938,
+      "model": "distortion.inverse_brown_conrady",
+      "coeffs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_scale": 0.0010000000474974513
+    },
+    "baseline_height_mm": 68.02511432247408,
+    "baseline_accepted": false,
+    "calibrated_at": "2026-10-18T12:38:48",
+    "measurement_surface": "cap_region",
+    "manual_reference_height_mm_approx": 67,
+    "manual_reference_note": "用户确认正常装配轮盘倾斜；测得为顶盖到底部，零平面为绿垫。近似尺量不等于精密真值。",
+    "controlled_validation_passed": true,
+    "validation_scope": "manual_cap_region_normal_missing_column_restore; automatic_target_association_not_implemented"
+  }
+}

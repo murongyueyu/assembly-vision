@@ -96,14 +96,10 @@ outline:
 matching:
   exclude_brass: true  # ★ 仅屏蔽槽形匹配干扰，不作为槽内占用输入
   feature: gradient
+  # ★ 2026-10-24 用户授权：只做4朝向、去掉±微调（4个位姿假设，原28→12→4）。
+  #   16帧真实原图对比：theta 逐帧稳定差 -1.000°、槽位状态一致；C观测 107ms→39ms。
   angle_offsets_deg:
-  - -3
-  - -2
-  - -1
   - 0
-  - 1
-  - 2
-  - 3
   blur_kernel: 5
   blur_sigma: 1.0
   occlusion_dilate_px: 7
@@ -111,7 +107,22 @@ matching:
   translation_search_mm: 5.0
   min_visible_fraction: 0.4
   min_std: 1.0
-  min_score: 0.45
+  # ★★ 2026-10-27 现场重标：0.45 -> 0.40。
+  #   症状：四件零件放好后，四个零件的识别**逐帧闪断**（界面上四槽同时变 unknown）。
+  #   逐帧审计（ASSEMBLY_DEBUG_JSONL）273 帧实测：
+  #     · 失败 140 帧，reason 全是「槽形匹配不足或四个方向无法可靠区分」
+  #     · 失败帧 score 中位 0.4452，通过帧 0.4551 —— **分数线正好压在噪声中位数上**
+  #     · 但 margin 实测 0.319～0.380，远高于 min_margin 0.15
+  #       ⇒ 方向本身**分得很开**，被拒掉的唯一原因是绝对分数差一点点。
+  #   为什么分数会系统性偏低（0.405~0.471）：
+  #     ① 2026-10-24 把 angle_offsets_deg 从 [-3..3] 砍成 [0]（提速），
+  #        不再搜最优角度，match 分天生低一截（文档已记录 theta 恒差 -1.000°）；
+  #     ② 空盘标定（basis 写的是 eight empty-tray directions），
+  #        而现场盘里放着 4 个零件，可见像素被进一步削掉。
+  #   0.40 的依据：低于实测最低通过分（0.405）留 0.005 余量，
+  #     同时仍高于任何"对不上"的量级（0.2x）；**方向安全靠 margin 把关，不靠这里的绝对分**。
+  #   ⚠️ 若将来恢复 angle_offsets_deg 的角度微调，必须把这条重新标定回 0.45 以上。
+  min_score: 0.40
   min_margin: 0.15
   min_frame_coverage: 0.98
 occupancy:

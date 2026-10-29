@@ -35,6 +35,9 @@ def main():
          patch('assemvision.core.part_identity.FrozenPartIdentity', return_value=identity), \
          patch('assemvision.pipeline.make_source', return_value=source):
         pipe = Pipeline(cam, wp, Config(), process_sequence_path=str(CANDIDATE))
+    # ★ 2026-10-25: 10-24 加了 D-prep 预分割线程后，_d_process_once 改从 _prepared 取帧；
+    #   本用例是直接写 _c_input 的注入式测试，关掉 prep 线程以走原来的 _c_input 分支。
+    pipe._prep_thread = None
     pipe.segmenter, pipe._d_intrinsics = previous.segmenter, previous._d_intrinsics
     image = np.zeros((480, 640, 3), 'uint8')
     objects = copy.deepcopy(identity.observe(image, None, None)[0])
