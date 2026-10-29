@@ -1,0 +1,634 @@
+diff --git a/assemvision/ui/auto_length_gate.py b/assemvision/ui/auto_length_gate.py
+new file mode 100644
+index 0000000..7fd58de
+--- /dev/null
++++ b/assemvision/ui/auto_length_gate.py
+@@ -0,0 +1,52 @@
++"""F检测框联调：只负责稳定两秒触发，不改变长度算法或质量门槛。"""
++import math
++
++
++class PlacementGate:
++    def __init__(self, settings):
++        self.settings = settings
++        self.hold = float(settings['hold_seconds'])
++        self.gap = float(settings['max_frame_gap_seconds'])
++        self.min_frames = int(settings['min_frames'])
++        if not all(math.isfinite(v) and v > 0 for v in (self.hold, self.gap)) or self.min_frames < 2:
++            raise ValueError('稳定计时参数无效')
++        self.reset()
++
++    def reset(self):
++        self.start = self.last = self.anchor = None
++        self.frames = 0
++        self.triggered = False
++        self.empty_since = None
++
++    def update(self, now, metrics=None, empty=False):
++        if self.triggered:
++            if empty:
++                if self.empty_since is None:
++                    self.empty_since = now
++                if now-self.empty_since >= float(self.settings['rearm_empty_seconds']):
++                    self.reset()
++            else:
++                self.empty_since = None
++            if self.triggered:
++                return dict(color='green', elapsed=self.hold, trigger=False, measured=True)
++        if metrics is None:
++            self.start = self.anchor = self.last = None
++            self.frames = 0
++            return dict(color='yellow', elapsed=0., trigger=False, measured=False)
++        metrics = tuple(float(v) for v in metrics)
++        valid = all(math.isfinite(v) for v in metrics)
++        if not valid:
++            return self.update(now, None)
++        limits = (float(self.settings['max_center_drift_px']),)*2 + (
++            float(self.settings['max_length_drift_px']),)
++        stable = (self.anchor is not None and self.last is not None and 0 < now-self.last <= self.gap
++                  and all(abs(a-b) <= limit for a,b,limit in zip(metrics,self.anchor,limits)))
++        if not stable:
++            self.start, self.anchor, self.frames = now, metrics, 0
++        self.last = now
++        self.frames += 1
++        elapsed = max(0.,now-self.start)
++        fire = elapsed >= self.hold and self.frames >= self.min_frames
++        if fire:
++            self.triggered = True
++        return dict(color='green',elapsed=elapsed,trigger=fire,measured=self.triggered)
+diff --git a/assemvision/ui/zone_geometry.py b/assemvision/ui/zone_geometry.py
+new file mode 100644
+index 0000000..b9b27b4
+--- /dev/null
++++ b/assemvision/ui/zone_geometry.py
+@@ -0,0 +1,88 @@
++"""独立长度框的初步几何校准；不修改原B算法或生产判据。"""
++import cv2
++import numpy as np
++from ..core.length import measure_length
++
++
++def endpoints_visible(image, mask, zone, settings):
++    """允许手套贴着底座扶持；仅验证可见轮廓几何，不凭手套距离推断遮挡。"""
++    x,y,w,h=zone
++    local=mask[y:y+h,x:x+w]
++    yy,xx=np.nonzero(local)
++    if len(xx)<int(settings['min_seed_pixels']):return False
++    points=np.column_stack([xx,yy]).astype(np.float64)
++    distance=cv2.distanceTransform(local,cv2.DIST_L2,5)
++    _,_,_,root=cv2.minMaxLoc(distance)
++    root=np.array(root,float)
++    offsets=points-root
++    tip=offsets[np.argmax(np.sum(offsets**2,axis=1))]
++    length=np.linalg.norm(tip)
++    if length<1:return False
++    direction=tip/length
++    u=offsets@direction
++    lo,hi=settings['endpoint_fit_fraction']
++    shaft=points[(u>float(lo)*length)&(u<float(hi)*length)]
++    if len(shaft)<int(settings['min_seed_pixels']):return False
++    ux,uy,cx,cy=cv2.fitLine(shaft.astype(np.float32),cv2.DIST_HUBER,0,.01,.01).ravel()
++    direction=np.array([ux,uy]);center=np.array([cx,cy])
++    projected=(points-center)@direction
++    # ★ 金属与蓝手套相邻，既可能是正常扶持，也可能是真遮挡。
++    #   不能只凭距离判遮挡；当前仅确认可见轮廓能形成杆身测量证据。
++    #   精度与完整性尚未验收，不将此结果用于正式质量放行。
++    return True
++
++
++def measurement_mask(image, seg, settings):
++    """局部绿幕/蓝手套排除，并要求与既有金属种子相连，补足反光外边缘。"""
++    hsv=cv2.cvtColor(image,cv2.COLOR_BGR2HSV)
++    green=cv2.inRange(hsv,tuple(settings['green_hsv_lower']),tuple(settings['green_hsv_upper']))
++    blue=cv2.inRange(hsv,tuple(settings['glove_hsv_lower']),tuple(settings['glove_hsv_upper']))
++    foreground=cv2.bitwise_not(cv2.bitwise_or(green,blue))
++    x,y,w,h=settings['zone']
++    local=foreground[y:y+h,x:x+w].copy()
++    cs,_=cv2.findContours(local,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
++    seed=seg.brass_mask if seg.brass_mask is not None else seg.metal_mask
++    result=np.zeros_like(foreground)
++    if seed is None:return result
++    for c in cs:
++        if cv2.contourArea(c)<settings['min_contour_area_px']:continue
++        item=np.zeros_like(local);cv2.drawContours(item,[c],-1,255,-1)
++        if np.count_nonzero((item>0)&(seed[y:y+h,x:x+w]>0))>=settings['min_seed_pixels']:
++            cv2.drawContours(result,[c+np.array([[[x,y]]],np.int32)],-1,255,-1)
++    return result
++
++
++def calibrated_measure(mask, zone, calibration):
++    """相机射线投到已校准的轴线平面，正射到毫米网格，再调用原长度函数。
++
++    ★ 假设圆盘边缘接触绿幕、轴线平行绿幕；若手垫高或轴线倾斜，数值仍可能偏。
++    """
++    intr=calibration['intrinsics']
++    if list(mask.shape[::-1])!=calibration['image_size']:
++        raise ValueError('标定分辨率与当前图像不符')
++    if any(abs(v)>1e-12 for v in calibration['distortion_coefficients']):
++        raise ValueError('此候选尚未支持非零畸变，不能跳过校正')
++    K=np.array([[intr['fx'],0,intr['ppx']],[0,intr['fy'],intr['ppy']],[0,0,1.]],float)
++    n=np.array(calibration['floor_plane_normal'],float);n/=np.linalg.norm(n)
++    offset=float(calibration['floor_plane_offset_calibrated_mm'])-float(calibration['axis_height_mm'])
++    if not np.isfinite(offset) or offset<=0:raise ValueError('无效测量平面')
++    b1=np.cross(n,[1.,0.,0.]);b1/=np.linalg.norm(b1);b2=np.cross(n,b1)
++    inv=np.linalg.inv(K)
++    H=np.stack([offset*(b1@inv),offset*(b2@inv),n@inv])
++    x,y,w,h=zone
++    corners=np.array([[[x,y],[x+w,y],[x+w,y+h],[x,y+h]]],np.float64)
++    projected=cv2.perspectiveTransform(corners,H)[0]
++    low=projected.min(0)-2.;high=projected.max(0)+2.
++    ppm=float(calibration['rectified_pixels_per_mm'])
++    if not np.isfinite(ppm) or ppm<=0:raise ValueError('正射分辨率无效')
++    size=np.ceil((high-low)*ppm).astype(int)
++    if (size<1).any() or (size>4096).any():raise ValueError('正射检测区异常')
++    canvas=np.array([[ppm,0,-low[0]*ppm],[0,ppm,-low[1]*ppm],[0,0,1.]])
++    local_to_image=np.array([[1.,0,x],[0,1.,y],[0,0,1.]])
++    rectified=cv2.warpPerspective(mask[y:y+h,x:x+w],canvas@H@local_to_image,
++                                 tuple(int(v) for v in size),flags=cv2.INTER_NEAREST)
++    result=measure_length(rectified,(0,0,int(size[0]),int(size[1])),1./ppm)
++    result.update(scale_source='tray160_floor_plane_axis_height',
++                  calibration_scope=calibration['calibration_scope'],
++                  axis_height_mm=calibration['axis_height_mm'])
++    return result,rectified
+diff --git a/config/auto_length_zone_calibration.json b/config/auto_length_zone_calibration.json
+new file mode 100644
+index 0000000..4233a13
+--- /dev/null
++++ b/config/auto_length_zone_calibration.json
+@@ -0,0 +1,88 @@
++{
++  "image_size": [
++    640,
++    480
++  ],
++  "intrinsics": {
++    "width": 640.0,
++    "height": 480.0,
++    "fx": 603.8247680664062,
++    "fy": 602.4337158203125,
++    "ppx": 325.0372314453125,
++    "ppy": 254.80599975585938,
++    "coeffs": [
++      0.0,
++      0.0,
++      0.0,
++      0.0,
++      0.0
++    ],
++    "model": "distortion.inverse_brown_conrady",
++    "frame_index": 21
++  },
++  "tray_side_mm": 160.0,
++  "tray_corners": [
++    [
++      240.05601501464844,
++      39.86578369140625
++    ],
++    [
++      474.04718017578125,
++      34.749874114990234
++    ],
++    [
++      470.1158447265625,
++      263.83843994140625
++    ],
++    [
++      251.8455810546875,
++      268.6846008300781
++    ]
++  ],
++  "tray_plane_normal": [
++    0.011673572784943147,
++    -0.12935787992865144,
++    0.9915292565521198
++  ],
++  "tray_plane_offset_mm": 433.0444953261439,
++  "floor_plane_normal": [
++    0.011673572784943147,
++    -0.12935787992865144,
++    0.9915292565521198
++  ],
++  "floor_plane_offset_mm": 437.0815009094211,
++  "floor_rms_mm": 0.9018361434104607,
++  "axis_height_mm": 24.5,
++  "validation_truth_length_mm": 64.3,
++  "base_diameter_mm": 49.0,
++  "tray_edge_lengths_mm": [
++    160.6764162528843,
++    161.4558380214085,
++    159.7526005247995,
++    158.0755084668243
++  ],
++  "axis_assumption": "底座圆盘边缘接触绿幕，杆轴平行绿幕；手扶但不垫高",
++  "scale_status": "160mm料盘初步几何校准；64.3mm只作独立复核，不拟合长度",
++  "tray_rim_height_samples_mm": [
++    8.23937758741971,
++    9.156103975748238,
++    7.817536597929347
++  ],
++  "tray_rim_median_height_mm": 8.23937758741971,
++  "depth_metric_scale": 1.009799345203286,
++  "floor_plane_offset_calibrated_mm": 441.3646134188029,
++  "rectified_pixels_per_mm": 4.0,
++  "calibration_scope": "固定相机；底座边缘接触绿幕且杆轴平行绿幕。手可扶，不垫高底座或遮端点。",
++  "distortion_coefficients": [
++    0.0,
++    0.0,
++    0.0,
++    0.0,
++    0.0
++  ],
++  "source_color": "reference.raw.png（四角完整）",
++  "source_depth": "reference-full.xyz.npy（同一固定相机，更新绿幕和料盘边缘深度）",
++  "latest_color_tray_clipped": true,
++  "validation_status": "NOT_ACCEPTED: location/pose and metal boundary still need validation; previous 64.24 and 67.04 are historical intermediate mask results, not accuracy guarantee",
++  "quality_release_enabled": false
++}
+\ No newline at end of file
+diff --git a/config/auto_length_zone_preview.yaml b/config/auto_length_zone_preview.yaml
+new file mode 100644
+index 0000000..2b33015
+--- /dev/null
++++ b/config/auto_length_zone_preview.yaml
+@@ -0,0 +1,32 @@
++# ★ F独立检测框联调。仅参考长度，不写六步完成、不作尺寸质量放行。
++zone: [270, 310, 170, 120]
++hold_seconds: 2.0
++min_frames: 5
++max_frame_gap_seconds: 0.5
++max_center_drift_px: 3.0
++max_length_drift_px: 3.0
++rearm_empty_seconds: 0.6
++edge_margin_px: 3
++min_contour_area_px: 60.0
++min_aspect: 1.15
++max_aspect: 5.0
++max_glove_pixels: 10
++# ★ 沿用当前长度候选，只用于显示参考值；尚未完成固定检测区的独立尺度验证。
++reference_mm_per_px: 0.638
++render_fps: 10
++
++# ★ 手扶辅助允许；蓝手套从局部测量掩膜排除，不能遮住测量端点。
++allow_glove_support: true
++calibration_file: auto_length_zone_calibration.json
++# ★ 仅在独立检测区补足金属反光边缘，不改A正式分割。
++green_hsv_lower: [46, 40, 0]
++green_hsv_upper: [95, 255, 255]
++glove_hsv_lower: [91, 60, 0]
++glove_hsv_upper: [140, 255, 255]
++min_seed_pixels: 20
++
++# 手套只在遮住测量端点时暂停，不禁止辅助扶平。
++endpoint_fit_fraction: [0.35, 0.85]
++endpoint_axis_band_px: 4
++endpoint_margin_px: 6
++max_endpoint_glove_pixels: 3
+diff --git a/docs/F_AUTO_ZONE.md b/docs/F_AUTO_ZONE.md
+new file mode 100644
+index 0000000..45fc9b4
+--- /dev/null
++++ b/docs/F_AUTO_ZONE.md
+@@ -0,0 +1,53 @@
++# F 黄绿检测框自动触发联调（2026-10-29）
++
++用户要求先显示实机框测试：初始黄色，组件完整入框并稳定后绿色，连续2秒自动开始长度测量。本轮另存独立工具，不改B长度算法、模型、既有六步入口或判定范围。
++
++## 当前使用
++
++Pi：`cd /home/pi/assembly_vision`，使用现有assembly解释器运行 `tools/pi_diagnostics/auto_length_zone.py`。当前由`auto-length-zone`用户服务运行，Q退出，R清除参考读数；移出组件0.6秒后自动准备下一次放置。停止可用`systemctl --user stop auto-length-zone`，会释放相机，远程桌面保留。
++
++检测框配置为原始640×480画面中的 `[110,270,340,170]`。黄色表示未找到完整候选或手套遮挡/触边/多轮廓，绿色表示满足二维轮廓条件并在稳定计时。中心或长度漂移超配置范围、断帧或遮挡会重新计时；连续2秒且至少5个有效处理帧后自动调用现有长度函数。每次放置仅触发一次，不连续刷测量结果。
++
++**绿色不表示尺寸合格，也不证明三维平放。** 当前仍使用既有0.638mm/px，仅显示参考长度，UI明确「待尺度验证」。这次没有实施料盘160mm的透视、畸变与高度补偿，不作质量放行、不推进六步。底座+立柱的识别目前为轮廓/长宽比联调条件，尚非独立验证的组件身份判定。
++
++## 文件
++
++- `assemvision/ui/auto_length_gate.py`：稳定计时与重触发纯状态机。
++- `config/auto_length_zone_preview.yaml`：检测区、2秒、帧数、漂移、遮挡与参考比例。
++- `tools/pi_diagnostics/auto_length_zone.py`：唯一SDK彩色采集、分割、联调界面和自动截图。
++- `tests/test_auto_length_gate.py`与统一runner：稳定2秒、只触发一次、移出复位、移动/遮挡/断帧撤销与非有限输入。
++
++## 已有实机证据
++
++Pi启动和实时显示正常；首次自动测量参考58.3418757mm（非合格结论），没有按I或人工拖框。原图/界面/设置与JSON保存于 `data/probe/f_auto_length_zone_20261029_141453/`；本机桌面截图保留在本次可视化目录的`auto_zone_live.jpg`。
++
++专项测试已通过。全量35模块回归运行结果另追加，不能沿用此前34模块通过记录。
++
++## 后续边界
++
++在该检测区完成160mm基准、实际测量轴线高度与独立真值验证，再考虑质量判定和六步集成。当前参考58.34mm再次说明不能把旧固定比例当作准确毫米，也不能靠放宽61～67mm窗口掩盖误差。
++
++
++## 允许手扶、缩框与初步几何校准追加
++
++用户明确说明手必须辅助扶平，并提供卡尺整体64.3mm、底座直径49mm；检测框缩为原图[270,310,170,120]（原宽340→170像素）。允许蓝手套在框内，只在测量端点附近被手套遮住时暂停；不能据此证明三维平放。
++
++新增zone_geometry.py和独立标定JSON：使用完整料盘四角160mm、D435当前内参/零畸变系数、裸绿幕XYZ拟合平面和底座半径24.5mm建立初步轴线平面换算。XYZ使用正确realsense深度后端独立采集，完成后释放相机。料盘最新深度帧的上边被裁掉，不能拿这张图强行拟合完整160mm；四角使用此前同机位完整原图。该组合以相机固定、底座边缘接触绿幕且杆轴平行为前提，手不可垫高或遮端点。
++
++局部测量掩膜改用绿幕/蓝手套排除并与原金属种子关联，只在独立检测区补反光边，不修改正式A分割。绿幕排除色相下限46，与既有黄铜H10～45避免重叠。
++
++**校准尚未验收。** 早期掩膜下一张旧原图复核64.2444mm，随后实际手扶样本读67.0378mm，后者与64.3mm差2.7378mm，失败保留。后续金属边界策略也有调整，因此64.2444只是历史中间结果，不是当前精度承诺。未使用64.3mm反推比例，未放宽61～67mm窗口，独立工具不判尺寸合格、不推进六步。底座宽度、姿态和端点遮挡仍需控制后多位置复验；不得写成测量精度已解决。
++
++专项计时测试通过；初版全量35模块通过、初校候选全量36模块通过；端点保护与色域不重叠修正后另跑两项专项回归通过。真实窗口启动与自动保存已验证。最新工具仍是独立联调工具，Q退出，R重新参考测量。
++
++备份：data/probe/f_auto_zone_before_20261029（runner原版）、f_auto_zone_before_calibration_20261029、f_auto_zone_before_endpoint_guard_20261029。原图与同帧XYZ：f_auto_zone_calibration_20261029；失败新样本：f_auto_length_zone_20261029_143938/placement_01.*。所有测量目录均在项目data/probe下。
++
++## 最新自动样本（允许手扶、端点保护后）
++
++Pi日志后续两次自动读数64.5000687mm、65.4731216mm，对卡尺64.3mm分别+0.2001/+1.1731mm；旧固定比例对应57.6364/58.6410mm。说明初校改善，但第二次仍超过此前建议的≤1mm目标，不能宣布多姿态准确性通过。不同位置/手扶姿态与端点完整性继续待验证。独立实施副本本地提交`fefa59e`，未push。
++
++## 手扶接触误判修正（当前行为覆盖前述距离门禁）
++
++用户截图中的金属边缘仍可见，但旧规则仅因蓝手套靠近测量端就反复归零，是过度保守的误判。已取消手套距离否决，只检查可见轮廓有杆身几何证据；不能从「手套相邻」推断真正遮挡，也不声称已证明完整三维姿态。框内辅助扶持允许。边距由10px减至3px，实际碰边/裁切仍暂停。
++
++已增加回归：金属端旁有蓝手套仍可进入稳定计时、空轮廓拒绝，以及3px可接受/2px仍拒绝的边界。两项专项在Windows和Pi通过；这项修正没有再声称重跑全量36模块。实际新窗口已自动触发约2秒后的参考65.8871mm，仍非校准精度通过。软件稳定触发与物理量测准确性分开报告。
+diff --git a/tests/run_all.py b/tests/run_all.py
+index bc32f19..56bb6f1 100644
+--- a/tests/run_all.py
++++ b/tests/run_all.py
+@@ -37,7 +37,7 @@ MODULES = ["test_features", "test_segment", "test_d435_source", "test_polar",
+            "test_process_integration", "test_wheel_holes", "test_prestart_candidate",
+            "test_identity_size_candidate", "test_process_candidate", "test_process_tracking",
+            "test_abcde_integration", "test_pi_deployment",
+-           "test_glove_multi", "test_height_stages", "test_ui_six_step"]
++           "test_glove_multi", "test_height_stages", "test_ui_six_step", "test_auto_length_gate", "test_zone_geometry"]
+ # ★ 三个追踪相关模块的分工（2026-10）：
+ #     `test_tracker`       —— core 的**单元**覆盖（遮挡三档 / 身份余量 / 形状冻结 /
+ #                            判丢 / 防幽灵 / 最优认领 / 拿走放回），用自造 Blob，很快。
+diff --git a/tests/test_auto_length_gate.py b/tests/test_auto_length_gate.py
+new file mode 100644
+index 0000000..210485e
+--- /dev/null
++++ b/tests/test_auto_length_gate.py
+@@ -0,0 +1,28 @@
++"""静止2秒、不借旧帧、移动/遮挡撤销、每次放置仅触发一次。"""
++from assemvision.ui.auto_length_gate import PlacementGate
++
++
++def main():
++    config=dict(hold_seconds=2.,max_frame_gap_seconds=.5,min_frames=5,
++                max_center_drift_px=3.,max_length_drift_px=3.,rearm_empty_seconds=.6)
++    g=PlacementGate(config)
++    assert g.update(0.)['color']=='yellow'
++    for t in [0.,.4,.8,1.2,1.6]:
++        r=g.update(t,(10.,10.,100.))
++        assert r['color']=='green' and not r['trigger']
++    assert g.update(2.,(10.,10.,100.))['trigger']
++    assert not g.update(2.4,(10.,10.,100.))['trigger']
++    g.update(3.,empty=True)
++    assert g.update(3.7,empty=True)['color']=='yellow'
++    g.update(4.,(10.,10.,100.))
++    assert g.update(4.4)['color']=='yellow'  # 遮挡/出框撤销整个计时
++    assert g.update(4.8,(10.,10.,100.))['elapsed']==0.
++    g.update(5.2,(10.,10.,100.))
++    assert g.update(5.6,(20.,10.,100.))['elapsed']==0.  # 移动后从零开始
++    assert g.update(6.5,(20.,10.,100.))['elapsed']==0.  # 断帧不能累计
++    assert g.update(6.8,(float('nan'),10.,100.))['color']=='yellow'
++    print('test_auto_length_gate 全部通过')
++
++
++if __name__=='__main__':
++    main()
+diff --git a/tests/test_zone_geometry.py b/tests/test_zone_geometry.py
+new file mode 100644
+index 0000000..adabcc5
+--- /dev/null
++++ b/tests/test_zone_geometry.py
+@@ -0,0 +1,62 @@
++"""毫米平面变换不使用工件真值拟合；蓝手套辅助不阻止完整金属候选。"""
++import copy
++from types import SimpleNamespace
++import cv2
++import numpy as np
++from assemvision.ui.zone_geometry import calibrated_measure,measurement_mask,endpoints_visible
++from tools.pi_diagnostics.auto_length_zone import candidate
++
++
++def main():
++    cal=dict(image_size=[320,240],intrinsics=dict(fx=100.,fy=100.,ppx=160.,ppy=120.),
++             floor_plane_normal=[0.,0.,1.],floor_plane_offset_calibrated_mm=100.,
++             axis_height_mm=0.,rectified_pixels_per_mm=4.,distortion_coefficients=[0.]*5,
++             calibration_scope='synthetic',validation_truth_length_mm=64.3,
++             axis_band_half_width_mm=1.5,shaft_fit_fraction=[.35,.85],min_axis_pixels=5)
++    values=[]
++    for x,y in [(30,40),(190,150)]:
++        mask=np.zeros((240,320),np.uint8);mask[y:y+15,x:x+64]=255
++        a,_=calibrated_measure(mask,(x-10,y-10,90,40),cal)
++        assert a['ok'] and abs(a['length_mm']-64.)<.6
++        other=copy.deepcopy(cal);other['validation_truth_length_mm']=999.
++        b,_=calibrated_measure(mask,(x-10,y-10,90,40),other)
++        assert a['length_mm']==b['length_mm']
++        values.append(a['length_mm'])
++    assert abs(values[0]-values[1])<.6
++    bad=copy.deepcopy(cal);bad['distortion_coefficients'][0]=.1
++    try:calibrated_measure(mask,(180,140,90,40),bad)
++    except ValueError:pass
++    else:raise AssertionError('不能静默忽略非零畸变')
++    settings=dict(zone=[10,10,180,100],green_hsv_lower=[35,40,0],green_hsv_upper=[95,255,255],
++                  glove_hsv_lower=[91,60,0],glove_hsv_upper=[140,255,255],min_seed_pixels=20,
++                  min_contour_area_px=60.,edge_margin_px=8,min_aspect=1.15,max_aspect=5.,
++                  max_glove_pixels=10,allow_glove_support=True)
++    image=np.full((130,220,3),(40,140,40),np.uint8)
++    seed=np.zeros((130,220),np.uint8)
++    image[45:60,40:150]=(90,160,190);image[30:90,145:158]=(100,180,200)
++    seed[45:60,40:150]=255;seed[30:90,145:158]=255
++    image[80:100,60:100]=(220,80,30)
++    glove=np.zeros_like(seed);glove[80:100,60:100]=255
++    seg=SimpleNamespace(brass_mask=seed,metal_mask=seed,glove_mask=glove)
++    mask=measurement_mask(image,seg,settings)
++    assert not mask[90,70] and mask[50,100]
++    metrics,_,_=candidate(seg,settings['zone'],settings,mask)
++    assert metrics is not None
++    settings.update(endpoint_fit_fraction=[.35,.85],endpoint_axis_band_px=4,
++                    endpoint_margin_px=6,max_endpoint_glove_pixels=3)
++    assert endpoints_visible(image,mask,settings['zone'],settings)
++    occluded=image.copy();occluded[47:57,155:170]=(220,80,30)
++    shortened=measurement_mask(occluded,seg,settings)
++    assert endpoints_visible(occluded,shortened,settings['zone'],settings)  # 邻近手套不能当作遮挡
++    assert not endpoints_visible(image,np.zeros_like(mask),settings['zone'],settings)
++    edge=np.zeros_like(mask);edge[50:66,13:81]=255
++    settings['edge_margin_px']=3
++    assert candidate(seg,settings['zone'],settings,edge)[0] is not None
++    edge=np.zeros_like(mask);edge[50:66,12:80]=255
++    assert candidate(seg,settings['zone'],settings,edge)[0] is None
++    settings['allow_glove_support']=False
++    assert candidate(seg,settings['zone'],settings,mask)[0] is None
++    print('test_zone_geometry 全部通过')
++
++
++if __name__=='__main__':main()
+diff --git a/tools/pi_diagnostics/auto_length_zone.py b/tools/pi_diagnostics/auto_length_zone.py
+new file mode 100644
+index 0000000..8d2df4e
+--- /dev/null
++++ b/tools/pi_diagnostics/auto_length_zone.py
+@@ -0,0 +1,169 @@
++"""独立自动检测框联调：黄框等待，完整候选稳定2秒后自动参考测量。
++
++★ 不证明三维平放，不判尺寸合格，不推进六步。独立标定完成后再接生产流程。
++"""
++from pathlib import Path
++import argparse
++import json
++import sys
++import time
++
++ROOT = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(ROOT))
++import cv2
++import numpy as np
++from assemvision.config import load_config
++from assemvision.core.segment import Segmenter
++from assemvision.core.length import measure_length
++from assemvision.sources.factory import make_source
++from assemvision.imgio import imwrite_safe
++from assemvision.ui.auto_length_gate import PlacementGate
++from assemvision.ui.zone_geometry import measurement_mask, calibrated_measure, endpoints_visible
++from assemvision.ui.opencv_renderer import _Text
++from assemvision.ui.base import find_cjk_font
++
++
++def candidate(seg, zone, settings, mask=None):
++    x,y,w,h=zone
++    if mask is None:mask=seg.brass_mask if seg.brass_mask is not None else seg.metal_mask
++    if mask is None:
++        return None, '没有有效金属掩膜', False
++    sub=mask[y:y+h,x:x+w]
++    contours,_=cv2.findContours(sub,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
++    contours=[c for c in contours if cv2.contourArea(c)>=settings['min_contour_area_px']]
++    if not contours:
++        return None,'请将底座和立柱成品平放入框',True
++    if not settings.get('allow_glove_support',False) and seg.glove_mask is not None and np.count_nonzero(seg.glove_mask[y:y+h,x:x+w])>settings['max_glove_pixels']:
++        return None,'请将手移出检测框',False
++    if len(contours)!=1:
++        return None,'请只放一个组件，等待完整轮廓',False
++    c=contours[0]
++    bx,by,bw,bh=cv2.boundingRect(c)
++    margin=settings['edge_margin_px']
++    if min(bx,by,w-bx-bw,h-by-bh)<margin:
++        return None,'请将组件完整移入框内，避开边缘',False
++    (cx,cy),(rw,rh),angle=cv2.minAreaRect(c)
++    ratio=max(rw,rh)/max(1.,min(rw,rh))
++    if not settings['min_aspect']<=ratio<=settings['max_aspect']:
++        return None,'请按示意平放底座和立柱组件',False
++    return (cx+x,cy+y,max(rw,rh)+1.),'轮廓完整，保持静止',False
++
++
++def main():
++    parser=argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--config',default='config/auto_length_zone_preview.yaml')
++    parser.add_argument('--windowed',action='store_true')
++    args=parser.parse_args()
++    settings=load_config(str(ROOT/args.config)).data
++    zone=tuple(int(v) for v in settings['zone'])
++    calibration=json.loads((ROOT/'config'/settings['calibration_file']).read_text(encoding='utf-8'))
++    gate=PlacementGate(settings)
++    camera=load_config(str(ROOT/'config/camera.yaml'))
++    camera.set('depth.enabled',False)
++    source=make_source(camera)
++    segmenter=Segmenter(load_config(str(ROOT/'config/workpiece.yaml')))
++    import app
++    W,H=app._detect_screen()
++    text=_Text(find_cjk_font(),1.)
++    cv2.setNumThreads(1)
++    output=ROOT/'data/probe'/time.strftime('f_auto_length_zone_%Y%m%d_%H%M%S')
++    output.mkdir(parents=True,exist_ok=False)
++    (output/'settings.json').write_text(json.dumps(settings,indent=2,ensure_ascii=False),encoding='utf-8')
++    window='Automatic Length Zone - PREVIEW'
++    measured=None;number=0;previous_measured=False;last_image=None
++    try:
++        source.open()
++        cv2.namedWindow(window,cv2.WINDOW_NORMAL)
++        cv2.setWindowProperty(window,cv2.WND_PROP_FULLSCREEN,
++                              cv2.WINDOW_NORMAL if args.windowed else cv2.WINDOW_FULLSCREEN)
++        if args.windowed:cv2.resizeWindow(window,min(W,1280),min(H-60,720))
++        while True:
++            tick=time.monotonic()
++            frame=source.read(want_full=False)
++            if frame is None:
++                gate.update(time.monotonic())
++                print('取帧失败；稳定计时撤销',flush=True)
++                if cv2.waitKey(1)&255 in (ord('q'),27):break
++                continue
++            image=frame.left
++            fh,fw=image.shape[:2]
++            x,y,w,h=zone
++            if x<0 or y<0 or x+w>fw or y+h>fh:
++                raise ValueError('配置检测框超出D435原始画面')
++            seg=segmenter.segment(image,ts=frame.ts,scale=1.,want_features=False,
++                                  work_roi=None,mm_per_px=settings['reference_mm_per_px'])
++            local_mask=measurement_mask(image,seg,settings)
++            metrics,reason,empty=candidate(seg,zone,settings,mask=local_mask)
++            if metrics is not None and not endpoints_visible(image,local_mask,zone,settings):
++                metrics=None
++                reason='手可扶，请露出底座外侧面和螺纹尖端'
++            status=gate.update(time.monotonic(),metrics,empty)
++            if previous_measured and not status['measured']:measured=None
++            if status['trigger']:
++                measured,rectified=calibrated_measure(local_mask,zone,calibration)
++                measured['old_fixed_scale_length_mm']=measure_length(local_mask,zone,settings['reference_mm_per_px']).get('length_mm')
++                measured.update(frame_index=frame.index,zone=zone,scope='检测框联调参考值；未验证毫米精度；不作质量放行',
++                                source_scale_mm_per_px=settings['reference_mm_per_px'])
++                number+=1
++                name='placement_%02d'%number
++                imwrite_safe(str(output/(name+'.raw.png')),image)
++                imwrite_safe(str(output/(name+'.mask.png')),local_mask)
++                imwrite_safe(str(output/(name+'.rectified.png')),rectified)
++                (output/(name+'.json')).write_text(json.dumps(measured,ensure_ascii=False,indent=2),encoding='utf-8')
++                print('AUTO_MEASURE',json.dumps(measured,ensure_ascii=False),flush=True)
++            previous_measured=status['measured']
++            canvas=np.full((H,W,3),(23,19,14),np.uint8)
++            scale=min(W*.70/fw,(H-100)/fh)
++            nw,nh=round(fw*scale),round(fh*scale)
++            ox,oy=24,round((H-nh)/2)
++            canvas[oy:oy+nh,ox:ox+nw]=cv2.resize(image,(nw,nh),interpolation=cv2.INTER_LINEAR)
++            green=(154,218,65);amber=(81,196,248);white=(244,240,232);grey=(173,160,141)
++            color=green if status['color']=='green' else amber
++            a=(round(x*scale+ox),round(y*scale+oy));b=(round((x+w)*scale+ox),round((y+h)*scale+oy))
++            cv2.rectangle(canvas,a,b,color,3,cv2.LINE_AA)
++            mid=(a[1]+b[1])//2
++            for px in range(a[0]+12,b[0]-12,20):
++                cv2.line(canvas,(px,mid),(min(px+10,b[0]-12),mid),color,1)
++            fs=max(18,round(H/600*20));items=[]
++            def line(value,xx,yy,size=20,col=white):
++                items.append((value,(int(xx),int(yy)),col,max(18,round(size*H/600)),'la'))
++            line('自动长度检测 · 校准联调',24,15,24)
++            line('检测区：平放完整组件',a[0],max(60,a[1]-fs-12),20,color)
++            rx=round(W*.73)
++            line('黄框等待 / 绿框计时',rx,H*.16,23,color)
++            for i,row in enumerate((reason[:13],reason[13:])):
++                if row:line(row,rx,H*(.24+i*.045),20)
++            if status['measured'] and measured:
++                line('自动测量已完成',rx,H*.39,24,green)
++                value=measured.get('length_mm')
++                line(('%.2f mm'%value) if value is not None else '测量无效',rx,H*.48,34,amber)
++                line('校准未验收，仅参考',rx,H*.60,19,amber)
++                line('移出组件后可再测',rx,H*.67,19,grey)
++            else:
++                elapsed=min(settings['hold_seconds'],status['elapsed'])
++                line('稳定 %.1f / %.1f 秒'%(elapsed,settings['hold_seconds']),rx,H*.43,25,color)
++                line('连续绿框2秒自动测量',rx,H*.54,20,grey)
++            line('手可辅助扶平；勿垫高底座或遮住端点',24,H-48,20,amber)
++            line('R 重测   Q 退出',rx,H-48,20,grey)
++            text.draw(canvas,items)
++            if status['trigger']:
++                imwrite_safe(str(output/('placement_%02d.ui.png'%number)),canvas)
++            if last_image is None:
++                imwrite_safe(str(output/'initial.ui.png'),canvas)
++                print('ZONE_READY',output,zone,flush=True)
++            last_image=canvas
++            cv2.imshow(window,canvas)
++            key=cv2.waitKey(1)&255
++            if key in (ord('q'),27):break
++            if key==ord('r'):gate.reset();measured=None;previous_measured=False
++            delay=max(0.,1./settings['render_fps']-(time.monotonic()-tick))
++            if delay:time.sleep(delay)
++    except KeyboardInterrupt:
++        pass
++    finally:
++        source.close()
++        cv2.destroyAllWindows()
++
++
++if __name__=='__main__':
++    main()
