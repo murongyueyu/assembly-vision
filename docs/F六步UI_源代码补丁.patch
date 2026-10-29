@@ -1,0 +1,810 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..19ee54d
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,3 @@
++__pycache__/
++*.pyc
++ui6-*-manifest.json
+diff --git a/assemvision/integration.py b/assemvision/integration.py
+index d82985d..36bf44e 100644
+--- a/assemvision/integration.py
++++ b/assemvision/integration.py
+@@ -160,6 +160,16 @@ class Integration:
+         self.camera.set('depth.backend', 'realsense')
+         self.camera.set('native_depth', native)
+         self.estimator = NativeHeightEstimator(self.camera)
++        self.workflow = None
++        ui_settings = self.settings.get('operator_ui')
++        if ui_settings is not None:
++            from .ui.workflow import SixStepWorkflow
++            if (ui_settings.get('mode') != 'six_step'
++                    or [(s['name'], s['at_step'], s['mode']) for s in self.stages]
++                    != [('column', 2, 'length'), ('cap', 4, 'height')]):
++                raise ValueError('六步界面需要column@2长度和cap@4高度阶段')
++            self.workflow = SixStepWorkflow(ui_settings)
++        self.generation = 0
+         self.results = {}
+         self.result = None
+         self.measurement = None
+@@ -192,6 +202,8 @@ class Integration:
+         return '%.3f～%.3f mm' % (stage['min_mm'], stage['max_mm'])
+ 
+     def reset(self):
++        if self.workflow is not None:
++            self.workflow.reset()
+         self.results = {}
+         self.result = self.measurement = None
+         self.reason = self.waiting_reason()
+@@ -354,3 +366,9 @@ class Integration:
+             state.stats['长度比例'] = '%.4f mm/px（%s）' % (
+                 float(result['scale_mm_per_px']),
+                 '现场标定' if result.get('scale_source') == 'stage_calibrated' else 'TrayMap')
++
++        if self.workflow is not None:
++            view = self.workflow.update(step, started, self.results, self.generation, state.level)
++            view['rules'] = tuple((s['label'], self.rule_text(s)) for s in self.stages)
++            view['reason'] = self.reason
++            state.workflow = view
+diff --git a/assemvision/pipeline.py b/assemvision/pipeline.py
+index a289a10..29a87a2 100644
+--- a/assemvision/pipeline.py
++++ b/assemvision/pipeline.py
+@@ -550,6 +550,11 @@ class Pipeline:
+                             tracking = (stamp, self.identity.tracker.tracks,
+                                         polygons if observation.observed_current else {})
+                         self.sequence.update(result, time.monotonic(), tracking=tracking)
++                        if self.integration is not None and self.integration.workflow is not None:
++                            self.integration.generation = self._e_generation
++                            self.integration.workflow.update(len(self.sequence.done),
++                                self.sequence.started, self.integration.results,
++                                self._e_generation, self.sequence.verdict.level)
+                         # ★ 2026-10-28 分阶段测高：测量结果按"当时取件进度"存，
+                         #   进度变了只是**不再显示**（decorate 按 step 过滤），
+                         #   不能在这里 reset —— 否则 2/4 测完立柱、一取轮盘就把它清了。
+@@ -684,6 +689,11 @@ class Pipeline:
+             st.stats['流程已开工'] = '是' if started else '否'
+             if self.integration is not None:
+                 self.integration.decorate(st, started)
++                if st.workflow is not None and (self.c_error or not result.valid):
++                    st.workflow['fault'] = True
++                    st.workflow['complete'] = False
++                    st.banner = self.c_error or result.reason or '当前观测不可用'
++                    st.workflow['action'] = '等待可靠画面，请处理提示'
+                 if self.deployment_timing:
+                     st.detail.insert(0, 'Pi功能联调：时效%.1fs / 间隔%.1fs；非实时性能验收' % (
+                         self.deployment_timing['max_age_s'], self.deployment_timing['max_gap_s']))
+@@ -700,7 +710,11 @@ class Pipeline:
+         step = len(self.sequence.done)
+         stage = self.integration.stage_for_step(step)
+         with self.sh.lock:
+-            self.integration.reset()
++            if self.integration.workflow is None:
++                self.integration.reset()
++            elif stage is not None:
++                self.integration.results.pop(stage['name'], None)
++                self.integration.reason = '待测：正在选择测区'
+             frame, result, _, _, _ = self._d_current_snapshot()
+             if (frame is None or not self.sequence.started or stage is None
+                     or time.monotonic() - result.stamp.captured_at > self.c_max_age_s):
+@@ -756,12 +770,18 @@ class Pipeline:
+             rects.append(rect)
+         with self.sh.lock:
+             if generation != self._e_generation or len(self.sequence.done) != step:
+-                self.integration.reset()
++                if generation != self._e_generation or self.integration.workflow is None:
++                    self.integration.reset()
++                self.integration.reason = '进度已变化，请按当前步骤重测'
+                 return
+             try:
+                 self.integration.measure(frame, stamp, *rects, generation, stage=stage)
++                if self.integration.workflow is not None:
++                    self.integration.workflow.update(len(self.sequence.done), self.sequence.started,
++                        self.integration.results, self._e_generation, self.sequence.verdict.level)
+             except ValueError as exc:
+-                self.integration.reset()
++                if self.integration.workflow is None:
++                    self.integration.reset()
+                 self.integration.reason = '无法测量：' + str(exc)
+ 
+     def _inspect_length(self, frame, stamp, generation, stage):
+@@ -787,23 +807,31 @@ class Pipeline:
+             error = '分割异常：' + repr(exc)
+         with self.sh.lock:
+             if generation != self._e_generation or len(self.sequence.done) != int(stage['at_step']):
+-                self.integration.reset()
++                if generation != self._e_generation or self.integration.workflow is None:
++                    self.integration.reset()
++                self.integration.reason = '进度已变化，请按当前步骤重测'
+                 return
+             if error:
+-                self.integration.reset()
++                if self.integration.workflow is None:
++                    self.integration.reset()
+                 self.integration.reason = '无法测量：' + error
+                 return
+             mask = seg.brass_mask if seg is not None and seg.brass_mask is not None else (
+                 seg.metal_mask if seg is not None else None)
+             if mask is None or mask.shape[:2] != frame.left.shape[:2]:
+-                self.integration.reset()
++                if self.integration.workflow is None:
++                    self.integration.reset()
+                 self.integration.reason = '无法测量：缺少同帧金属掩膜'
+                 return
+             try:
+                 self.integration.measure_length(frame, stamp, rect, generation,
+                                                 stage=stage, mask=mask, mm_per_px=mmpp)
++                if self.integration.workflow is not None:
++                    self.integration.workflow.update(len(self.sequence.done), self.sequence.started,
++                        self.integration.results, self._e_generation, self.sequence.verdict.level)
+             except ValueError as exc:
+-                self.integration.reset()
++                if self.integration.workflow is None:
++                    self.integration.reset()
+                 self.integration.reason = '无法测量：' + str(exc)
+ 
+     def _c_loop(self):
+@@ -1165,6 +1193,7 @@ class Pipeline:
+                 self._d_snapshot = None
+                 if self.integration is not None:
+                     self.integration.reset()
++                    self.integration.generation = self._e_generation
+                     if self._integration_depth_request is not None:
+                         self._integration_depth_request['ready'].set()
+                         self._integration_depth_request = None
+diff --git a/assemvision/ui/base.py b/assemvision/ui/base.py
+index 03e8928..c7e64bb 100644
+--- a/assemvision/ui/base.py
++++ b/assemvision/ui/base.py
+@@ -85,6 +85,8 @@ class UIState:
+     stats: Dict[str, Any] = field(default_factory=dict)
+     banner: str = ""                              # 顶部横幅（严重告警时用）
+     source_name: str = ""
++    # ★ 六步是展示进度，step/total仍保留E四件进度。
++    workflow: Optional[Dict[str, Any]] = None
+ 
+     def color(self, key: str) -> Tuple[int, int, int]:
+         return DEFAULT_COLORS.get(key, DEFAULT_COLORS[IDLE])
+diff --git a/assemvision/ui/opencv_renderer.py b/assemvision/ui/opencv_renderer.py
+index a06e802..aff769f 100644
+--- a/assemvision/ui/opencv_renderer.py
++++ b/assemvision/ui/opencv_renderer.py
+@@ -151,6 +151,7 @@ class OpenCVRenderer(Renderer):
+         self.text = _Text(self.font_path, scale=self.H / 1080.0)
+         self.actions: Dict[str, Callable] = dict(actions or {})
+         self._inited = False
++        self._operator = None
+         self.cache_unchanged = False
+         self.cache_hits = self.canvases_built = 0
+         self._cache_key = self._cache_frame = self._cache_canvas = None
+@@ -172,6 +173,12 @@ class OpenCVRenderer(Renderer):
+ 
+     # ── 主入口 ────────────────────────────────────────────────
+     def render(self, state: UIState) -> np.ndarray:
++        if state.workflow is not None:
++            if self._operator is None:
++                from .operator_view import OperatorView
++                # ★ 文字直接按最终画布像素绘制，消除小屏下重复缩放。
++                self._operator = OperatorView(_Text(self.font_path, scale=1.0))
++            return self._operator.render(state, self.W, self.H)
+         if not self.cache_unchanged:
+             return self._render_frame(state)
+         # ★ 仅显式Pi候选开启；帧对象归采集所有且不被原地修改。
+@@ -345,7 +352,11 @@ class OpenCVRenderer(Renderer):
+             return False
+         # ★ 动作键（与 QtRenderer 的按钮同义）—— 接口必须一致，
+         #   否则 app.py 传 actions 时两个渲染器行为不一样，很难排查。
+-        if key == ord("i") and "inspect" in self.actions:
++        if key == ord("f"):
++            self.fullscreen = not self.fullscreen
++            cv2.setWindowProperty(self.window, cv2.WND_PROP_FULLSCREEN,
++                                  cv2.WINDOW_FULLSCREEN if self.fullscreen else cv2.WINDOW_NORMAL)
++        elif key == ord("i") and "inspect" in self.actions:
+             try:
+                 self.actions["inspect"]()
+                 print("[ui] 已请求手动抽检（i）")
+diff --git a/assemvision/ui/operator_view.py b/assemvision/ui/operator_view.py
+new file mode 100644
+index 0000000..f8354d0
+--- /dev/null
++++ b/assemvision/ui/operator_view.py
+@@ -0,0 +1,166 @@
++"""小屏操作视图：文字在最终画布绘制，视频保持比例，完成卡不阻塞。"""
++from __future__ import annotations
++
++import time
++import cv2
++import numpy as np
++
++BG = (23, 19, 14)
++CARD = (42, 34, 26)
++INK = (244, 240, 232)
++MUTED = (173, 160, 141)
++GREEN = (154, 218, 65)
++AMBER = (81, 196, 248)
++RED = (103, 105, 246)
++
++
++class OperatorView:
++    def __init__(self, text, clock=time.monotonic):
++        self.text, self.clock = text, clock
++        self.seen = None
++        self.popup_at = None
++        self.frame = self.video = self.video_shape = None
++
++    def render(self, state, width, height):
++        view = state.workflow
++        s = min(width / 1024., height / 600.)
++        pad = max(12, round(20 * s))
++        header = round(75 * s)
++        footer = round(40 * s)
++        grid_h = round(152 * s)
++        bottom = height - footer - grid_h
++        split = round(width * .56)
++        canvas = np.full((height, width, 3), BG, np.uint8)
++        items = []
++
++        def text(value, x, y, size=20, color=INK, anchor='la'):
++            items.append((str(value), (int(x), int(y)), color, max(18, round(size * s)), anchor))
++
++        def lines(value, x, y, max_width, size=22, limit=2, color=INK):
++            # ★ 按实际字体宽度换行；不把长错误原因缩成看不清的小字。
++            font_size = max(18, round(size * s))
++            font = self.text.font(font_size) if self.text.ok else None
++            chunks, line = [], ''
++            for ch in str(value):
++                candidate = line + ch
++                length = font.getlength(candidate) if font else len(candidate) * font_size
++                if length > max_width and line:
++                    chunks.append(line)
++                    line = ch
++                else:
++                    line = candidate
++            if line:
++                chunks.append(line)
++            if len(chunks) > limit:
++                chunks = chunks[:limit]
++                chunks[-1] = chunks[-1][:-1] + '…'
++            for i, line in enumerate(chunks):
++                text(line, x, y + i * round(font_size * 1.4), size, color)
++
++        text('ASSEMBLY / 装配检测', pad, pad, 24)
++        text('工序 %d / 6' % view['completed'], width - pad, pad, 24, GREEN, 'ra')
++        cv2.line(canvas, (pad, header - 12), (width-pad, header-12), CARD, 1)
++        # 视频只缩放一次，且相同相机帧复用缩放缓冲。
++        vx, vy, vw, vh = pad, header, split-pad*2, bottom-header-pad
++        if state.frame is not None:
++            fh, fw = state.frame.shape[:2]
++            scale = min(vw / fw, vh / fh)
++            nw, nh = max(1, round(fw*scale)), max(1, round(fh*scale))
++            ox, oy = vx+(vw-nw)//2, vy+(vh-nh)//2
++            if self.frame is not state.frame or self.video_shape != (nw, nh):
++                self.video = cv2.resize(state.frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
++                self.frame, self.video_shape = state.frame, (nw, nh)
++            canvas[oy:oy+nh, ox:ox+nw] = self.video
++            for poly, color, thick in state.polygons:
++                points = np.asarray(poly).reshape(-1, 2)
++                if len(points) >= 3:
++                    points = np.rint(points*scale+(ox, oy)).astype(np.int32)
++                    cv2.polylines(canvas, [points], True, state.color(color), max(1, thick), cv2.LINE_8)
++            for (x,y,w,h), label, color in state.boxes:
++                p = (round(x*scale+ox),round(y*scale+oy))
++                cv2.rectangle(canvas,p,(round((x+w)*scale+ox),round((y+h)*scale+oy)),state.color(color),2)
++                # 仅主标签；字符按最终像素画，不再二次缩小。
++                text(label, p[0], max(vy, p[1]-round(24*s)), 18, state.color(color))
++        else:
++            cv2.rectangle(canvas,(vx,vy),(vx+vw,vy+vh),CARD,-1)
++            text('等待相机画面',vx+vw//2,vy+vh//2,24,MUTED,'mm')
++
++        rx, rw = split, width-split-pad
++        text('当前操作', rx, header, 18, MUTED)
++        lines(view['action'],rx,header+round(30*s),rw,30,2,GREEN if view['complete'] else INK)
++        y = header+round(120*s)
++        measurement = view.get('measurement', {})
++        if measurement:
++            value = measurement.get('length_mm',measurement.get('height_mm'))
++            passed = measurement.get('ok') and measurement.get('height_conforms') is True
++            text(('%.2f mm' % value) if value is not None else '测量无效', rx,y,32,GREEN if passed else RED)
++            text('合格' if passed else '请复测',width-pad,y,22,GREEN if passed else RED,'ra')
++        else:
++            text('组装用时（含检测）',rx,y,18,MUTED)
++            text(view['elapsed'],rx,y+round(28*s),32,AMBER)
++        message = (measurement.get('reason', '') if measurement and not measurement.get('ok')
++                   else view.get('reason', '') if not measurement and view['completed'] in (2,5)
++                   else '')
++        if message:
++            lines(message,rx,header+round(205*s),rw,18,2,AMBER)
++        for i,(name,rule) in enumerate(view.get('rules',())):
++            text('%s  %s' % (name,rule),rx,bottom-round((62-i*27)*s),18,MUTED)
++
++        cell_w = (width-pad*4)//3
++        cell_h = (grid_h-pad)//2
++        for i,(label,status) in enumerate(zip(view['labels'],view['statuses'])):
++            x = pad+(i%3)*(cell_w+pad)
++            y = bottom+(i//3)*(cell_h+pad//2)
++            color = GREEN if status=='done' else RED if status=='failed' else AMBER if status=='current' else MUTED
++            cv2.rectangle(canvas,(x,y),(x+cell_w,y+cell_h),CARD,-1)
++            if status in ('current','failed'):
++                cv2.rectangle(canvas,(x,y),(x+cell_w,y+cell_h),color,2)
++            text('%02d' % (i+1),x+round(12*s),y+round(14*s),22,color)
++            text(label,x+round(55*s),y+round(11*s),22,INK if status!='pending' else MUTED)
++            text({'done':'已完成','failed':'未通过 · 按 I 复测','current':'当前步骤','pending':'待进行'}[status],
++                 x+round(55*s),y+round(39*s),18,color)
++
++        text('I 检测  /  R 复位  /  F 全屏  /  Q 退出',pad,height-footer+round(10*s),18,MUTED)
++        text(view['elapsed'],width-pad,height-footer+round(8*s),22,AMBER,'ra')
++        warning = state.banner or ('长度检测未完成，请复位后按六步操作' if view.get('early_pick') else '')
++        if warning:
++            cv2.rectangle(canvas,(vx,vy),(vx+vw,vy+round(65*s)),(56,45,99),-1)
++            lines(warning,vx+round(10*s),vy+round(8*s),vw-round(20*s),20,2,INK)
++        self.text.draw(canvas,items)
++
++        # ★ 第一次实际渲染才开始计展示时长；缓存不能冻结到期判断。
++        now = self.clock()
++        ident = tuple(view['completion_id'])
++        safe = view['complete'] and not warning and not view.get('fault')
++        if safe and ident != self.seen:
++            self.seen, self.popup_at = ident, now
++        if not safe:
++            self.popup_at = None
++        if self.popup_at is not None and now-self.popup_at < view['completion_seconds']:
++            self._completion(canvas,view,s,now-self.popup_at)
++        return canvas
++
++    def _completion(self,canvas,view,scale,age):
++        h,w = canvas.shape[:2]
++        # 轻量淡入，无遮罩阻塞、无粒子动画。
++        strength = min(1.,age/.18)
++        cv2.convertScaleAbs(canvas,alpha=1.-.52*strength,dst=canvas)
++        cw,ch = min(w-40,round(620*scale)),round(340*scale)
++        x,y = (w-cw)//2,(h-ch)//2
++        r0 = round(22*scale)
++        cv2.rectangle(canvas,(x+r0,y),(x+cw-r0,y+ch),CARD,-1)
++        cv2.rectangle(canvas,(x,y+r0),(x+cw,y+ch-r0),CARD,-1)
++        for px,py in ((x+r0,y+r0),(x+cw-r0,y+r0),(x+r0,y+ch-r0),(x+cw-r0,y+ch-r0)):
++            cv2.circle(canvas,(px,py),r0,CARD,-1,cv2.LINE_AA)
++        cv2.line(canvas,(x+r0,y),(x+cw-r0,y),GREEN,3,cv2.LINE_AA)
++        cx = w//2
++        cy = y+round(56*scale)
++        r = round(25*scale)
++        cv2.circle(canvas,(cx,cy),r,GREEN,-1,cv2.LINE_AA)
++        check=np.array([(cx-r//2,cy),(cx-r//8,cy+r//3),(cx+r//2,cy-r//3)],np.int32)
++        cv2.polylines(canvas,[check],False,BG,max(2,round(4*scale)),cv2.LINE_AA)
++        data=[('BINGO!',(cx,y+round(110*scale)),INK,round(56*scale),'mm'),
++              ('本轮检测完成',(cx,y+round(163*scale)),GREEN,round(28*scale),'mm'),
++              ('组装总用时  '+view['elapsed'],(cx,y+round(219*scale)),INK,round(34*scale),'mm'),
++              ('含检测用时 · 按 R 开始下一轮',(cx,y+round(279*scale)),MUTED,round(19*scale),'mm')]
++        self.text.draw(canvas,data)
+diff --git a/assemvision/ui/workflow.py b/assemvision/ui/workflow.py
+new file mode 100644
+index 0000000..ce353cb
+--- /dev/null
++++ b/assemvision/ui/workflow.py
+@@ -0,0 +1,89 @@
++"""六步显示编排；不改变E四次取件或B测量判据。"""
++from __future__ import annotations
++
++import math
++import time
++
++LABELS = ('底座', '立柱', '长度检测', '轮盘', '顶盖', '顶盖深度检测')
++ACTIONS = ('请取底座', '请取立柱', '按 I 测量立柱长度', '请取轮盘', '请取顶盖', '按 I 检测顶盖高度')
++
++
++def duration_text(seconds):
++    if seconds is None:
++        return '--:--'
++    ticks = max(0, int(seconds * 10))
++    minutes, rem = divmod(ticks, 600)
++    if minutes >= 60:
++        return '%02d:%02d:%02d' % (minutes // 60, minutes % 60, rem // 10)
++    return '%02d:%02d.%d' % (minutes, rem // 10, rem % 10)
++
++
++class SixStepWorkflow:
++    def __init__(self, settings, clock=time.monotonic):
++        self.clock = clock
++        self.hold = float(settings.get('completion_seconds', 5.5))
++        if not math.isfinite(self.hold) or not 5 <= self.hold <= 6:
++            raise ValueError('完成提示时长必须在5～6秒')
++        self.reset()
++
++    def reset(self):
++        self.generation = None
++        self.started_at = self.finished_at = None
++        self.count = 0
++        self.complete_serial = 0
++        self.announced = False
++        self.last_checks = (False, False)
++
++    def update(self, count, started, results, generation, level='warn', now=None):
++        now = self.clock() if now is None else now
++        if self.generation != generation:
++            self.reset()
++            self.generation = generation
++        count = max(0, min(4, int(count)))
++        # ★ 放回立柱/顶盖后，旧测量不再证明当前装配状态。
++        if count < self.count:
++            if count < 2:
++                results.pop('column', None)
++            if count < 4:
++                results.pop('cap', None)
++            self.finished_at = None
++        self.count = count
++        if started and self.started_at is None:
++            self.started_at = now
++
++        def passed(name, step):
++            r = results.get(name, {})
++            return (r.get('generation') == generation and r.get('step') == step
++                    and r.get('ok') is True and r.get('height_conforms') is True)
++
++        length_ok, cap_ok = passed('column', 2), passed('cap', 4)
++        facts = (count >= 1, count >= 2, length_ok, count >= 3, count >= 4, cap_ok)
++        completed = 0
++        for fact in facts:
++            if not fact:
++                break
++            completed += 1
++        ready = started and completed == 6
++        if ready and self.finished_at is None and level != 'error':
++            self.finished_at = now
++            if not self.announced:
++                self.complete_serial += 1
++                self.announced = True
++        if not ready:
++            self.finished_at = None
++        active = min(completed, 5)
++        statuses = ['done' if i < completed else 'current' if i == completed else 'pending'
++                    for i in range(6)]
++        check = results.get('column' if active == 2 else 'cap' if active == 5 else '', {})
++        if check and (not check.get('ok') or check.get('height_conforms') is False):
++            statuses[active] = 'failed'
++        elapsed = None if self.started_at is None else max(
++            0., (self.finished_at if self.finished_at is not None else now) - self.started_at)
++        return dict(labels=LABELS, statuses=tuple(statuses), completed=completed,
++                    action=('流程异常，请处理告警' if level == 'error' else
++                            ('本轮检测完成' if ready else ACTIONS[active])) if started else '四件归位，等待开工',
++                    elapsed=duration_text(elapsed), complete=ready and level != 'error',
++                    completion_id=(generation, self.complete_serial),
++                    completion_seconds=self.hold, generation=generation,
++                    early_pick=count > 2 and not length_ok,
++                    measurement=check, fault=level == 'error')
+diff --git a/config/abcde_integration_pi_ui6_candidate.yaml b/config/abcde_integration_pi_ui6_candidate.yaml
+new file mode 100644
+index 0000000..3d2f773
+--- /dev/null
++++ b/config/abcde_integration_pi_ui6_candidate.yaml
+@@ -0,0 +1,68 @@
++# ★ 2026-10-28 新增 2/4 阶段的"立柱"检测；2026-10-29 改为**量长度**（横放）。
++#   2/4（底座+立柱取走后）按 i：把立柱横放，框住它，量轮廓长边，判定 64 ± 3 mm（61.000～67.000）。
++#   4/4 顶盖检测保留不变（65 ± 3，上限 68.000 → 62.000～68.000，仍是深度法向高度）。
++#   不动 A/C/D/E 任何判据，不动 B 冻结源文件数值与 hash。
++sequence: process_sequence_size_candidate.yaml
++sequence_sha256: 444c0128dcb20fff07e7ea50e62749ea2298e4ef9f6057fa85af6080c56fbc2a
++native_reference: ../../ai_测试工具/B模块深度/20261018_full_baseline_03/camera.native-depth.json
++native_reference_sha256: be932cd53865d0abd224f0c2ffb7493c061316b87a34ab91a81d358a99888621
++association: manual_same_frame_cap_region
++
++# ★ 分阶段的测量项。at_step = 允许按 i 的取件进度；每个阶段带自己的基线/容差/授权。
++#   mode: height = B 的深度法向高度；mode: length = 2D 轮廓长边（不需要深度）
++#   target 只影响选区窗口标题（COLUMN / CAP），不参与判据。
++height_stages:
++  - name: column
++    label: 立柱
++    at_step: 2
++    target: COLUMN
++    # ★ 2026-10-29 用户改判：立柱**横放**量长度，64mm 左右。
++    #   深度法在这件上不可用（2026-10-28 实测：杆身/杆端有效深度点 = 0，
++    #   D435 对 Ø15 高反光细杆打不出点），所以改用同帧金属掩膜的最长边。
++    mode: length
++    enabled: true
++    scope: manual_same_frame_cap_region
++    baseline_mm: 64.0
++    tolerance_mm: 3.0
++    max_tolerance_mm: 3.0
++    # ★ 2026-10-29 现场标定：TrayMap 推出的 0.731 mm/px 与卡尺差 ~12%
++    #   （标定 homography 已过期），长度判定改用卡尺反推值：
++    #     整体（杆+底座）100.3 px ↔ 卡尺 64.0 mm → 0.638
++    #     杆身         88.1 px ↔ 卡尺 58.0 mm → 0.658
++    #   取整体口径（与"64mm=杆长+底座"一致）→ 0.638。同一姿态复测可复现。
++    mm_per_px: 0.638
++    # 长度法不走深度门禁：min_points / min_valid_ratio 只对 height 模式有意义。
++    authorization: 用户2026-10-29按"装配好的立柱横放、长度约64mm（杆长+底座）"授权；比例按卡尺现场标定 0.638 mm/px；仅人工同帧轮廓长度
++  - name: cap
++    label: 顶盖
++    at_step: 4
++    target: CAP
++    mode: height
++    enabled: true
++    scope: manual_same_frame_cap_region
++    # ★ 2026-10-29 用户改判：顶盖高度按 68.5 ± 1 mm（67.500～69.500）判。
++    #   同日先改 68.5±3、再按用户要求收紧到 ±1（"阈值范围有点大"）。
++    #   取代 2026-10-25 的 65 ± 3 / 上限 68。现场实测两次 68.33 / 68.03 mm，均在窗口内。
++    baseline_mm: 68.5
++    tolerance_mm: 1.0
++    max_tolerance_mm: 3.0
++    authorization: 用户2026-10-29按现场实测68.5mm改判并要求±1mm（取代2026-10-25的65±3）；窗口67.500～69.500；仍仅判高度，不含紧固性
++
++# ★ 正式配置不变；不减少确认帧数、不降低身份/尺寸或高度门槛。
++deployment_timing:
++  mode: functional_only
++  max_age_s: 3.0
++  max_gap_s: 3.0
++  identity_gap_s: 3.0
++
++# ★ 不减少C方向、角度与平移搜索；只配置调度和UI刷新上限。
++deployment_runtime:
++  observer_workers: 4
++  opencv_threads: 1
++  ui_fps: 8
++  correlation_backend: box_sum_cached
++
++# ★ F六步展示候选；测量/取件/开工判据完全沿用上面配置。
++operator_ui:
++  mode: six_step
++  completion_seconds: 5.5
+diff --git a/deploy/pi/run_ui6.sh b/deploy/pi/run_ui6.sh
+new file mode 100755
+index 0000000..18b30b8
+--- /dev/null
++++ b/deploy/pi/run_ui6.sh
+@@ -0,0 +1,11 @@
++#!/usr/bin/env bash
++# F六步操作界面；不改变既有两个启动入口。
++set -euo pipefail
++cd "$(dirname "${BASH_SOURCE[0]}")/../.."
++export DISPLAY="${DISPLAY:-:0}"
++export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
++export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
++export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
++exec "${ASSEMBLY_PYTHON:-$HOME/miniforge3/envs/assembly/bin/python}" app.py \
++  --integration config/abcde_integration_pi_ui6_candidate.yaml \
++  --renderer opencv --display auto "$@"
+diff --git a/docs/F_UI6.md b/docs/F_UI6.md
+new file mode 100644
+index 0000000..a446fe9
+--- /dev/null
++++ b/docs/F_UI6.md
+@@ -0,0 +1,42 @@
++# F 六步界面交付（2026-10-29）
++
++本轮以Pi现有代码快照为基线，在独立副本中实现并逐项hash校验后同步至Pi。Windows旧代码及组员未提交改动未覆盖；只做F及任务书列出的integration/pipeline最小接线，不改A/B/C/D/E核心算法、模型、搜索、阈值、尺度或测量范围。
++
++## 使用
++
++Pi中运行：
++
++```bash
++cd /home/pi/assembly_vision
++bash deploy/pi/run_ui6.sh
++```
++
++默认跟随桌面分辨率并全屏。I检测、R复位、F切换全屏、Q/Esc退出。浏览器仍通过已有noVNC SSH隧道访问，不需要接入实体屏幕。
++
++六步为：底座→立柱→长度检测→轮盘→顶盖→顶盖深度检测。两项检测必须有效且合格才计入完成；提前取完四件不能跳过长度步骤。E仍是四件取件顺序，不变成六件。按现有候选人工框选，长度61～67mm、顶盖高度67.5～69.5mm；本轮没有重标定这些判据。
++
++完成卡显示BINGO、本轮检测完成和总用时，默认5.5秒后收起；不自动复位。计时从D放行锁存开工到第6步合格，含等待、选区和复测，不含启动、开工前等待与完成提示。采用单调时钟；复位隔离代次；普通取消或同轮进度变化不会重新开始计时。
++
++## 实现
++
++- 新增ui/workflow.py：六步编排、同轮测量验证、计时、放回失效和一次完成事件。
++- 新增ui/operator_view.py：最终画布字号、两行三列步骤卡、当前动作、受控范围、全屏大字与非阻塞完成卡；不拉伸视频。
++- ui/base.py增加可选workflow契约，旧step/total仍保留四件语义。opencv_renderer.py仅在显式六步状态时启用新视图，并支持F键。
++- integration.py为独立候选启用编排；pipeline.py传递真实取件/测量和复位状态，测顶盖保留长度结果，画面失效和故障抑制成功提示。同轮选区进度变化只取消本次测量，不清本轮计时。
++- 新增config/abcde_integration_pi_ui6_candidate.yaml与deploy/pi/run_ui6.sh。两个旧入口与原候选均未覆盖；新入口明确使用OpenCV。
++
++## 验证与证据边界
++
++Pi全量34模块通过（原33+test_ui_six_step）；完成卡到期、重复回调、跨轮次、放回、无效/不合格、真实pipeline选区保留上一阶段等有回归。告警布局与进度变化修正后另跑针对性集成/阶段/渲染/六步回归。
++
++已实际运行真实D435候选的窗口与全屏入口并取桌面截图。25张离线预览覆盖1024×600、1024×768、1280×720、1920×1080、960×540，每种包含待开工、长度、顶盖、失败、完成；其流程状态为模拟，背景为冻结相机原图，不作为真实六步验收。
++
++同一当前场景、同960×540、15秒窗口、剔除前两组启动采样：旧界面检测中位7.439fps，新界面7.422fps（约-0.23%）；采集29.862→29.836fps，绘图7.932→7.917fps，进程CPU238.076→241.282%（单核100%口径）。两次无pipeline错误、线程正常停止。仅短时对照，不证明长时性能或完整装配质量。
++
++本轮未要求用户重装一遍实物，未新增真实六步全过程、卡尺精度或紧固验收；当前场景四件未归位时仍等待D，不伪造完成。
++
++## 版本保全与回退
++
++Pi原文件及初始manifest：`data/probe/f_ui6_before_20261029/`。回退只恢复manifest中原先存在的五个文件（integration、pipeline、ui/base、ui/opencv_renderer、tests/run_all），然后使用原入口；不要删除整棵目录或覆盖组员其他文件。新模块与独立候选可保留但不启用。
++
++交付源代码补丁见同目录`F六步UI_源代码补丁.patch`，补丁基于本轮读取的Pi快照，不能直接套到Windows旧09110c1。完整实施代码另存本次独立Pi副本；该副本不包含全部图片、数据和外部冻结产物。
+diff --git a/tests/run_all.py b/tests/run_all.py
+index 820ba65..bc32f19 100644
+--- a/tests/run_all.py
++++ b/tests/run_all.py
+@@ -37,7 +37,7 @@ MODULES = ["test_features", "test_segment", "test_d435_source", "test_polar",
+            "test_process_integration", "test_wheel_holes", "test_prestart_candidate",
+            "test_identity_size_candidate", "test_process_candidate", "test_process_tracking",
+            "test_abcde_integration", "test_pi_deployment",
+-           "test_glove_multi", "test_height_stages"]
++           "test_glove_multi", "test_height_stages", "test_ui_six_step"]
+ # ★ 三个追踪相关模块的分工（2026-10）：
+ #     `test_tracker`       —— core 的**单元**覆盖（遮挡三档 / 身份余量 / 形状冻结 /
+ #                            判丢 / 防幽灵 / 最优认领 / 拿走放回），用自造 Blob，很快。
+diff --git a/tests/test_ui_six_step.py b/tests/test_ui_six_step.py
+new file mode 100644
+index 0000000..0023e72
+--- /dev/null
++++ b/tests/test_ui_six_step.py
+@@ -0,0 +1,130 @@
++"""六步真实状态、计时、复位隔离与完成卡到期回归。"""
++from pathlib import Path
++from types import SimpleNamespace
++import threading
++from unittest.mock import patch
++
++import numpy as np
++
++from assemvision.ui.workflow import SixStepWorkflow, duration_text
++from assemvision.ui.base import UIState
++from assemvision.ui.opencv_renderer import OpenCVRenderer
++
++
++def evidence(step, generation=0, passed=True):
++    return dict(step=step,generation=generation,ok=True,height_conforms=passed,
++                length_mm=64.0 if step==2 else None,height_mm=68.5,frame_index=7)
++
++
++def main():
++    clock=[100.]
++    w=SixStepWorkflow({'completion_seconds':5.5},clock=lambda:clock[0])
++    results={}
++    assert w.update(0,False,results,0)['elapsed']=='--:--'
++    w.update(0,True,results,0)
++    assert w.update(2,True,results,0)['completed']==2
++    assert w.update(4,True,results,0)['completed']==2  # 取完四件不能跳过长度
++    results['column']=evidence(2,passed=False)
++    assert w.update(2,True,results,0)['statuses'][2]=='failed'
++    results['column']=evidence(2)
++    assert w.update(2,True,results,0)['completed']==3
++    assert w.update(3,True,results,0)['completed']==4
++    assert w.update(4,True,results,0)['completed']==5
++    results['cap']=evidence(4,passed=False)
++    assert not w.update(4,True,results,0)['complete']
++    results['cap']=evidence(4)
++    clock[0]=183.4
++    v=w.update(4,True,results,0)
++    assert v['complete'] and v['completed']==6 and v['elapsed']=='01:23.4'
++    ident=v['completion_id']
++    clock[0]=200.
++    assert w.update(4,True,results,0)['elapsed']==v['elapsed']
++    assert w.update(4,True,results,0)['completion_id']==ident
++    assert not w.update(4,True,results,0,'error')['complete']
++    w.update(3,True,results,0)
++    assert 'cap' not in results and 'column' in results
++    w.update(1,True,results,0)
++    assert 'column' not in results
++    results.update(column=evidence(2),cap=evidence(4))
++    assert not w.update(4,True,results,1)['complete']  # 跨轮次旧结果不准通过
++    assert duration_text(3601.9)=='01:00:01'
++    for invalid in (4.9,6.1,float('nan')):
++        try:
++            SixStepWorkflow({'completion_seconds':invalid})
++        except ValueError:
++            pass
++        else:
++            raise AssertionError('展示时间无效却被接受')
++
++    # 实际渲染：同一相机帧不变，完成卡仍准时消失，告警可立即撤销。
++    state=UIState(frame=np.zeros((480,640,3),np.uint8),workflow=v)
++    state.workflow['rules']=(('立柱','61.000～67.000 mm'),('顶盖','67.500～69.500 mm'))
++    renderer=OpenCVRenderer(display=(1024,600),fullscreen=False)
++    renderer.cache_unchanged=True
++    renderer.render(state)
++    t=[1000.]
++    renderer._operator.clock=lambda:t[0]
++    renderer._operator.seen=None
++    active=renderer.render(state)
++    t[0]=1005.49
++    assert renderer._operator.popup_at==1000.
++    renderer.render(state)
++    t[0]=1005.5
++    ended=renderer.render(state)
++    assert not np.array_equal(active,ended)
++    assert renderer._operator.popup_at==1000.  # 没有重新计时
++    state.banner='测试故障'
++    renderer.render(state)
++    assert renderer._operator.popup_at is None
++    renderer.close()
++
++    # 集成回归：测顶盖保留长度结果；复位同时清两者和计时。
++    from assemvision.integration import Integration
++    from assemvision.config import load_config
++    from assemvision.pipeline import Pipeline,Shared
++    from assemvision.core.checks import EvidenceStamp
++    from assemvision.types import Frame
++    root=Path(__file__).resolve().parents[1]
++    config=root/'config/abcde_integration_pi_ui6_candidate.yaml'
++    if config.exists() and (root.parent/'ai_测试工具').exists():
++        i=Integration(str(config),load_config(str(root/'config/camera.yaml')))
++        i.results['column']=evidence(2)
++        pipe=Pipeline.__new__(Pipeline)
++        pipe.integration=i
++        pipe.sh=Shared(); pipe.sh.lock=threading.RLock()
++        pipe.sequence=SimpleNamespace(started=True,done=list(range(4)),verdict=SimpleNamespace(level='warn'))
++        pipe._e_generation=0
++        pipe.c_max_age_s=3.
++        image=np.zeros((480,640,3),np.uint8)
++        frame=Frame(7,0.,left=image)
++        frame.depth_points_mm=np.zeros((480,640,3),np.float32)
++        pipe._d_current_snapshot=lambda:(frame,SimpleNamespace(stamp=EvidenceStamp(7,100.,(480,640))),None,{},None)
++        with patch('assemvision.pipeline.time.monotonic',return_value=100.), \
++             patch('assemvision.pipeline.cv2.selectROI',side_effect=[(1,1,10,10),(20,20,10,10)]), \
++             patch('assemvision.pipeline.cv2.destroyWindow'), \
++             patch.object(i,'measure',side_effect=lambda *a,**kw:i.results.update(cap=evidence(4))):
++            pipe.inspect_integration()
++        assert set(i.results)=={'column','cap'}
++        assert i.workflow.update(4,True,i.results,0)['complete']
++        # 同轮选区期间提前取件只取消本次测量，不重启计时。
++        original_start=i.workflow.started_at
++        pipe.sequence.done=list(range(2))
++        pipe._d_current_snapshot=lambda:(frame,SimpleNamespace(stamp=EvidenceStamp(7,100.,(480,640))),None,{},None)
++        pipe.segmenter=SimpleNamespace(segment=lambda *a,**kw:None)
++        pipe.tray=SimpleNamespace(mm_per_px=lambda *a:0.638)
++        def advance(*a,**kw):
++            pipe.sequence.done=list(range(3))
++            return (1,1,10,10)
++        with patch('assemvision.pipeline.time.monotonic',return_value=100.), \
++             patch('assemvision.pipeline.cv2.selectROI',side_effect=advance), \
++             patch('assemvision.pipeline.cv2.destroyWindow'):
++            pipe.inspect_integration()
++        assert i.workflow.started_at==original_start
++        assert '进度已变化' in i.reason
++        i.reset()
++        assert not i.results and i.workflow.started_at is None
++    print('test_ui_six_step 全部通过')
++
++
++if __name__=='__main__':
++    main()
+diff --git a/ui6-manifest.json b/ui6-manifest.json
+new file mode 100644
+index 0000000..c31cce3
+--- /dev/null
++++ b/ui6-manifest.json
+@@ -0,0 +1,42 @@
++{
++  "assemvision/ui/base.py": {
++    "before": "e092eead9a42ce7d0d5912d5927aa7cd91c2e82489aea3734da066ca280ddb27",
++    "after": "b46f7da669d5e8441de180beb615e0430790d5c1da5665d1e93e7cd348fff9a6"
++  },
++  "assemvision/ui/opencv_renderer.py": {
++    "before": "322b8c2609a7da39f719a53ec662a0d12efffea52ada4749b1f99ff03188e34e",
++    "after": "fcbd40d28f2fd63a769c459ad4d9b275d0042cf4d27b52823e3a822d74846e9f"
++  },
++  "assemvision/ui/operator_view.py": {
++    "before": null,
++    "after": "99eaac6523c06734b9c3902bb873a9a46b00c3908c899d13cceb6442173e46cd"
++  },
++  "assemvision/ui/workflow.py": {
++    "before": null,
++    "after": "d7cfbd2a6ca9bca978c29ee2421e2128988535db3c94a2b6ad997e8076ed0e8a"
++  },
++  "assemvision/integration.py": {
++    "before": "3a87e2359d6c964bee76711c8a52f1d7ccabbcba6b55f4497178ef081c7a2e07",
++    "after": "e74224044d4adf0cd353439a939c025f3f6ac5988f0b7210eb8c6750231ace4d"
++  },
++  "assemvision/pipeline.py": {
++    "before": "25b2ce17e4119a20b0cf7ecaf2cdbbba633a59eb7c35f8ca8704d4914c18962d",
++    "after": "909a880d2bd49dd1ed63144cf218f1bbcd2e418fb1bbf0dba6fc2f5dadd7d10a"
++  },
++  "tests/test_ui_six_step.py": {
++    "before": null,
++    "after": "6193f46e98920f9887d217963d4c41fdc62a7d6612427dc86270d985b13e5f82"
++  },
++  "tests/run_all.py": {
++    "before": "12287730fe00159b3c07e1b312a54ae4d714c6d1852db796d243030a7f19f48f",
++    "after": "de5f64d78b18d6c3baf5aa5417aca5e8597d2fdf1778ff9cb074cb9c848117a3"
++  },
++  "config/abcde_integration_pi_ui6_candidate.yaml": {
++    "before": null,
++    "after": "10d5112e889524a87d3c299c1264b529e5da636cdaa265e43e114641a74d669b"
++  },
++  "deploy/pi/run_ui6.sh": {
++    "before": null,
++    "after": "5ec5e908e3549f85529b61b6d5e68c9b37fcb0e66ac7807795600c64cce585a5"
++  }
++}
+\ No newline at end of file
